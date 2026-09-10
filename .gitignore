@@ -1,0 +1,15 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 本地备份
+src-tauri/icons/legacy-backup/
+
+# 环境与日志
+*.local
+*.log
+.DS_Store
