@@ -5,6 +5,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, ghcolors } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { Table, Image as ImageIcon, Plus, Minus } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { IS_ANDROID_APP } from '../lib/platform';
 import { FormatMenu, transformSlice, type MdOp, type MenuState } from './MarkdownTools';
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 
@@ -154,18 +155,20 @@ const InsertMenu = React.memo<{
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const onDown = (e: MouseEvent) => {
+    const onDown = (e: PointerEvent | MouseEvent) => {
       if (!ref.current?.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     const onScrollOrResize = () => onClose();
+    document.addEventListener('pointerdown', onDown);
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
     window.addEventListener('scroll', onScrollOrResize, true);
     window.addEventListener('resize', onScrollOrResize);
     return () => {
+      document.removeEventListener('pointerdown', onDown);
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('scroll', onScrollOrResize, true);
@@ -263,15 +266,27 @@ interface CellEdit {
 
 const BORDER_TOLERANCE = 5;
 
-export const MarkdownPreview = React.memo<MarkdownPreviewProps>(({
+/** 移动端顶栏触发的插入动作（插入点 = 文末） */
+export interface MarkdownPreviewHandle {
+  insertTable: () => void;
+  openImageModal: () => void;
+}
+
+export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle, MarkdownPreviewProps>(({
   content, isDarkMode, onChange, canUndo, canRedo, onUndo, onRedo, onScroller,
-}) => {
+}, ref) => {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<PreviewMenuState | null>(null);
   const [blankMenu, setBlankMenu] = useState<{ x: number; y: number; insertAt: number } | null>(null);
   const [imageModal, setImageModal] = useState<{ insertAt: number } | null>(null);
   const [tableAction, setTableAction] = useState<TableAction | null>(null);
   const [cellEdit, setCellEdit] = useState<CellEdit | null>(null);
+
+  /* 顶栏「插入表格/插入图片」入口（移动端编辑视图下也能插入） */
+  React.useImperativeHandle(ref, () => ({
+    insertTable: () => { if (onChange) onChange(insertBlockAt(content, content.length, BLANK_TABLE)); },
+    openImageModal: () => { setImageModal({ insertAt: content.length }); },
+  }), [content, onChange]);
 
   /* 剥离语法高亮主题的背景色，交给外层容器控制 */
   const cleanTheme = useMemo(() => {
@@ -733,6 +748,37 @@ export const MarkdownPreview = React.memo<MarkdownPreviewProps>(({
     });
   }, [content, onChange]);
 
+  /* 触屏表格工具条：先提交未保存的单元格值，再做结构变更（同一片段整体替换，偏移不失效） */
+  const handleTableBarAction = useCallback((kind: 'addRow' | 'delRow' | 'addCol' | 'delCol') => {
+    if (!cellEdit || !onChange) return;
+    const { start, end } = cellEdit.range;
+    const { row, col } = cellEdit;
+    let seg = content.slice(start, end);
+    const committed = parseTableSrc(seg);
+    if (committed && committed.rows[row]) {
+      committed.rows[row][col] = cellEdit.value;
+      seg = serializeTableSrc(committed);
+    }
+    const parsed = parseTableSrc(seg);
+    if (parsed) {
+      const cols = parsed.rows[0]?.length ?? 0;
+      if (kind === 'addRow') parsed.rows.splice(row + 1, 0, Array.from({ length: cols }, () => ''));
+      if (kind === 'delRow' && parsed.rows.length > 1) parsed.rows.splice(row, 1);
+      if (kind === 'addCol') {
+        parsed.rows.forEach(r => r.splice(col + 1, 0, ''));
+        parsed.aligns.splice(col + 1, 0, '---');
+      }
+      if (kind === 'delCol' && cols > 1) {
+        parsed.rows.forEach(r => r.splice(col, 1));
+        parsed.aligns.splice(col, 1);
+      }
+      seg = serializeTableSrc(parsed);
+    }
+    setCellEdit(null);
+    setTableAction(null);
+    onChange(content.slice(0, start) + seg + content.slice(end));
+  }, [cellEdit, content, onChange]);
+
   return (
     <div
       ref={(el) => {
@@ -777,6 +823,38 @@ export const MarkdownPreview = React.memo<MarkdownPreviewProps>(({
           >
             {isInsert ? <Plus size={13} /> : <Minus size={13} />}
           </button>
+        );
+      })()}
+
+      {/* 触屏表格结构工具条：点选单元格时浮出（取代悬停边线的 +/− 按钮） */}
+      {cellEdit && onChange && IS_ANDROID_APP && (() => {
+        const actions = [
+          { label: '行+', kind: 'addRow' }, { label: '行−', kind: 'delRow' },
+          { label: '列+', kind: 'addCol' }, { label: '列−', kind: 'delCol' },
+        ] as const;
+        return (
+          <div
+            data-md-table-tools
+            onPointerDown={(e) => e.preventDefault()}
+            className={cn(
+              'fixed z-[96] flex items-center rounded-lg border shadow-lg overflow-hidden',
+              isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
+            )}
+            style={{ left: Math.max(4, cellEdit.left), top: Math.max(4, cellEdit.top - 38) }}
+          >
+            {actions.map(({ label, kind }) => (
+              <button
+                key={kind}
+                onClick={() => handleTableBarAction(kind)}
+                className={cn(
+                  'px-2.5 h-8 text-[11px] font-medium transition-colors',
+                  isDarkMode ? 'text-zinc-300 active:bg-zinc-700' : 'text-zinc-600 active:bg-zinc-100'
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         );
       })()}
 
@@ -836,7 +914,7 @@ export const MarkdownPreview = React.memo<MarkdownPreviewProps>(({
       )}
     </div>
   );
-});
+}));
 
 MarkdownPreview.displayName = 'MarkdownPreview';
 

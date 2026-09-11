@@ -88,3 +88,19 @@
 ## 8. 测试方式
 
 /android-dev（android-emulator MCP）：构建 → 安装 → 启动 → `android_screenshot` 逐屏核对 + 坐标点击/滑动模拟真实操作；覆盖欢迎页、编辑、预览、格式化 sheet、TabSheet、图片插入、平板分屏。桌面 `npm run tauri:dev` 冒烟确认零回归。
+
+## 9. 实施记录（2026-09-12 完成）
+
+- 构建链路：Rust android targets + NDK 29 + Gradle（`dl.google.com` 被墙，根 `build.gradle.kts` 加入阿里云镜像）；`tauri android build --apk --debug` 产出 universal debug APK。
+- **文件访问落地**（与原设计的差异）：fs 插件对 picker 返回的 content URI **只有读授权**，`writeFile` 报 Permission Denial（需 MANAGE_DOCUMENTS / grantUriPermission）。最终方案：`MainActivity.kt` 提供 `HeidBridge` JS 桥——`openDocs`（ACTION_OPEN_DOCUMENT 多选 + takePersistableUriPermission 持久化读写授权）、`createDoc`（ACTION_CREATE_DOCUMENT 另存为）、`writeBase64`（直写 openOutputStream）、`displayName`（SAF 显示名解析）、`exitApp`（window.destroy 在 Android 不可用）。前端 `handleOpenFile` / `saveFileToDisk` 的 Android 分支统一走该桥；fs 插件仅负责读取。
+- **返回键**：`handleBackNavigation=false` + OnBackPressedCallback → JS `heid-back` 事件，逐层关闭弹层后走未保存退出确认（WryActivity 默认行为会绕过确认直接退出）。
+- **安全区**：edge-to-edge 下通过 `ViewCompat.setOnApplyWindowInsetsListener` 把状态栏/手势条高度注入 CSS 变量 `--heid-safe-top/bottom`（`HeidBridge.top/bottom` + `heid-insets` 事件）。
+- **格式化入口**：安卓 WebView 长按只触发原生文本选择菜单，`contextmenu` 不可靠；改为选区非空时浮出「格式化」悬浮按钮（EditorView.updateListener + coordsAtPos），点击弹出既有 FormatMenu。
+- 实测通过：手机布局/平板布局、主题切换、TabSheet、溢出菜单、SAF 打开/保存写回（磁盘字节验证）、返回键确认与退出、跨重启会话恢复、软键盘自适应（interactive-widget=resizes-content）、桌面 tauri:dev 冒烟与 vitest 32 项。
+
+## 10. 已知问题（后续版本）
+
+1. 经 Downloads provider 以 `msf:` 形式返回的 URI，显示名解析可能退化为数字 id（raw: 形式正常）。
+2. 原生文本选择菜单与「格式化」浮按钮可能短暂重叠；BACK 在选择模式下优先被系统消费。
+3. SAF 持久化授权上限（128/512 条 URI），超限后最早的授权被系统回收，对应标签恢复时跳过。
+4. 外部修改 diff（桌面特性）安卓版不实现；后续可用 MediaStore API 或自定义 FileObserver 评估。

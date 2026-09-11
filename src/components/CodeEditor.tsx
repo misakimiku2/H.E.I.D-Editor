@@ -7,14 +7,22 @@ import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/
 import { Tag, tags as t, highlightTree, type Highlighter } from '@lezer/highlight';
 import type { Tree } from '@lezer/common';
 import { EditorState, Extension, StateEffect } from '@codemirror/state';
+import { Type } from 'lucide-react';
+import { cn } from '../lib/utils';
 import { FormatMenu, INLINE_WRAPS, transformSlice, type MdOp } from './MarkdownTools';
 import {
   vsCodeDarkTheme, vsCodeLightTheme,
   vsCodeDarkHighlightStyle, vsCodeLightHighlightStyle,
   getLanguageExtension,
 } from '../lib/codemirror';
+import { IS_ANDROID_APP } from '../lib/platform';
 
 const CODE_FONT = '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace';
+
+/* 小地图/粘性滚动：桌面始终启用（零回归）；安卓按 ≥1024px（平板）启用，手机关闭 */
+function codeMapEnabled(): boolean {
+  return !IS_ANDROID_APP || window.matchMedia('(min-width: 1024px)').matches;
+}
 
 /* ---------- sticky scroll helpers (extracted from CanvasWorkspace) ---------- */
 
@@ -179,6 +187,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   /* markdown 右键格式化后，下一次 onChange 以 major 记入撤销历史 */
   const majorNextRef = useRef(false);
   const [mdMenu, setMdMenu] = useState<{ x: number; y: number; from: number; to: number; text: string } | null>(null);
+  /* 触屏：选区非空时浮出「格式化」入口（长按 contextmenu 在安卓上不可靠） */
+  const [touchFmtBtn, setTouchFmtBtn] = useState<{ x: number; y: number; from: number; to: number } | null>(null);
 
   /* line-number click & drag selection */
   const setupLineNumberClick = useCallback((view: EditorView) => {
@@ -971,14 +981,16 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
     minimapRef.current = null;
     fixSelectionLayer(view);
-    setupLineNumberClick(view);
-    setupStickyScroll(view);
-    setupMinimap(view);
+    if (!IS_ANDROID_APP) setupLineNumberClick(view);
+    if (codeMapEnabled()) {
+      setupStickyScroll(view);
+      setupMinimap(view);
+    }
     onCreateEditor?.(view);
   }, [fixSelectionLayer, setupLineNumberClick, setupStickyScroll, setupMinimap, onCreateEditor]);
 
-  /* re-setup features on theme change */
-  useEffect(() => {
+  /* 拆掉并按当前断点重建粘性滚动/小地图（主题切换与平板旋转断点共用） */
+  const reinstallCodeMapFeatures = useCallback(() => {
     const view = viewReadyRef.current;
     if (!view) return;
     cleanupFns.current.forEach(fn => fn());
@@ -996,9 +1008,24 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       minimapRafRef.current = null;
     }
     fixSelectionLayer(view);
-    setupStickyScroll(view);
-    setupMinimap(view);
-  }, [isDarkMode, fixSelectionLayer, setupStickyScroll, setupMinimap]);
+    if (codeMapEnabled()) {
+      setupStickyScroll(view);
+      setupMinimap(view);
+    }
+  }, [fixSelectionLayer, setupStickyScroll, setupMinimap]);
+
+  /* re-setup features on theme change */
+  useEffect(() => {
+    reinstallCodeMapFeatures();
+  }, [isDarkMode, reinstallCodeMapFeatures]);
+
+  /* 安卓平板旋转/分屏跨越 1024px 断点时重建小地图与粘性滚动 */
+  useEffect(() => {
+    if (!IS_ANDROID_APP) return;
+    const mq = window.matchMedia('(min-width: 1024px)');
+    mq.addEventListener('change', reinstallCodeMapFeatures);
+    return () => mq.removeEventListener('change', reinstallCodeMapFeatures);
+  }, [reinstallCodeMapFeatures]);
 
   useEffect(() => {
     return () => {
@@ -1056,6 +1083,15 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     if (language === 'markdown') {
       exts.push(EditorView.lineWrapping);
     }
+    /* 触屏选区跟随：非空选区时在其上方浮出格式化入口按钮 */
+    exts.push(EditorView.updateListener.of((u) => {
+      if (!u.selectionSet && !u.docChanged) return;
+      const sel = u.state.selection.main;
+      if (sel.empty) { setTouchFmtBtn(null); return; }
+      const coords = u.view.coordsAtPos(sel.head);
+      if (!coords) { setTouchFmtBtn(null); return; }
+      setTouchFmtBtn({ x: coords.left, y: coords.top, from: sel.from, to: sel.to });
+    }));
     const langExt = getLanguageExtension(language);
     if (langExt) exts.push(langExt);
     if (!isLargeFile) {
@@ -1089,7 +1125,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         style={{
           height: '100%',
           width: '100%',
-          fontSize: '13px',
+          fontSize: IS_ANDROID_APP ? '14px' : '13px',
         }}
       />
       {mdMenu && markdownMenu && (
@@ -1103,6 +1139,28 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           onApply={applyEditorMdOp}
           onClose={() => setMdMenu(null)}
         />
+      )}
+      {IS_ANDROID_APP && markdownMenu && touchFmtBtn && !mdMenu && (
+        <button
+          onClick={() => {
+            const view = viewReadyRef.current;
+            if (!view) return;
+            const { from, to, x, y } = touchFmtBtn;
+            setMdMenu({ x, y, from, to, text: view.state.sliceDoc(from, to) });
+            setTouchFmtBtn(null);
+          }}
+          className={cn(
+            "fixed z-[85] h-9 px-3 rounded-full border shadow-lg flex items-center gap-1.5 text-xs font-medium select-none",
+            isDarkMode ? "border-zinc-600 bg-zinc-800 text-zinc-200" : "border-zinc-300 bg-white text-zinc-700"
+          )}
+          style={{
+            left: Math.max(8, Math.min(touchFmtBtn.x - 28, window.innerWidth - 110)),
+            top: Math.max(8, touchFmtBtn.y - 44),
+          }}
+        >
+          <Type size={14} />
+          格式化
+        </button>
       )}
     </div>
   );

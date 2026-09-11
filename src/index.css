@@ -45,3 +45,34 @@ body {
 .cm-scroller::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* ---- 移动端适配 ---- */
+
+/* 去掉触摸点按高亮 */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 安全区：优先用 MainActivity 注入的 CSS 变量，回退到 env() */
+.safe-top {
+  padding-top: var(--heid-safe-top, env(safe-area-inset-top, 0px));
+}
+.safe-bottom {
+  padding-bottom: var(--heid-safe-bottom, env(safe-area-inset-bottom, 0px));
+}
+
+/* 底部抽屉动画 */
+@keyframes heid-sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.heid-sheet-panel {
+  animation: heid-sheet-up 0.18s ease-out;
+}
+@keyframes heid-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.heid-fade-in {
+  animation: heid-fade-in 0.15s ease-out;
+}

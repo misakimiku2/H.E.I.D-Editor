@@ -8,7 +8,7 @@ import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
 import { cn } from './lib/utils';
 import { CodeEditor } from './components/CodeEditor';
-import { MarkdownPreview } from './components/MarkdownPreview';
+import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
 import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
 import { detectLanguageFromPath, LANGUAGE_LABELS } from './lib/codemirror';
@@ -18,6 +18,11 @@ import {
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { loadSessionState, saveSessionState, type SessionMdView } from './lib/session';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath } from './lib/platform';
+import { useMediaQuery } from './hooks/useMediaQuery';
+import { TopAppBar } from './components/mobile/TopAppBar';
+import { BottomToolbar } from './components/mobile/BottomToolbar';
+import { TabSheet } from './components/mobile/TabSheet';
 
 /* ---------- types ---------- */
 
@@ -60,11 +65,68 @@ interface OpenedFile {
   handle: FileSystemFileHandle | null;
 }
 
+/* ---- Android SAF 桥（MainActivity 提供）：系统文档选择器 + content URI 写回 ----
+   fs 插件对 picker 返回的 content URI 只有读授权（写报 Permission Denial），
+   因此安卓端打开/另存/写盘统一走原生 SAF 流程，读写授权经 takePersistableUriPermission 持久化。 */
+
+interface AndroidSafFile {
+  uri: string;
+  name: string;
+}
+
+function androidPickFiles(): Promise<AndroidSafFile[] | null> {
+  return new Promise((resolve) => {
+    const handler = (e: Event) => {
+      window.removeEventListener('heid-saf', handler);
+      const d = (e as CustomEvent<{ kind: string; canceled?: boolean; files?: AndroidSafFile[] }>).detail;
+      if (d?.kind !== 'open' || d.canceled || !d.files?.length) return resolve(null);
+      resolve(d.files);
+    };
+    window.addEventListener('heid-saf', handler);
+    (window as any).HeidBridge?.openDocs?.('[]');
+  });
+}
+
+function androidCreateDoc(name: string, mime: string): Promise<AndroidSafFile | null> {
+  return new Promise((resolve) => {
+    const handler = (e: Event) => {
+      window.removeEventListener('heid-saf', handler);
+      const d = (e as CustomEvent<{ kind: string; canceled?: boolean; file?: AndroidSafFile | null }>).detail;
+      if (d?.kind !== 'create' || d.canceled || !d.file) return resolve(null);
+      resolve(d.file);
+    };
+    window.addEventListener('heid-saf', handler);
+    (window as any).HeidBridge?.createDoc?.(name, mime);
+  });
+}
+
+async function androidWriteUri(uri: string, content: string): Promise<boolean> {
+  const bridge = (window as any).HeidBridge;
+  if (!bridge?.writeBase64) return false;
+  const bytes = new TextEncoder().encode(content);
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return bridge.writeBase64(uri, btoa(binary)) === true;
+}
+
 async function readLocalPath(path: string): Promise<OpenedFile> {
   const { readFile } = await import('@tauri-apps/plugin-fs');
   const bytes = await readFile(path);
   const content = new TextDecoder().decode(bytes);
-  const name = path.split(/[\\/]/).pop() || path;
+  let name = displayNameFromPath(path);
+  /* 数字型 content URI（如 content://media/.../file/1000000018）解析不出可读名，走原生桥查 DISPLAY_NAME */
+  if (path.startsWith('content://')) {
+    const bridge = (window as any).HeidBridge;
+    if (bridge?.displayName) {
+      try {
+        const resolved = bridge.displayName(path);
+        if (resolved) name = resolved;
+      } catch { /* 桥不可用时沿用解析结果 */ }
+    }
+  }
   return { content, name, path, handle: null };
 }
 
@@ -119,21 +181,45 @@ async function writeLocalPath(path: string, content: string): Promise<void> {
 
 /* saveAs = true 时忽略已有路径，总是弹出保存对话框另选位置 */
 async function saveFileToDisk(tab: FileTab, content: string, saveAs = false): Promise<SaveResult> {
-  const encoder = new TextEncoder();
-  if (isTauri) {
-    const { save } = await import('@tauri-apps/plugin-dialog');
-    const target = !saveAs && tab.path
-      ? tab.path
-      : await save({ defaultPath: tab.path ?? tab.title });
-    if (!target) return { ok: false, savedPath: null };
-    try {
-      await writeLocalPath(target, content);
-      return { ok: true, savedPath: target };
-    } catch (e) {
-      console.error('Save failed:', e);
+  /* 安卓：写盘走 SAF 桥；另存为/无路径时先经系统新建文档取得可写 URI */
+  if (IS_ANDROID_APP) {
+    let target = tab.path;
+    if (saveAs || !target) {
+      const created = await androidCreateDoc(tab.title, 'text/plain');
+      if (!created) return { ok: false, savedPath: null };
+      target = created.uri;
+    }
+    const ok = await androidWriteUri(target, content);
+    if (!ok) {
+      alert('保存失败：无法写入所选文档');
       return { ok: false, savedPath: null };
     }
+    return { ok: true, savedPath: target };
   }
+  const encoder = new TextEncoder();
+  if (!saveAs && tab.path && isTauri) {
+      try {
+        await writeLocalPath(tab.path, content);
+        return { ok: true, savedPath: tab.path };
+      } catch (e) {
+        console.error('Save failed:', e);
+        alert(`保存失败：${String(e)}`);
+        return { ok: false, savedPath: null };
+      }
+    }
+    if (isTauri) {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const target = await save({ defaultPath: tab.title });
+      if (!target) return { ok: false, savedPath: null };
+      try {
+        await writeLocalPath(target, content);
+        return { ok: true, savedPath: target };
+      } catch (e) {
+        console.error('Save failed:', e);
+        alert(`保存失败：${String(e)}`);
+        return { ok: false, savedPath: null };
+      }
+    }
   if (!saveAs && tab.handle) {
     try {
       const writable = await (tab.handle as any).createWritable();
@@ -274,6 +360,10 @@ export default function App() {
 
   const isDarkMode = themeMode === 'dark' || (themeMode === 'system' && systemDark);
 
+  /* 移动端形态：安卓且窄屏（手机）采用专属布局；安卓宽屏（平板）沿用桌面布局 */
+  const isNarrow = useMediaQuery(NARROW_QUERY);
+  const isPhone = IS_ANDROID_APP && isNarrow;
+
   const [tabs, setTabs] = useState<FileTab[]>(() => [
     {
       id: nextTabId(),
@@ -292,10 +382,13 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  /* 移动端：标签页抽屉开合 */
+  const [tabSheetOpen, setTabSheetOpen] = useState(false);
   /* ---- 外部 Diff：每文件时间线（内存态，关闭最后一个引用该文件的标签页即丢弃） ---- */
   const [diffTimelines, setDiffTimelines] = useState<Record<string, ExternalDiffEntry[]>>({});
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const previewRef = useRef<MarkdownPreviewHandle | null>(null);
   const historiesRef = useRef<Map<string, TabHistory>>(new Map());
   /* 保存进行中标记（含等待原生对话框期间），防止重复触发导致连续弹出对话框 */
   const savingRef = useRef(false);
@@ -372,9 +465,9 @@ export default function App() {
 
   /* ---- 外部 Diff：监听管理 + 变更应用 ---- */
 
-  /* 当前被标签页引用的真实文件路径（去重）；浏览器模式不监听 */
+  /* 当前被标签页引用的真实文件路径（去重）；浏览器模式与安卓（fs watch 不支持且 SAF 无真实路径）不监听 */
   const watchedPaths = useMemo(
-    () => (isTauri ? Array.from(new Set(tabs.flatMap(t => (t.path ? [t.path] : [])))) : []),
+    () => (isTauri && !IS_ANDROID_APP ? Array.from(new Set(tabs.flatMap(t => (t.path ? [t.path] : [])))) : []),
     [tabs]
   );
 
@@ -398,7 +491,7 @@ export default function App() {
 
   const { updateKnownDiskContent } = useExternalFileWatcher({
     paths: watchedPaths,
-    enabled: isTauri,
+    enabled: isTauri && !IS_ANDROID_APP,
     onExternalChange: handleExternalChange,
   });
 
@@ -631,18 +724,41 @@ export default function App() {
     }));
   }, [recordContentChange]);
 
-  const closeTab = useCallback((tabId: string) => {
-    const tab = tabs.find(t => t.id === tabId);
-    if (!tab) return;
-    if (tab.isDirty) {
-      if (!window.confirm(`"${tab.title}" 有未保存的更改，确定关闭吗？`)) return;
+  /* 关闭单个标签前的丢弃确认：Tauri 环境走原生 ask 对话框
+    （WebView 对 window.confirm 的支持不可靠，安卓端同样） */
+  const confirmDiscardTab = useCallback(async (title: string): Promise<boolean> => {
+    const message = `"${title}" 有未保存的更改，确定关闭吗？`;
+    if (isTauri) {
+      const { ask } = await import('@tauri-apps/plugin-dialog');
+      return ask(message, { title: 'Nexus Editor', kind: 'warning' });
     }
+    return window.confirm(message);
+  }, []);
+
+  const closeTab = useCallback(async (tabId: string) => {
+    const tab = tabsRef.current.find(t => t.id === tabId);
+    if (!tab) return;
+    if (tab.isDirty && !(await confirmDiscardTab(tab.title))) return;
     historiesRef.current.delete(tabId);
     setTabs(prev => prev.filter(t => t.id !== tabId));
-  }, [tabs]);
+  }, [confirmDiscardTab]);
 
   const handleOpenFile = useCallback(async () => {
-    const result = await pickAndReadFile();
+    /* 安卓：系统文档选择器（支持多选），逐个复用 openPathIntoTab */
+    if (IS_ANDROID_APP) {
+      const picked = await androidPickFiles();
+      if (!picked) return;
+      for (const f of picked) await openPathIntoTab(f.uri);
+      return;
+    }
+    let result: OpenedFile | null = null;
+    try {
+      result = await pickAndReadFile();
+    } catch (e: any) {
+      console.error('打开文件失败:', e);
+      alert(`无法打开文件：${e?.message ?? e}`);
+      return;
+    }
     if (!result) return;
     const { content, name, path, handle } = result;
     const language = detectLanguageFromPath(name);
@@ -697,7 +813,7 @@ export default function App() {
       const result = await saveFileToDisk(tab, tab.content, saveAs);
       if (result.ok) {
         const savedPath = result.savedPath ?? tab.path;
-        const savedTitle = savedPath ? savedPath.split(/[\\/]/).pop() || tab.title : tab.title;
+        const savedTitle = savedPath ? displayNameFromPath(savedPath) : tab.title;
         setTabs(prev => prev.map(t => t.id === tab.id
           ? { ...t, originalContent: t.content, isDirty: false, path: savedPath, title: savedTitle }
           : t
@@ -814,6 +930,31 @@ export default function App() {
     };
   }, []);
 
+  /* ---- 安卓系统返回键：逐层关闭弹层，最后走与桌面一致的未保存退出确认 ---- */
+  const overlayStateRef = useRef({ tabSheetOpen, menuOpen, aboutOpen });
+  overlayStateRef.current = { tabSheetOpen, menuOpen, aboutOpen };
+  useEffect(() => {
+    if (!IS_ANDROID_APP) return;
+    const onBack = () => {
+      const o = overlayStateRef.current;
+      if (o.tabSheetOpen) { setTabSheetOpen(false); return; }
+      if (o.menuOpen) { setMenuOpen(false); return; }
+      if (o.aboutOpen) { setAboutOpen(false); return; }
+      void (async () => {
+        if (await confirmWindowCloseRef.current()) {
+          /* window.destroy 在 Android 上不可用，走原生桥退出 */
+          if (IS_ANDROID_APP) {
+            (window as any).HeidBridge?.exitApp?.();
+          } else {
+            try { await getCurrentWindow().destroy(); } catch (e) { console.error('退出失败:', e); }
+          }
+        }
+      })();
+    };
+    window.addEventListener('heid-back', onBack);
+    return () => window.removeEventListener('heid-back', onBack);
+  }, []);
+
   /* 浏览器模式兜底：有未保存修改时拦截刷新/关闭（浏览器原生离开确认） */
   useEffect(() => {
     if (isTauri) return;
@@ -874,10 +1015,20 @@ export default function App() {
 
   const isMarkdown = activeTab?.language === 'markdown';
 
+  /* 手机端无分屏：split 折叠为预览，由底部工具栏在编辑/预览间切换 */
+  const effectiveView: MdViewMode = activeTab
+    ? (isPhone && activeTab.mdView === 'split' ? 'preview' : activeTab.mdView)
+    : 'edit';
+  const toggleMdView = () => {
+    if (!activeTab) return;
+    setMdView(effectiveView === 'preview' ? 'edit' : 'preview');
+  };
+
   const renderMdPreview = () => {
     if (!activeTab) return null;
     return (
       <MarkdownPreview
+        ref={previewRef}
         content={activeTab.content}
         isDarkMode={isDarkMode}
         onChange={activeTab.readOnly ? undefined : (v) => updateTabContent(activeTab.id, v, { major: true })}
@@ -911,10 +1062,31 @@ export default function App() {
 
   return (
     <div className={cn(
-      "h-screen flex flex-col overflow-hidden",
+      "h-dvh flex flex-col overflow-hidden",
       isDarkMode ? "bg-zinc-900 text-zinc-200" : "bg-zinc-50 text-zinc-800"
     )}>
-      {/* title bar：logo + 标签页 + 新建 + 窗口控制（空白处可拖拽移动，双击最大化） */}
+      {/* 标题栏：手机端用 TopAppBar 取代自绘标题栏 + 菜单栏；桌面与安卓平板保留原布局 */}
+      {isPhone ? (
+        <TopAppBar
+          isDarkMode={isDarkMode}
+          title={activeTab?.title ?? 'H.E.I.D'}
+          isDirty={!!activeTab?.isDirty}
+          isMarkdown={!!isMarkdown}
+          saving={saving}
+          tabCount={tabs.length}
+          themeMode={themeMode}
+          onThemeMode={setThemeMode}
+          onOpenTabs={() => setTabSheetOpen(true)}
+          onNew={handleNewFile}
+          onOpen={handleOpenFile}
+          onSave={handleSave}
+          onSaveAs={handleSaveAs}
+          onInsertTable={() => previewRef.current?.insertTable()}
+          onInsertImage={() => previewRef.current?.openImageModal()}
+          onCloseTab={() => activeTab && void closeTab(activeTab.id)}
+          onAbout={() => setAboutOpen(true)}
+        />
+      ) : (
       <div
         data-tauri-drag-region
         className={cn(
@@ -954,8 +1126,11 @@ export default function App() {
               <FileText size={12} className="shrink-0 opacity-60" />
               <span className="truncate">{tab.title}</span>
               <button
-                onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-                className="opacity-0 group-hover:opacity-100 p-0.5 rounded-sm hover:bg-zinc-500/20 transition-all shrink-0"
+                onClick={(e) => { e.stopPropagation(); void closeTab(tab.id); }}
+                className={cn(
+                  "p-0.5 rounded-sm hover:bg-zinc-500/20 transition-all shrink-0",
+                  IS_TOUCH_PRIMARY ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                )}
               >
                 <X size={10} />
               </button>
@@ -977,10 +1152,12 @@ export default function App() {
 
         <div className="flex-1 h-full" data-tauri-drag-region />
 
-        <WindowControls isDarkMode={isDarkMode} />
+        {!IS_ANDROID_APP && <WindowControls isDarkMode={isDarkMode} />}
       </div>
+      )}
 
-      {/* 菜单栏 */}
+      {/* 菜单栏（手机端由顶栏取代） */}
+      {!isPhone && (
       <div
         ref={menuRef}
         className={cn(
@@ -1167,13 +1344,14 @@ export default function App() {
           </div>
         )}
       </div>
+      )}
 
       {/* editor area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {activeTab ? (
           <>
             {/* markdown 分屏（左预览右源码）/ 预览 / 编辑器 */}
-            {isMarkdown && activeTab.mdView === 'split' ? (
+            {isMarkdown && effectiveView === 'split' ? (
               <div className="flex flex-1 overflow-hidden">
                 <div className="flex-1 min-w-0 overflow-hidden">
                   {renderMdPreview()}
@@ -1183,7 +1361,7 @@ export default function App() {
                   {renderEditor()}
                 </div>
               </div>
-            ) : isMarkdown && activeTab.mdView === 'preview' ? (
+            ) : isMarkdown && effectiveView === 'preview' ? (
               <div className="flex-1 overflow-hidden">
                 {renderMdPreview()}
               </div>
@@ -1193,8 +1371,8 @@ export default function App() {
               </div>
             )}
 
-            {/* bottom status bar：文件信息 + 还原 + 模式 */}
-            <div className={cn(
+            {/* bottom status bar（手机端隐藏）：文件信息 + 还原 + 模式 */}
+            {!isPhone && (<div className={cn(
               "h-6 border-t flex items-center px-4 gap-2 text-[11px] shrink-0",
               isDarkMode ? "border-zinc-700 bg-zinc-800 text-zinc-500" : "border-zinc-200 bg-zinc-100 text-zinc-500"
             )}>
@@ -1220,7 +1398,7 @@ export default function App() {
                   <RotateCcw size={10} /> 还原
                 </button>
               )}
-            </div>
+            </div>)}
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center p-6">
@@ -1302,7 +1480,7 @@ export default function App() {
                 "mt-3 px-2.5 py-0.5 rounded-full text-[10px] font-medium border",
                 isDarkMode ? "border-zinc-600 text-zinc-400" : "border-zinc-300 text-zinc-500"
               )}>
-                版本 1.0.0
+                版本 1.1.0
               </div>
               <p className={cn(
                 "mt-4 text-xs leading-relaxed",
@@ -1322,6 +1500,36 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* 手机端底部工具栏（拇指区，取代键盘快捷键） */}
+      {isPhone && activeTab && (
+        <BottomToolbar
+          isDarkMode={isDarkMode}
+          isDirty={activeTab.isDirty}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          saving={saving}
+          isMarkdown={!!isMarkdown}
+          view={effectiveView === 'preview' ? 'preview' : 'edit'}
+          onOpen={handleOpenFile}
+          onSave={handleSave}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          onToggleView={toggleMdView}
+        />
+      )}
+
+      {/* 移动端标签页抽屉 */}
+      <TabSheet
+        open={tabSheetOpen}
+        isDarkMode={isDarkMode}
+        onClose={() => setTabSheetOpen(false)}
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onSelect={setActiveTabId}
+        onCloseTab={(id) => { void closeTab(id); }}
+        onNew={handleNewFile}
+      />
     </div>
   );
 }

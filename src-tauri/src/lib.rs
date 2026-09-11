@@ -1,13 +1,29 @@
-use tauri::{Manager, WindowEvent};
+/// 任务栏/窗口图标跟随系统深浅色主题（仅桌面：移动端无 set_icon / ThemeChanged API）
+#[cfg(desktop)]
+mod theme_icon {
+    use tauri::{Manager, WindowEvent};
 
-const ICON_DARK: &[u8] = include_bytes!("../icons/icon-dark.png");
-const ICON_LIGHT: &[u8] = include_bytes!("../icons/icon-light.png");
+    const ICON_DARK: &[u8] = include_bytes!("../icons/icon-dark.png");
+    const ICON_LIGHT: &[u8] = include_bytes!("../icons/icon-light.png");
 
-/// 任务栏/窗口图标跟随系统深浅色主题
-fn apply_theme_icon(window: &tauri::WebviewWindow, dark: bool) -> tauri::Result<()> {
-    let bytes: &[u8] = if dark { ICON_DARK } else { ICON_LIGHT };
-    window.set_icon(tauri::image::Image::from_bytes(bytes)?)?;
-    Ok(())
+    fn apply(window: &tauri::WebviewWindow, dark: bool) -> tauri::Result<()> {
+        let bytes: &[u8] = if dark { ICON_DARK } else { ICON_LIGHT };
+        window.set_icon(tauri::image::Image::from_bytes(bytes)?)?;
+        Ok(())
+    }
+
+    pub fn setup(app: &tauri::AppHandle) -> tauri::Result<()> {
+        let window = app.get_webview_window("main").expect("main window missing");
+        let dark = matches!(window.theme(), Ok(tauri::Theme::Dark));
+        apply(&window, dark)?;
+        let themed = window.clone();
+        window.on_window_event(move |event| {
+            if let WindowEvent::ThemeChanged(theme) = event {
+                let _ = apply(&themed, *theme == tauri::Theme::Dark);
+            }
+        });
+        Ok(())
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -16,15 +32,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let window = app.get_webview_window("main").expect("main window missing");
-            let dark = matches!(window.theme(), Ok(tauri::Theme::Dark));
-            apply_theme_icon(&window, dark)?;
-            let themed = window.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::ThemeChanged(theme) = event {
-                    let _ = apply_theme_icon(&themed, *theme == tauri::Theme::Dark);
-                }
-            });
+            #[cfg(desktop)]
+            theme_icon::setup(app.handle())?;
             Ok(())
         })
         .run(tauri::generate_context!())

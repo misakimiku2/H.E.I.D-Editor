@@ -175,20 +175,22 @@ export const FormatMenu = React.memo<{
 }>(({ menu, isDarkMode, canUndo, canRedo, onUndo, onRedo, onApply, onClose }) => {
   const ref = useRef<HTMLDivElement | null>(null);
 
-  /* 点击外部 / Esc / 滚动 / 调整窗口时关闭 */
+  /* 点击外部（pointerdown 覆盖触屏）/ Esc / 滚动 / 调整窗口时关闭 */
   useEffect(() => {
-    const onDown = (e: MouseEvent) => {
+    const onDown = (e: PointerEvent | MouseEvent) => {
       if (!ref.current?.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     const onScrollOrResize = () => onClose();
+    document.addEventListener('pointerdown', onDown);
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
     window.addEventListener('scroll', onScrollOrResize, true);
     window.addEventListener('resize', onScrollOrResize);
     return () => {
+      document.removeEventListener('pointerdown', onDown);
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('scroll', onScrollOrResize, true);
@@ -196,7 +198,7 @@ export const FormatMenu = React.memo<{
     };
   }, [onClose]);
 
-  /* 视口内夹紧，避免菜单溢出屏幕 */
+  /* 视口内夹紧，避免菜单溢出屏幕；小屏（横屏手机）允许内部滚动 */
   const MENU_W = 272;
   const MENU_H = 395;
   const left = Math.max(4, Math.min(menu.x, window.innerWidth - MENU_W - 8));
@@ -209,10 +211,10 @@ export const FormatMenu = React.memo<{
     <div
       ref={ref}
       className={cn(
-        "fixed z-[90] rounded-xl border shadow-xl p-2 flex flex-col gap-1.5 select-none",
+        "fixed z-[90] rounded-xl border shadow-xl p-2 flex flex-col gap-1.5 select-none overflow-y-auto",
         isDarkMode ? "border-zinc-700 bg-zinc-800" : "border-zinc-200 bg-white"
       )}
-      style={{ left, top, width: MENU_W }}
+      style={{ left, top, width: MENU_W, maxHeight: 'calc(100dvh - 8px)' }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {(onUndo || onRedo) && (

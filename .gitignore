@@ -13,3 +13,4 @@ src-tauri/icons/legacy-backup/
 *.local
 *.log
 .DS_Store
+.zcode/
