@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  FileText, Code2, X, Plus, FolderOpen, Save, RotateCcw,
+  FileText, Code2, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
   GitCompare, Columns2,
 } from 'lucide-react';
@@ -16,11 +16,13 @@ import {
   appendEntry, removeEntry, revertEntry, type ExternalDiffEntry,
 } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
+import { loadSessionState, saveSessionState, type SessionMdView } from './lib/session';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 /* ---------- types ---------- */
 
-/* markdown 标签页的视图模式：编辑 / 分屏（左预览右源码）/ 预览 */
-type MdViewMode = 'edit' | 'split' | 'preview';
+/* markdown 标签页的视图模式：编辑 / 分屏（左预览右源码）/ 预览（持久化词汇表定义于 lib/session） */
+type MdViewMode = SessionMdView;
 
 interface FileTab {
   id: string;
@@ -115,11 +117,14 @@ async function writeLocalPath(path: string, content: string): Promise<void> {
   await writeFile(path, new TextEncoder().encode(content));
 }
 
-async function saveFileToDisk(tab: FileTab, content: string): Promise<SaveResult> {
+/* saveAs = true 时忽略已有路径，总是弹出保存对话框另选位置 */
+async function saveFileToDisk(tab: FileTab, content: string, saveAs = false): Promise<SaveResult> {
   const encoder = new TextEncoder();
   if (isTauri) {
     const { save } = await import('@tauri-apps/plugin-dialog');
-    const target = tab.path ?? await save({ defaultPath: tab.title });
+    const target = !saveAs && tab.path
+      ? tab.path
+      : await save({ defaultPath: tab.path ?? tab.title });
     if (!target) return { ok: false, savedPath: null };
     try {
       await writeLocalPath(target, content);
@@ -129,7 +134,7 @@ async function saveFileToDisk(tab: FileTab, content: string): Promise<SaveResult
       return { ok: false, savedPath: null };
     }
   }
-  if (tab.handle) {
+  if (!saveAs && tab.handle) {
     try {
       const writable = await (tab.handle as any).createWritable();
       await writable.write(encoder.encode(content));
@@ -292,6 +297,8 @@ export default function App() {
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const historiesRef = useRef<Map<string, TabHistory>>(new Map());
+  /* 保存进行中标记（含等待原生对话框期间），防止重复触发导致连续弹出对话框 */
+  const savingRef = useRef(false);
 
   /* 懒初始化标签页历史（stack[0] 为初始内容） */
   const ensureHistory = useCallback((tabId: string, initialContent: string): TabHistory => {
@@ -518,10 +525,81 @@ export default function App() {
     };
   }, [openPathIntoTab]);
 
+  /* ---- 会话恢复（仅 Tauri）：启动时按持久化的路径重读磁盘，恢复上次打开的文件 ---- */
+
+  /* 恢复尝试完成前不写入会话快照，避免启动瞬间把上次会话覆盖为空 */
+  const hydratedRef = useRef(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    const session = loadSessionState();
+    if (!session || session.tabs.length === 0) {
+      hydratedRef.current = true;
+      return;
+    }
+    let disposed = false;
+    (async () => {
+      const restored: FileTab[] = [];
+      for (const st of session.tabs) {
+        try {
+          const { content, name } = await readLocalPath(st.path);
+          const language = detectLanguageFromPath(name);
+          restored.push({
+            id: nextTabId(),
+            title: name,
+            path: st.path,
+            handle: null,
+            content,
+            originalContent: content,
+            language,
+            isDirty: false,
+            readOnly: false,
+            mdView: language === 'markdown' ? st.mdView : 'edit',
+          });
+        } catch {
+          // 文件已被删除/移动：跳过该标签
+        }
+      }
+      if (disposed) return;
+      hydratedRef.current = true;
+      if (restored.length === 0) {
+        // 全部失效：清掉快照，保留初始 welcome 标签
+        saveSessionState({ tabs: [], activePath: null });
+        return;
+      }
+      setTabs(prev => {
+        // 丢弃未被编辑过的初始 welcome 标签；恢复期间用户新建的标签保留
+        const kept = prev.filter(t => !(t.title === 'welcome.ts' && t.path === null && !t.isDirty));
+        return [...kept, ...restored];
+      });
+      const active = restored.find(t => t.path === session.activePath) ?? restored[restored.length - 1];
+      setActiveTabId(active.id);
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  /* ---- 会话持久化：快照跟随有真实路径的标签页变化（无路径标签不持久化） ---- */
+
+  useEffect(() => {
+    if (!isTauri || !hydratedRef.current) return;
+    saveSessionState({
+      tabs: tabs.flatMap(t => t.path ? [{ path: t.path, mdView: t.mdView }] : []),
+      activePath: activeTab?.path ?? null,
+    });
+  }, [tabs, activeTab]);
+
   /* ---- global shortcuts ---- */
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      /* 编辑器 keymap 已接管的按键（已 preventDefault，但事件仍会冒泡到 window）不再重复处理，
+         否则 Ctrl+S 会触发两次保存、弹出两个保存对话框 */
+      if (e.defaultPrevented) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && e.shiftKey) {
+        e.preventDefault();
+        handleSaveAs();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && !e.shiftKey) {
         e.preventDefault();
         handleSave();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'o') {
@@ -611,25 +689,38 @@ export default function App() {
     setActiveTabId(newTab.id);
   }, []);
 
-  const handleSave = useCallback(async () => {
-    if (!activeTab || activeTab.readOnly) return;
+  const persistTab = useCallback(async (tab: FileTab, saveAs: boolean) => {
+    if (tab.readOnly || savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     try {
-      const result = await saveFileToDisk(activeTab, activeTab.content);
+      const result = await saveFileToDisk(tab, tab.content, saveAs);
       if (result.ok) {
-        const savedPath = result.savedPath ?? activeTab.path;
-        const savedTitle = savedPath ? savedPath.split(/[\\/]/).pop() || activeTab.title : activeTab.title;
-        setTabs(prev => prev.map(t => t.id === activeTab.id
+        const savedPath = result.savedPath ?? tab.path;
+        const savedTitle = savedPath ? savedPath.split(/[\\/]/).pop() || tab.title : tab.title;
+        setTabs(prev => prev.map(t => t.id === tab.id
           ? { ...t, originalContent: t.content, isDirty: false, path: savedPath, title: savedTitle }
           : t
         ));
         // 自写识别：更新已知磁盘内容，后续 watch 事件比对无差异，不产生 diff
-        if (savedPath) updateKnownDiskContent(savedPath, activeTab.content);
+        if (savedPath) updateKnownDiskContent(savedPath, tab.content);
       }
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
-  }, [activeTab, updateKnownDiskContent]);
+  }, [updateKnownDiskContent]);
+
+  const handleSave = useCallback(async () => {
+    if (!activeTab) return;
+    await persistTab(activeTab, false);
+  }, [activeTab, persistTab]);
+
+  /* 另存为：无论是否已有路径，总是弹出保存对话框选择新位置 */
+  const handleSaveAs = useCallback(async () => {
+    if (!activeTab) return;
+    await persistTab(activeTab, true);
+  }, [activeTab, persistTab]);
 
   const handleRevert = useCallback(() => {
     if (!activeTab) return;
@@ -670,7 +761,8 @@ export default function App() {
     ));
   }, [activeTab]);
 
-  const handleWindowClose = useCallback(async (): Promise<boolean> => {
+  /* 关闭确认：有未保存标签时弹确认框，返回是否允许关闭 */
+  const confirmWindowClose = useCallback(async (): Promise<boolean> => {
     const dirtyCount = tabsRef.current.filter(t => t.isDirty).length;
     if (dirtyCount === 0) return true;
     const message = `${dirtyCount} 个标签页有未保存的更改，确定退出吗？`;
@@ -680,6 +772,59 @@ export default function App() {
       return await ask(message, { title: 'Nexus Editor', kind: 'warning' });
     }
     return window.confirm(message);
+  }, []);
+
+  /* ---- 窗口关闭统一拦截（仅 Tauri）：自定义按钮 / Alt+F4 / 任务栏关闭都走未保存确认 ----
+     Tauri 在存在 close-requested 监听时自动拦截系统关闭并转发事件；
+     一律 preventDefault 后自行决定是否 destroy，避免事件处理器未阻止时被立即关闭。 */
+  const confirmWindowCloseRef = useRef(confirmWindowClose);
+  confirmWindowCloseRef.current = confirmWindowClose;
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    let confirmInFlight = false; // 确认框等待期间忽略后续关闭请求，防止连弹多个对话框
+    (async () => {
+      try {
+        const appWindow = getCurrentWindow();
+        const fn = await appWindow.onCloseRequested(async (event) => {
+          event.preventDefault();
+          if (confirmInFlight) return;
+          confirmInFlight = true;
+          try {
+            const confirmed = await confirmWindowCloseRef.current();
+            if (confirmed) await appWindow.destroy();
+          } catch (e) {
+            // 确认流程出错：宁可关不掉也不静默丢数据
+            console.error('窗口关闭确认失败:', e);
+          } finally {
+            confirmInFlight = false;
+          }
+        });
+        if (disposed) fn();
+        else unlisten = fn;
+      } catch (e) {
+        console.error('注册窗口关闭拦截失败:', e);
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  /* 浏览器模式兜底：有未保存修改时拦截刷新/关闭（浏览器原生离开确认） */
+  useEffect(() => {
+    if (isTauri) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      if (tabsRef.current.some(t => t.isDirty)) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
   }, []);
 
   /* 切换当前 markdown 标签页的视图模式 */
@@ -832,7 +977,7 @@ export default function App() {
 
         <div className="flex-1 h-full" data-tauri-drag-region />
 
-        <WindowControls isDarkMode={isDarkMode} onRequestClose={handleWindowClose} />
+        <WindowControls isDarkMode={isDarkMode} />
       </div>
 
       {/* 菜单栏 */}
@@ -970,6 +1115,18 @@ export default function App() {
               <Save size={14} />
               保存
               <span className="ml-auto text-[10px] opacity-50">Ctrl+S</span>
+            </button>
+            <button
+              onClick={() => { setMenuOpen(false); handleSaveAs(); }}
+              disabled={!activeTab || activeTab.readOnly || saving}
+              className={cn(
+                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+              )}
+            >
+              <SaveAll size={14} />
+              另存为
+              <span className="ml-auto text-[10px] opacity-50">Ctrl+Shift+S</span>
             </button>
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
             <button

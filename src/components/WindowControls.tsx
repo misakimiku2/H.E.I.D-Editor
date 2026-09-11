@@ -7,11 +7,9 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 interface WindowControlsProps {
   isDarkMode: boolean;
-  /** 关闭前调用，返回 false 则取消关闭（用于未保存内容的确认） */
-  onRequestClose: () => Promise<boolean>;
 }
 
-export function WindowControls({ isDarkMode, onRequestClose }: WindowControlsProps) {
+export function WindowControls({ isDarkMode }: WindowControlsProps) {
   const [maximized, setMaximized] = useState(false);
 
   /* 跟踪最大化状态，切换最大化/还原图标 */
@@ -64,8 +62,9 @@ export function WindowControls({ isDarkMode, onRequestClose }: WindowControlsPro
       >
         {maximized ? <Copy size={12} strokeWidth={1.8} /> : <Square size={12} strokeWidth={1.8} />}
       </button>
+      {/* 关闭走 App 的 close-requested 统一拦截（未保存内容确认）后销毁窗口 */}
       <button
-        onClick={async () => { if (await onRequestClose()) appWindow.close(); }}
+        onClick={() => appWindow.close()}
         className={cn(baseBtn,
           isDarkMode ? 'text-zinc-400' : 'text-zinc-500',
           'hover:bg-red-600 hover:text-white'
