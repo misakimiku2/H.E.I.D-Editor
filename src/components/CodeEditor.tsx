@@ -7,6 +7,7 @@ import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/
 import { Tag, tags as t, highlightTree, type Highlighter } from '@lezer/highlight';
 import type { Tree } from '@lezer/common';
 import { EditorState, Extension, StateEffect } from '@codemirror/state';
+import { FormatMenu, INLINE_WRAPS, transformSlice, type MdOp } from './MarkdownTools';
 import {
   vsCodeDarkTheme, vsCodeLightTheme,
   vsCodeDarkHighlightStyle, vsCodeLightHighlightStyle,
@@ -136,9 +137,19 @@ export interface CodeEditorProps {
   language: string;
   isDarkMode: boolean;
   editable?: boolean;
-  onChange?: (value: string) => void;
+  /** meta.major = true 表示这是离散操作（如 markdown 格式化），撤销历史独立成条 */
+  onChange?: (value: string, meta?: { major?: boolean }) => void;
   onSave?: () => void;
   onCreateEditor?: (view: EditorView) => void;
+  /** 滚动容器回调（分屏同步滚动用） */
+  onScroller?: (el: HTMLElement | null) => void;
+  /** 提供（markdown 且可编辑）时，选区右键弹 markdown 格式菜单 */
+  markdownMenu?: {
+    canUndo: boolean;
+    canRedo: boolean;
+    onUndo: () => void;
+    onRedo: () => void;
+  };
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({
@@ -149,6 +160,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onChange,
   onSave,
   onCreateEditor,
+  onScroller,
+  markdownMenu,
 }) => {
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const stickyRef = useRef<HTMLElement | null>(null);
@@ -159,6 +172,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const cleanupFns = useRef<(() => void)[]>([]);
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const onScrollerRef = useRef(onScroller);
+  onScrollerRef.current = onScroller;
+  /* markdown 右键格式化后，下一次 onChange 以 major 记入撤销历史 */
+  const majorNextRef = useRef(false);
+  const [mdMenu, setMdMenu] = useState<{ x: number; y: number; from: number; to: number; text: string } | null>(null);
 
   /* line-number click & drag selection */
   const setupLineNumberClick = useCallback((view: EditorView) => {
@@ -874,8 +894,64 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
   }, []);
 
+  /* ---- markdown 选区右键格式化 ---- */
+
+  const handleEditorContextMenu = useCallback((e: React.MouseEvent) => {
+    if (!markdownMenu) return;
+    const view = viewReadyRef.current;
+    if (!view) return;
+    const { state } = view;
+    const { from, to } = state.selection.main;
+    if (from === to) return; /* 无选区走浏览器默认菜单 */
+    e.preventDefault();
+    setMdMenu({ x: e.clientX, y: e.clientY, from, to, text: state.sliceDoc(from, to) });
+  }, [markdownMenu]);
+
+  const applyEditorMdOp = useCallback((op: MdOp) => {
+    const view = viewReadyRef.current;
+    if (!view || !mdMenu) return;
+    let { from, to } = mdMenu;
+    const doc = view.state.doc;
+
+    /* 块级操作扩展到整行（标题/列表/引用按行生效） */
+    const isInline = op.kind === 'link' || op.kind === 'image' || !!INLINE_WRAPS[op.kind];
+    if (!isInline) {
+      from = doc.lineAt(from).from;
+      to = doc.lineAt(to).to;
+    }
+
+    /* 行内操作：选区两侧紧邻同种标记时拆掉（切换） */
+    const wrap = INLINE_WRAPS[op.kind];
+    if (wrap) {
+      const [open, close] = wrap;
+      const before = doc.sliceString(Math.max(0, from - open.length), from);
+      const after = doc.sliceString(to, Math.min(doc.length, to + close.length));
+      if (before === open && after === close) {
+        majorNextRef.current = true;
+        view.dispatch({
+          changes: [
+            { from: from - open.length, to: from, insert: '' },
+            { from: to, to: to + close.length, insert: '' },
+          ],
+          selection: { anchor: from - open.length },
+        });
+        setMdMenu(null);
+        return;
+      }
+    }
+
+    const replaced = transformSlice(op, doc.sliceString(from, to), mdMenu.text);
+    majorNextRef.current = true;
+    view.dispatch({
+      changes: { from, to, insert: replaced },
+      selection: { anchor: from, head: from + replaced.length },
+    });
+    setMdMenu(null);
+  }, [mdMenu]);
+
   const handleCreateEditor = useCallback((view: EditorView) => {
     viewReadyRef.current = view;
+    onScrollerRef.current?.(view.scrollDOM);
     cleanupFns.current.forEach(fn => fn());
     cleanupFns.current = [];
     if (rafRef.current !== null) {
@@ -990,23 +1066,44 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     return exts;
   }, [language, value, isDarkMode]);
 
+  /* onChange 统一经此中转：markdown 格式化等离散操作附带 major 标记 */
+  const handleValueChange = useCallback((val: string) => {
+    const meta = majorNextRef.current ? { major: true } : undefined;
+    majorNextRef.current = false;
+    onChangeRef.current?.(val, meta);
+  }, []);
+
   return (
-    <CodeMirror
-      ref={cmRef}
-      value={value}
-      onChange={onChange}
-      extensions={extensions}
-      readOnly={!editable}
-      editable={editable}
-      basicSetup={false}
-      theme={isDarkMode ? vsCodeDarkTheme : vsCodeLightTheme}
-      onCreateEditor={handleCreateEditor}
-      className="h-full w-full"
-      style={{
-        height: '100%',
-        width: '100%',
-        fontSize: '13px',
-      }}
-    />
+    <div className="h-full w-full" onContextMenu={handleEditorContextMenu}>
+      <CodeMirror
+        ref={cmRef}
+        value={value}
+        onChange={handleValueChange}
+        extensions={extensions}
+        readOnly={!editable}
+        editable={editable}
+        basicSetup={false}
+        theme={isDarkMode ? vsCodeDarkTheme : vsCodeLightTheme}
+        onCreateEditor={handleCreateEditor}
+        className="h-full w-full"
+        style={{
+          height: '100%',
+          width: '100%',
+          fontSize: '13px',
+        }}
+      />
+      {mdMenu && markdownMenu && (
+        <FormatMenu
+          menu={mdMenu}
+          isDarkMode={isDarkMode}
+          canUndo={markdownMenu.canUndo}
+          canRedo={markdownMenu.canRedo}
+          onUndo={() => { setMdMenu(null); markdownMenu.onUndo(); }}
+          onRedo={() => { setMdMenu(null); markdownMenu.onRedo(); }}
+          onApply={applyEditorMdOp}
+          onClose={() => setMdMenu(null)}
+        />
+      )}
+    </div>
   );
 };

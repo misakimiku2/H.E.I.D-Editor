@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   FileText, Code2, X, Plus, FolderOpen, Save, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
-  GitCompare,
+  GitCompare, Columns2,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -19,6 +19,9 @@ import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 
 /* ---------- types ---------- */
 
+/* markdown 标签页的视图模式：编辑 / 分屏（左预览右源码）/ 预览 */
+type MdViewMode = 'edit' | 'split' | 'preview';
+
 interface FileTab {
   id: string;
   title: string;
@@ -29,6 +32,7 @@ interface FileTab {
   language: string;
   isDirty: boolean;
   readOnly: boolean;
+  mdView: MdViewMode;
 }
 
 /* ---------- file system helpers (Tauri desktop / web File System Access API) ---------- */
@@ -276,13 +280,13 @@ export default function App() {
       language: 'typescript',
       isDirty: false,
       readOnly: false,
+      mdView: 'edit',
     },
   ]);
   const [activeTabId, setActiveTabId] = useState<string>(() => '');
   const [saving, setSaving] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
-  const [mdPreviewOpen, setMdPreviewOpen] = useState(false);
   /* ---- 外部 Diff：每文件时间线（内存态，关闭最后一个引用该文件的标签页即丢弃） ---- */
   const [diffTimelines, setDiffTimelines] = useState<Record<string, ExternalDiffEntry[]>>({});
   const [diffModalOpen, setDiffModalOpen] = useState(false);
@@ -477,6 +481,7 @@ export default function App() {
         language,
         isDirty: false,
         readOnly: false,
+        mdView: language === 'markdown' ? 'preview' : 'edit',
       };
       setTabs(prev => [...prev, newTab]);
       setActiveTabIdRef.current(newTab.id);
@@ -573,6 +578,7 @@ export default function App() {
       language,
       isDirty: false,
       readOnly: false,
+      mdView: language === 'markdown' ? 'preview' : 'edit',
     };
     // if same file is already open, focus it
     const existing = tabs.find(t => t.path === path && !t.isDirty);
@@ -599,6 +605,7 @@ export default function App() {
       language: 'plaintext',
       isDirty: false,
       readOnly: false,
+      mdView: 'edit',
     };
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
@@ -675,9 +682,87 @@ export default function App() {
     return window.confirm(message);
   }, []);
 
+  /* 切换当前 markdown 标签页的视图模式 */
+  const setMdView = useCallback((mode: MdViewMode) => {
+    if (!activeTab) return;
+    setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, mdView: mode } : t));
+  }, [activeTab]);
+
+  /* ---- 分屏同步滚动：按滚动比例映射到另一侧，带短时锁防止回环 ---- */
+
+  const editorScrollerRef = useRef<HTMLElement | null>(null);
+  const previewScrollerRef = useRef<HTMLElement | null>(null);
+  const scrollLockRef = useRef<{ owner: 'editor' | 'preview'; until: number } | null>(null);
+
+  const syncScrollFrom = useCallback((owner: 'editor' | 'preview') => {
+    const el = owner === 'editor' ? editorScrollerRef.current : previewScrollerRef.current;
+    const other = owner === 'editor' ? previewScrollerRef.current : editorScrollerRef.current;
+    if (!el || !other) return;
+    const now = performance.now();
+    const lock = scrollLockRef.current;
+    if (lock && lock.owner !== owner && now < lock.until) return;
+    scrollLockRef.current = { owner, until: now + 80 };
+    const max = el.scrollHeight - el.clientHeight;
+    const otherMax = other.scrollHeight - other.clientHeight;
+    if (max <= 0 || otherMax <= 0) return;
+    other.scrollTop = (el.scrollTop / max) * otherMax;
+  }, []);
+
+  const handleEditorScroll = useCallback(() => syncScrollFrom('editor'), [syncScrollFrom]);
+  const handlePreviewScroll = useCallback(() => syncScrollFrom('preview'), [syncScrollFrom]);
+
+  const attachEditorScroller = useCallback((el: HTMLElement | null) => {
+    const prev = editorScrollerRef.current;
+    if (prev && prev !== el) prev.removeEventListener('scroll', handleEditorScroll);
+    editorScrollerRef.current = el;
+    if (el) el.addEventListener('scroll', handleEditorScroll, { passive: true });
+  }, [handleEditorScroll]);
+
+  const attachPreviewScroller = useCallback((el: HTMLElement | null) => {
+    const prev = previewScrollerRef.current;
+    if (prev && prev !== el) prev.removeEventListener('scroll', handlePreviewScroll);
+    previewScrollerRef.current = el;
+    if (el) el.addEventListener('scroll', handlePreviewScroll, { passive: true });
+  }, [handlePreviewScroll]);
+
   /* ---- render ---- */
 
   const isMarkdown = activeTab?.language === 'markdown';
+
+  const renderMdPreview = () => {
+    if (!activeTab) return null;
+    return (
+      <MarkdownPreview
+        content={activeTab.content}
+        isDarkMode={isDarkMode}
+        onChange={activeTab.readOnly ? undefined : (v) => updateTabContent(activeTab.id, v, { major: true })}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onScroller={attachPreviewScroller}
+      />
+    );
+  };
+
+  const renderEditor = () => {
+    if (!activeTab) return null;
+    return (
+      <CodeEditor
+        key={activeTab.id}
+        value={activeTab.content}
+        language={activeTab.language}
+        isDarkMode={isDarkMode}
+        editable={!activeTab.readOnly}
+        onChange={(v, meta) => updateTabContent(activeTab.id, v, meta)}
+        onSave={handleSave}
+        onScroller={attachEditorScroller}
+        markdownMenu={isMarkdown && !activeTab.readOnly
+          ? { canUndo, canRedo, onUndo: handleUndo, onRedo: handleRedo }
+          : undefined}
+      />
+    );
+  };
 
   return (
     <div className={cn(
@@ -790,8 +875,8 @@ export default function App() {
           </button>
         )}
 
-        {/* Markdown 编辑/预览切换（仅 markdown 文件显示） */}
-        {isMarkdown && (
+        {/* Markdown 视图三档切换：编辑 | 分屏 | 预览（仅 markdown 文件显示） */}
+        {isMarkdown && activeTab && (
           <div
             role="group"
             aria-label="Markdown 视图"
@@ -802,13 +887,14 @@ export default function App() {
           >
             {([
               { mode: 'edit', icon: Pencil, title: '编辑' },
+              { mode: 'split', icon: Columns2, title: '分屏（左预览右源码）' },
               { mode: 'preview', icon: Eye, title: '预览' },
             ] as const).map(({ mode: m, icon: Icon, title }) => {
-              const active = m === 'preview' ? mdPreviewOpen : !mdPreviewOpen;
+              const active = activeTab.mdView === m;
               return (
                 <button
                   key={m}
-                  onClick={() => setMdPreviewOpen(m === 'preview')}
+                  onClick={() => setMdView(m)}
                   title={title}
                   className={cn(
                     "w-7 h-6 rounded-full flex items-center justify-center transition-all",
@@ -929,30 +1015,26 @@ export default function App() {
       <div className="flex-1 flex flex-col overflow-hidden">
         {activeTab ? (
           <>
-            {/* editor / markdown preview */}
-            <div className="flex-1 overflow-hidden">
-              {isMarkdown && mdPreviewOpen ? (
-                <MarkdownPreview
-                  content={activeTab.content}
-                  isDarkMode={isDarkMode}
-                  onChange={activeTab.readOnly ? undefined : (v) => updateTabContent(activeTab.id, v, { major: true })}
-                  canUndo={canUndo}
-                  canRedo={canRedo}
-                  onUndo={handleUndo}
-                  onRedo={handleRedo}
-                />
-              ) : (
-                <CodeEditor
-                  key={activeTab.id}
-                  value={activeTab.content}
-                  language={activeTab.language}
-                  isDarkMode={isDarkMode}
-                  editable={!activeTab.readOnly}
-                  onChange={(v) => updateTabContent(activeTab.id, v)}
-                  onSave={handleSave}
-                />
-              )}
-            </div>
+            {/* markdown 分屏（左预览右源码）/ 预览 / 编辑器 */}
+            {isMarkdown && activeTab.mdView === 'split' ? (
+              <div className="flex flex-1 overflow-hidden">
+                <div className="flex-1 min-w-0 overflow-hidden">
+                  {renderMdPreview()}
+                </div>
+                <div className={cn("w-px shrink-0", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+                <div className="flex-1 min-w-0 overflow-hidden">
+                  {renderEditor()}
+                </div>
+              </div>
+            ) : isMarkdown && activeTab.mdView === 'preview' ? (
+              <div className="flex-1 overflow-hidden">
+                {renderMdPreview()}
+              </div>
+            ) : (
+              <div className="flex-1 overflow-hidden">
+                {renderEditor()}
+              </div>
+            )}
 
             {/* bottom status bar：文件信息 + 还原 + 模式 */}
             <div className={cn(
