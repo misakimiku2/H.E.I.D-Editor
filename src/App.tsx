@@ -1,14 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FileText, Code2, X, Plus, FolderOpen, Save, RotateCcw,
-  Sun, Moon, SunMoon, Menu, Info,
+  Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
+  GitCompare,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
 import { cn } from './lib/utils';
 import { CodeEditor } from './components/CodeEditor';
+import { MarkdownPreview } from './components/MarkdownPreview';
 import { WindowControls } from './components/WindowControls';
+import { DiffModal } from './components/DiffModal';
 import { detectLanguageFromPath, LANGUAGE_LABELS } from './lib/codemirror';
+import {
+  appendEntry, removeEntry, revertEntry, type ExternalDiffEntry,
+} from './lib/diffTimeline';
+import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 
 /* ---------- types ---------- */
 
@@ -196,6 +203,17 @@ def greet(name: str) -> str:
 
 /* ---------- App ---------- */
 
+/* 每个标签页的内容历史（撤销/重做）：stack 存内容快照，index 指向当前态 */
+interface TabHistory {
+  stack: string[];
+  index: number;
+  lastAt: number;
+}
+
+const MAX_HISTORY = 200;
+/* 间隔小于该值的连续修改（连续输入）合并为同一条历史 */
+const HISTORY_COALESCE_MS = 800;
+
 let tabCounter = 0;
 function nextTabId(): string {
   tabCounter += 1;
@@ -264,7 +282,39 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [mdPreviewOpen, setMdPreviewOpen] = useState(false);
+  /* ---- 外部 Diff：每文件时间线（内存态，关闭最后一个引用该文件的标签页即丢弃） ---- */
+  const [diffTimelines, setDiffTimelines] = useState<Record<string, ExternalDiffEntry[]>>({});
+  const [diffModalOpen, setDiffModalOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const historiesRef = useRef<Map<string, TabHistory>>(new Map());
+
+  /* 懒初始化标签页历史（stack[0] 为初始内容） */
+  const ensureHistory = useCallback((tabId: string, initialContent: string): TabHistory => {
+    let h = historiesRef.current.get(tabId);
+    if (!h) {
+      h = { stack: [initialContent], index: 0, lastAt: 0 };
+      historiesRef.current.set(tabId, h);
+    }
+    return h;
+  }, []);
+
+  /* 记录一次内容变化；major（如右键格式化）强制独立成条，否则按时间间隔合并连击 */
+  const recordContentChange = useCallback((tabId: string, prevContent: string, nextContent: string, major?: boolean) => {
+    if (prevContent === nextContent) return;
+    const h = ensureHistory(tabId, prevContent);
+    if (nextContent === h.stack[h.index]) return;
+    const now = Date.now();
+    if (major || now - h.lastAt > HISTORY_COALESCE_MS) {
+      h.stack = h.stack.slice(0, h.index + 1);
+      h.stack.push(nextContent);
+      if (h.stack.length > MAX_HISTORY) h.stack.shift();
+      h.index = h.stack.length - 1;
+    } else {
+      h.stack[h.index] = nextContent;
+    }
+    h.lastAt = now;
+  }, [ensureHistory]);
 
   /* 关于弹窗：Esc 关闭 */
   useEffect(() => {
@@ -308,6 +358,101 @@ export default function App() {
   tabsRef.current = tabs;
   const setActiveTabIdRef = useRef(setActiveTabId);
   setActiveTabIdRef.current = setActiveTabId;
+
+  /* ---- 外部 Diff：监听管理 + 变更应用 ---- */
+
+  /* 当前被标签页引用的真实文件路径（去重）；浏览器模式不监听 */
+  const watchedPaths = useMemo(
+    () => (isTauri ? Array.from(new Set(tabs.flatMap(t => (t.path ? [t.path] : [])))) : []),
+    [tabs]
+  );
+
+  /* 检测到真实外部修改：追加时间线条目，并按标签页脏状态分流处理 */
+  const handleExternalChange = useCallback((path: string, before: string, after: string) => {
+    setDiffTimelines(prev => ({ ...prev, [path]: appendEntry(prev[path] ?? [], before, after) }));
+    // 先为干净标签页以 major 方式记撤销历史（Ctrl+Z 可回退这次外部替换），再统一更新状态
+    for (const t of tabsRef.current) {
+      if (t.path === path && !t.isDirty) recordContentChange(t.id, t.content, after, true);
+    }
+    setTabs(prev => prev.map(t => {
+      if (t.path !== path) return t;
+      if (!t.isDirty) {
+        // 干净：内容与 originalContent 同步为新磁盘内容，不产生脏状态
+        return { ...t, content: after, originalContent: after, isDirty: false };
+      }
+      // 脏：编辑器内容不动，originalContent 跟踪磁盘最后已知状态，保留冲突标记
+      return { ...t, originalContent: after, isDirty: t.content !== after };
+    }));
+  }, [recordContentChange]);
+
+  const { updateKnownDiskContent } = useExternalFileWatcher({
+    paths: watchedPaths,
+    enabled: isTauri,
+    onExternalChange: handleExternalChange,
+  });
+
+  const diffTimelinesRef = useRef(diffTimelines);
+  diffTimelinesRef.current = diffTimelines;
+
+  const totalPendingDiffs = useMemo(
+    () => Object.values(diffTimelines).reduce((sum, entries) => sum + entries.length, 0),
+    [diffTimelines]
+  );
+
+  /* 路径不再被任何标签页引用：丢弃其时间线（监听由 hook 自行拆除清理） */
+  useEffect(() => {
+    const live = new Set(watchedPaths);
+    setDiffTimelines(prev => {
+      const stale = Object.keys(prev).filter(p => !live.has(p));
+      if (stale.length === 0) return prev;
+      const next = { ...prev };
+      stale.forEach(p => delete next[p]);
+      return next;
+    });
+  }, [watchedPaths]);
+
+  /* 接受：经确认后仅移除该条目，磁盘与编辑器均不动 */
+  const handleAcceptDiff = useCallback((path: string, entryId: string) => {
+    setDiffTimelines(prev => {
+      const next = { ...prev, [path]: removeEntry(prev[path] ?? [], entryId) };
+      if (next[path].length === 0) delete next[path];
+      return next;
+    });
+  }, []);
+
+  /* 撤销修改：经确认后把该条 before 写回磁盘，编辑器同步回退，该条及其后所有条目一并移除 */
+  const handleRevertDiff = useCallback(async (path: string, entryId: string) => {
+    const entry = (diffTimelinesRef.current[path] ?? []).find(e => e.id === entryId);
+    if (!entry) return;
+    try {
+      await writeLocalPath(path, entry.before);
+    } catch (e) {
+      console.error('撤销外部修改失败（写回磁盘）:', path, e);
+      return;
+    }
+    updateKnownDiskContent(path, entry.before);
+    setDiffTimelines(prev => {
+      const kept = revertEntry(prev[path] ?? [], entryId);
+      const next = { ...prev };
+      if (kept.length > 0) next[path] = kept;
+      else delete next[path];
+      return next;
+    });
+    // 该路径所有标签页的 originalContent 同步为写回内容（它始终跟踪磁盘最后已知状态）
+    for (const t of tabsRef.current) {
+      if (t.path === path && !t.isDirty) recordContentChange(t.id, t.content, entry.before, true);
+    }
+    setTabs(prev => prev.map(t => {
+      if (t.path !== path) return t;
+      if (!t.isDirty) {
+        // 干净：编辑器内容同步回退并计入撤销历史
+        return { ...t, content: entry.before, originalContent: entry.before, isDirty: false };
+      }
+      // 脏：本地内容不动，isDirty 依据新的 originalContent 重新成立
+      return { ...t, originalContent: entry.before, isDirty: t.content !== entry.before };
+    }));
+  }, [recordContentChange, updateKnownDiskContent]);
+
 
   const openPathIntoTab = useCallback(async (path: string) => {
     try {
@@ -380,6 +525,12 @@ export default function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
         e.preventDefault();
         handleNewFile();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
+        e.preventDefault();
+        handleRedo();
       }
     };
     window.addEventListener('keydown', handler);
@@ -388,12 +539,14 @@ export default function App() {
 
   /* ---- tab operations ---- */
 
-  const updateTabContent = useCallback((tabId: string, content: string) => {
+  const updateTabContent = useCallback((tabId: string, content: string, opts?: { major?: boolean }) => {
+    const tab = tabsRef.current.find(t => t.id === tabId);
+    if (tab) recordContentChange(tabId, tab.content, content, opts?.major);
     setTabs(prev => prev.map(t => {
       if (t.id !== tabId) return t;
       return { ...t, content, isDirty: content !== t.originalContent };
     }));
-  }, []);
+  }, [recordContentChange]);
 
   const closeTab = useCallback((tabId: string) => {
     const tab = tabs.find(t => t.id === tabId);
@@ -401,6 +554,7 @@ export default function App() {
     if (tab.isDirty) {
       if (!window.confirm(`"${tab.title}" 有未保存的更改，确定关闭吗？`)) return;
     }
+    historiesRef.current.delete(tabId);
     setTabs(prev => prev.filter(t => t.id !== tabId));
   }, [tabs]);
 
@@ -462,16 +616,52 @@ export default function App() {
           ? { ...t, originalContent: t.content, isDirty: false, path: savedPath, title: savedTitle }
           : t
         ));
+        // 自写识别：更新已知磁盘内容，后续 watch 事件比对无差异，不产生 diff
+        if (savedPath) updateKnownDiskContent(savedPath, activeTab.content);
       }
     } finally {
       setSaving(false);
     }
-  }, [activeTab]);
+  }, [activeTab, updateKnownDiskContent]);
 
   const handleRevert = useCallback(() => {
     if (!activeTab) return;
     updateTabContent(activeTab.id, activeTab.originalContent);
   }, [activeTab, updateTabContent]);
+
+  /* ---- 撤销 / 重做（作用于当前标签页内容历史） ---- */
+
+  const canUndo = !!activeTab && (historiesRef.current.get(activeTab.id)?.index ?? 0) > 0;
+  const canRedo = !!activeTab && (() => {
+    const h = historiesRef.current.get(activeTab.id);
+    return !!h && h.index < h.stack.length - 1;
+  })();
+
+  const handleUndo = useCallback(() => {
+    if (!activeTab) return;
+    const h = historiesRef.current.get(activeTab.id);
+    if (!h || h.index <= 0) return;
+    const content = h.stack[h.index - 1];
+    h.index -= 1;
+    h.lastAt = Date.now();
+    setTabs(prev => prev.map(t => t.id === activeTab.id
+      ? { ...t, content, isDirty: content !== t.originalContent }
+      : t
+    ));
+  }, [activeTab]);
+
+  const handleRedo = useCallback(() => {
+    if (!activeTab) return;
+    const h = historiesRef.current.get(activeTab.id);
+    if (!h || h.index >= h.stack.length - 1) return;
+    const content = h.stack[h.index + 1];
+    h.index += 1;
+    h.lastAt = Date.now();
+    setTabs(prev => prev.map(t => t.id === activeTab.id
+      ? { ...t, content, isDirty: content !== t.originalContent }
+      : t
+    ));
+  }, [activeTab]);
 
   const handleWindowClose = useCallback(async (): Promise<boolean> => {
     const dirtyCount = tabsRef.current.filter(t => t.isDirty).length;
@@ -509,7 +699,10 @@ export default function App() {
 
         {/* 标签页 */}
         <div data-tauri-drag-region className="min-w-0 flex items-center gap-0.5 overflow-x-auto">
-          {tabs.map((tab) => (
+          {tabs.map((tab) => {
+            /* 脏且存在未处理外部 diff：橙色提示点（外圈样式区别于琥珀色脏状态点） */
+            const conflicted = tab.isDirty && !!tab.path && (diffTimelines[tab.path]?.length ?? 0) > 0;
+            return (
             <div
               key={tab.id}
               onClick={() => setActiveTabId(tab.id)}
@@ -520,9 +713,13 @@ export default function App() {
                 : (isDarkMode ? "text-zinc-500 hover:bg-zinc-700/50" : "text-zinc-500 hover:bg-zinc-100")
               )}
             >
-              <span className={cn(
+              <span
+                title={conflicted ? '文件已被外部修改，点击菜单栏 Diff 按钮处理' : undefined}
+                className={cn(
                 "w-1.5 h-1.5 rounded-full shrink-0",
-                tab.isDirty ? "bg-amber-500" : (activeTabId === tab.id ? "bg-emerald-500" : (isDarkMode ? "bg-zinc-600" : "bg-zinc-300"))
+                conflicted
+                  ? "bg-orange-500 ring-2 ring-orange-400/40"
+                  : tab.isDirty ? "bg-amber-500" : (activeTabId === tab.id ? "bg-emerald-500" : (isDarkMode ? "bg-zinc-600" : "bg-zinc-300"))
               )} />
               <FileText size={12} className="shrink-0 opacity-60" />
               <span className="truncate">{tab.title}</span>
@@ -533,7 +730,8 @@ export default function App() {
                 <X size={10} />
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <button
@@ -574,6 +772,57 @@ export default function App() {
         </button>
 
         <div className="flex-1" />
+
+        {/* 外部修改 Diff 入口：存在未处理条目时才出现 */}
+        {totalPendingDiffs > 0 && (
+          <button
+            onClick={() => setDiffModalOpen(true)}
+            className={cn(
+              "relative mr-2 p-1.5 rounded-md transition-colors shrink-0",
+              isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-100 text-zinc-500"
+            )}
+            title="外部修改 diff"
+          >
+            <GitCompare size={15} />
+            <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-orange-500 text-white text-[9px] font-bold flex items-center justify-center leading-none">
+              {totalPendingDiffs > 99 ? '99+' : totalPendingDiffs}
+            </span>
+          </button>
+        )}
+
+        {/* Markdown 编辑/预览切换（仅 markdown 文件显示） */}
+        {isMarkdown && (
+          <div
+            role="group"
+            aria-label="Markdown 视图"
+            className={cn(
+              "flex items-center rounded-full p-0.5 mr-2 shrink-0",
+              isDarkMode ? "bg-zinc-700/60" : "bg-zinc-200/80"
+            )}
+          >
+            {([
+              { mode: 'edit', icon: Pencil, title: '编辑' },
+              { mode: 'preview', icon: Eye, title: '预览' },
+            ] as const).map(({ mode: m, icon: Icon, title }) => {
+              const active = m === 'preview' ? mdPreviewOpen : !mdPreviewOpen;
+              return (
+                <button
+                  key={m}
+                  onClick={() => setMdPreviewOpen(m === 'preview')}
+                  title={title}
+                  className={cn(
+                    "w-7 h-6 rounded-full flex items-center justify-center transition-all",
+                    active
+                      ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
+                      : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
+                  )}
+                >
+                  <Icon size={13} />
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* 主题三档切换：浅色 | 跟随系统 | 深色 */}
         <div
@@ -638,6 +887,31 @@ export default function App() {
             </button>
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
             <button
+              onClick={() => { setMenuOpen(false); handleUndo(); }}
+              disabled={!canUndo}
+              className={cn(
+                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+              )}
+            >
+              <Undo2 size={14} />
+              撤销
+              <span className="ml-auto text-[10px] opacity-50">Ctrl+Z</span>
+            </button>
+            <button
+              onClick={() => { setMenuOpen(false); handleRedo(); }}
+              disabled={!canRedo}
+              className={cn(
+                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+              )}
+            >
+              <Redo2 size={14} />
+              重做
+              <span className="ml-auto text-[10px] opacity-50">Ctrl+Y</span>
+            </button>
+            <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+            <button
               onClick={() => { setMenuOpen(false); setAboutOpen(true); }}
               className={cn(
                 "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
@@ -655,17 +929,29 @@ export default function App() {
       <div className="flex-1 flex flex-col overflow-hidden">
         {activeTab ? (
           <>
-            {/* editor */}
+            {/* editor / markdown preview */}
             <div className="flex-1 overflow-hidden">
-              <CodeEditor
-                key={activeTab.id}
-                value={activeTab.content}
-                language={activeTab.language}
-                isDarkMode={isDarkMode}
-                editable={!activeTab.readOnly}
-                onChange={(v) => updateTabContent(activeTab.id, v)}
-                onSave={handleSave}
-              />
+              {isMarkdown && mdPreviewOpen ? (
+                <MarkdownPreview
+                  content={activeTab.content}
+                  isDarkMode={isDarkMode}
+                  onChange={activeTab.readOnly ? undefined : (v) => updateTabContent(activeTab.id, v, { major: true })}
+                  canUndo={canUndo}
+                  canRedo={canRedo}
+                  onUndo={handleUndo}
+                  onRedo={handleRedo}
+                />
+              ) : (
+                <CodeEditor
+                  key={activeTab.id}
+                  value={activeTab.content}
+                  language={activeTab.language}
+                  isDarkMode={isDarkMode}
+                  editable={!activeTab.readOnly}
+                  onChange={(v) => updateTabContent(activeTab.id, v)}
+                  onSave={handleSave}
+                />
+              )}
             </div>
 
             {/* bottom status bar：文件信息 + 还原 + 模式 */}
@@ -730,6 +1016,17 @@ export default function App() {
               </button>
             </div>
           </div>
+        )}
+
+        {/* 外部修改 Diff 弹窗 */}
+        {diffModalOpen && (
+          <DiffModal
+            timelines={diffTimelines}
+            isDarkMode={isDarkMode}
+            onClose={() => setDiffModalOpen(false)}
+            onAccept={handleAcceptDiff}
+            onRevert={handleRevertDiff}
+          />
         )}
 
         {/* 关于弹窗（背景毛玻璃） */}
