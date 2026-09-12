@@ -36,6 +36,7 @@ import {
   loadSettings, saveSettings, DEFAULT_SETTINGS, type EditorSettings,
 } from './lib/settings';
 import { deleteDraft, draftKeyForTab, getDraft, saveDraft } from './lib/drafts';
+import { countWords } from './lib/wordCount';
 import { translate, resolveSystemLang, type Lang, type MessageKey } from './lib/i18n';
 import { I18nProvider, rt, setRuntimeLang } from './lib/i18nContext';
 import { SettingsDialog } from './components/SettingsDialog';
@@ -1535,6 +1536,13 @@ export default function App() {
 
   /* 状态栏光标信息（行/列/选中字符数） */
   const [cursorInfo, setCursorInfo] = useState({ line: 1, col: 1, selChars: 0 });
+  /* 字数统计：Markdown 按 CJK 感知计数，其余按空白分词（200 万字符单次线性扫描，毫秒级） */
+  const activeContent = activeTab?.content ?? '';
+  const activeLanguage = activeTab?.language ?? '';
+  const wordCountInfo = useMemo(
+    () => countWords(activeContent, activeLanguage === 'markdown'),
+    [activeContent, activeLanguage],
+  );
   useEffect(() => {
     setCursorInfo({ line: 1, col: 1, selChars: 0 });
   }, [activeTabId]);
@@ -2012,6 +2020,10 @@ export default function App() {
               <span className="shrink-0">{formatFileSize(activeTab.content)}</span>
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{t('status.lines', { n: activeTab.content.split('\n').length })}</span>
+              <span className="shrink-0 opacity-50">|</span>
+              <span className="shrink-0 tabular-nums">
+                {t('status.charCount', { n: wordCountInfo.chars })} · {t('status.wordCount', { n: wordCountInfo.words })}
+              </span>
               {/* 行列位置：仅编辑器可见时显示（预览态无光标概念） */}
               {editorVisible && (
                 <>
