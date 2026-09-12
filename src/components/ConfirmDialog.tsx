@@ -9,6 +9,8 @@ export interface ConfirmDialogProps {
   cancelText?: string;
   /** 危险操作（如写回磁盘）时确认按钮用红色 */
   danger?: boolean;
+  /** 可选的中部动作（如「退出并保存」），蓝色强调，位于取消与主确认之间 */
+  extraAction?: { text: string; onAction: () => void };
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -25,6 +27,7 @@ export function ConfirmDialog({
   confirmText = '确认',
   cancelText = '取消',
   danger = false,
+  extraAction,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -47,7 +50,7 @@ export function ConfirmDialog({
         <p className={cn("mt-2 text-xs leading-relaxed", isDarkMode ? "text-zinc-400" : "text-zinc-500")}>
           {message}
         </p>
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="mt-4 flex justify-end gap-2 flex-wrap">
           <button
             onClick={onCancel}
             className={cn(
@@ -57,6 +60,14 @@ export function ConfirmDialog({
           >
             {cancelText}
           </button>
+          {extraAction && (
+            <button
+              onClick={extraAction.onAction}
+              className="px-3 py-1.5 rounded-md text-xs font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500"
+            >
+              {extraAction.text}
+            </button>
+          )}
           <button
             onClick={onConfirm}
             className={cn(

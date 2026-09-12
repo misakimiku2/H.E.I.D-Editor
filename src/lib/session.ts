@@ -1,22 +1,21 @@
 /**
  * 会话持久化（仅 Tauri 桌面端使用）：
- * 记录上次打开的真实文件标签（路径 + markdown 视图模式）与激活标签路径，
- * 重启时由 App 按路径重读磁盘恢复（磁盘内容为准，恢复为干净状态）。
- * 无路径的标签页（welcome / untitled）不持久化——与
- * 「退出时未保存内容经确认即丢弃」的语义保持一致。
+ * 记录上次会话的标签页列表与激活标签，重启时由 App 重建。
+ * - file 标签：只存路径 + markdown 视图模式，恢复时重读磁盘（磁盘内容为准，恢复为干净状态）；
+ * - virtual 标签：无路径且未编辑的标签（welcome 示例页 / 空的 untitled），内容可确定性重建，恢复无损；
+ *   脏的无路径标签不持久化——其存亡由退出确认决定，用户确认放弃后不应"复活"。
  */
 
 export type SessionMdView = 'edit' | 'split' | 'preview';
 
-/** 一个可恢复标签页的最小持久化信息（标题 / 语言 / 内容从磁盘重新推导） */
-export interface SessionTab {
-  path: string;
-  mdView: SessionMdView;
-}
+/** 一个可恢复标签页的持久化描述 */
+export type SessionTab =
+  | { kind: 'file'; path: string; mdView: SessionMdView }
+  | { kind: 'virtual'; title: string };
 
 export interface SessionState {
   tabs: SessionTab[];
-  /** 激活标签页的路径；null 表示激活的是无路径标签（恢复时回退到最后一个） */
+  /** 激活标签的文件路径；null 表示激活的是无路径标签（恢复时回退 welcome / 最后一个） */
   activePath: string | null;
 }
 
@@ -50,12 +49,20 @@ export function loadSessionState(storage: Storage | null = defaultStorage()): Se
     const parsed: SessionTab[] = [];
     for (const t of tabs) {
       if (!t || typeof t !== 'object') continue;
-      const { path, mdView } = t as Record<string, unknown>;
-      if (typeof path !== 'string' || path.length === 0) continue;
-      parsed.push({
-        path,
-        mdView: MD_VIEWS.includes(mdView as SessionMdView) ? (mdView as SessionMdView) : 'edit',
-      });
+      const rec = t as Record<string, unknown>;
+      if (rec.kind === 'virtual') {
+        if (typeof rec.title === 'string' && rec.title.length > 0) {
+          parsed.push({ kind: 'virtual', title: rec.title });
+        }
+        continue;
+      }
+      /* file 条目；兼容无 kind 的旧版快照（仅有 path + mdView） */
+      if (rec.kind !== 'file' && rec.kind !== undefined) continue;
+      if (typeof rec.path !== 'string' || rec.path.length === 0) continue;
+      const mdView = MD_VIEWS.includes(rec.mdView as SessionMdView)
+        ? (rec.mdView as SessionMdView)
+        : 'edit';
+      parsed.push({ kind: 'file', path: rec.path, mdView });
     }
     return {
       tabs: parsed,

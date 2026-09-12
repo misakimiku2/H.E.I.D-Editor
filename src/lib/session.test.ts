@@ -22,8 +22,9 @@ function memoryStorage(): Storage {
 
 const sample: SessionState = {
   tabs: [
-    { path: 'C:/notes/a.md', mdView: 'split' },
-    { path: 'C:/src/main.rs', mdView: 'edit' },
+    { kind: 'virtual', title: 'welcome.ts' },
+    { kind: 'file', path: 'C:/notes/a.md', mdView: 'split' },
+    { kind: 'file', path: 'C:/src/main.rs', mdView: 'edit' },
   ],
   activePath: 'C:/notes/a.md',
 };
@@ -67,20 +68,37 @@ describe('saveSessionState / loadSessionState', () => {
     storage.setItem('heid-session', JSON.stringify({
       tabs: [
         null,
-        { path: '', mdView: 'edit' },          // 空路径：丢弃
-        { path: 'C:/keep.md' },                // 缺 mdView：回退 edit
-        { path: 'C:/x.ts', mdView: 'bogus' },  // 非法 mdView：回退 edit
-        { path: 'C:/ok.md', mdView: 'preview' },
+        { kind: 'file', path: '', mdView: 'edit' },      // 空路径：丢弃
+        { kind: 'file', path: 'C:/keep.md' },            // 缺 mdView：回退 edit
+        { kind: 'file', path: 'C:/x.ts', mdView: 'bogus' }, // 非法 mdView：回退 edit
+        { kind: 'virtual', title: '' },                  // 空标题：丢弃
+        { kind: 'virtual' },                             // 缺标题：丢弃
+        { kind: 'weird', path: 'C:/y.ts' },              // 未知 kind：丢弃
+        { kind: 'file', path: 'C:/ok.md', mdView: 'preview' },
+        { kind: 'virtual', title: 'welcome.ts' },
       ],
       activePath: 42,
     }));
     expect(loadSessionState(storage)).toEqual({
       tabs: [
-        { path: 'C:/keep.md', mdView: 'edit' },
-        { path: 'C:/x.ts', mdView: 'edit' },
-        { path: 'C:/ok.md', mdView: 'preview' },
+        { kind: 'file', path: 'C:/keep.md', mdView: 'edit' },
+        { kind: 'file', path: 'C:/x.ts', mdView: 'edit' },
+        { kind: 'file', path: 'C:/ok.md', mdView: 'preview' },
+        { kind: 'virtual', title: 'welcome.ts' },
       ],
       activePath: null,
+    });
+  });
+
+  it('兼容旧版快照：无 kind 但有 path 的条目按 file 解析', () => {
+    const storage = memoryStorage();
+    storage.setItem('heid-session', JSON.stringify({
+      tabs: [{ path: 'C:/old.md', mdView: 'preview' }],
+      activePath: 'C:/old.md',
+    }));
+    expect(loadSessionState(storage)).toEqual({
+      tabs: [{ kind: 'file', path: 'C:/old.md', mdView: 'preview' }],
+      activePath: 'C:/old.md',
     });
   });
 });

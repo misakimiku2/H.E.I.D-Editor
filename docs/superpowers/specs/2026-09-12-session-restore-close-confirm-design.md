@@ -57,5 +57,41 @@ interface SessionState {
 
 ## 6. 测试
 
-- `src/lib/session.test.ts`：往返一致、storage 不可用、损坏/非对象/结构非法 JSON、非法条目过滤与默认值归一。
+- `src/lib/session.test.ts`：往返一致、storage 不可用、损坏/非对象/结构非法 JSON、非法条目过滤与默认值归一、virtual 标签往返、旧版无 kind 快照兼容。
 - 手动验收：开多个文件重启恢复；脏标签下分别用 X 按钮、Alt+F4、任务栏关闭验证确认框；取消后窗口留存、数据完好。
+
+## 7. 修订记录
+
+### 修订 1（2026-09-12，用户反馈两项）
+
+**问题 A：未关闭的 welcome.ts 重启后消失。** 原设计把无路径标签一律排除在快照外，用户「没关 welcome.ts、直接打开了其他文件」的场景下 welcome 重启后丢失。
+
+修订：`SessionTab` 改为可辨识联合——
+
+```ts
+type SessionTab =
+  | { kind: 'file'; path: string; mdView: SessionMdView }   // 磁盘文件，恢复时重读
+  | { kind: 'virtual'; title: string };                     // 无路径且未编辑的标签
+```
+
+- 快照规则：无路径标签仅当 `!isDirty` 时存为 virtual（welcome 存示例内容、untitled 存空内容，均可确定性重建，恢复无损）；
+- 脏的无路径标签仍不持久化——其存亡由退出确认决定，用户确认放弃后不应「复活」；
+- 恢复时初始 welcome 标签按固定 id（`INITIAL_WELCOME_ID`）精确识别，仅当其仍未被编辑时让位给快照内容；`activePath` 为 null 时回退到第一个无路径标签（通常即 welcome）；
+- 旧版无 `kind` 的快照条目（仅有 `path` + `mdView`）按 file 兼容解析。
+
+**问题 B：退出确认改用应用内自绘弹窗。** 原设计走 `@tauri-apps/plugin-dialog` 的原生 `ask`，与应用视觉割裂。
+
+修订：复用既有 `ConfirmDialog` 组件（红色 danger 确认键，Esc / 遮罩点击等同取消），经 `pendingDiscard` state + Promise 化的 `askDiscardConfirm` 桥接异步确认流；退出确认与关闭脏标签确认（`confirmDiscardTab`）统一走该弹窗，三端（桌面 / 安卓 / 浏览器）一致，同时移除了 WebView 下不可靠的 `window.confirm` 分支。安卓返回键的逐层关闭序列把确认弹窗列为最上层（返回 = 取消确认）。已有待确认项时新的确认请求直接被拒，避免叠开弹窗。
+
+### 修订 2（2026-09-12，用户新增需求：退出并保存）
+
+退出确认弹窗新增「退出并保存」按钮（蓝色强调，位于取消与红色「退出不保存」之间），`ConfirmDialog` 增加可选 `extraAction` prop 支持第三按钮；`askDiscardConfirm` 的决策从布尔改为 `'cancel' | 'discard' | 'save'`（关闭脏标签的弹窗不显示该按钮，行为不变）。
+
+「退出并保存」的语义：
+
+1. 逐个保存全部脏标签（`readOnly` 除外）：有路径的静默写盘（Ctrl+S 语义），无路径的（编辑过的 untitled 等）逐个走另存为对话框；
+2. 任一保存被用户取消（另存为对话框点取消）或写盘失败 → **中止退出留在应用**——用户既不想丢数据也未完成保存，静默丢弃违背按钮承诺；失败原因已经由 `saveFileToDisk` 内部提示；
+3. 全部成功 → 显式写入一次会话快照（提取的 `writeSessionSnapshot`，避免依赖 effect 在窗口销毁前未执行）→ 走既有 `onCloseRequested` / 安卓返回键的销毁链路关闭；
+4. 保存+退出进行中（`exitingRef`）忽略重复的关闭请求，防止与另存为对话框并发触发第二轮保存。
+
+追加（同日）：关闭单个脏标签的确认弹窗同样获得「关闭并保存」按钮，语义一致——先落盘（无路径走另存为），保存被取消/失败则不关闭标签；`confirmDiscardTab` 改为接收标签对象并依赖 `persistTab`（声明顺序随之调整到 `persistTab` 之后）。

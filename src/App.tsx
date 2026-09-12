@@ -11,12 +11,13 @@ import { CodeEditor } from './components/CodeEditor';
 import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
 import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
+import { ConfirmDialog } from './components/ConfirmDialog';
 import { detectLanguageFromPath, LANGUAGE_LABELS } from './lib/codemirror';
 import {
   appendEntry, removeEntry, revertEntry, type ExternalDiffEntry,
 } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
-import { loadSessionState, saveSessionState, type SessionMdView } from './lib/session';
+import { loadSessionState, saveSessionState, type SessionMdView, type SessionTab } from './lib/session';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath } from './lib/platform';
 import { useMediaQuery } from './hooks/useMediaQuery';
@@ -315,6 +316,39 @@ function nextTabId(): string {
   return `tab-${Date.now()}-${tabCounter}`;
 }
 
+/* 初始 welcome 标签使用固定 id：会话恢复时需要精确识别并让位给快照内容 */
+const INITIAL_WELCOME_ID = 'tab-welcome-initial';
+
+function makeWelcomeTab(id: string = nextTabId()): FileTab {
+  return {
+    id,
+    title: 'welcome.ts',
+    path: null,
+    handle: null,
+    content: SAMPLE_CODE,
+    originalContent: SAMPLE_CODE,
+    language: 'typescript',
+    isDirty: false,
+    readOnly: false,
+    mdView: 'edit',
+  };
+}
+
+function makeUntitledTab(title: string): FileTab {
+  return {
+    id: nextTabId(),
+    title,
+    path: null,
+    handle: null,
+    content: '',
+    originalContent: '',
+    language: 'plaintext',
+    isDirty: false,
+    readOnly: false,
+    mdView: 'edit',
+  };
+}
+
 /* H.E.I.D 品牌 >_< 标识（简化自应用图标，随主题变色） */
 function HeidMark({ className }: { className?: string }) {
   return (
@@ -336,6 +370,16 @@ function HeidMark({ className }: { className?: string }) {
 }
 
 type ThemeMode = 'light' | 'dark' | 'system';
+
+/* ---- 丢弃确认（应用内自绘弹窗，替代原生 ask / window.confirm）----
+   退出应用与关闭脏标签共用同一套 ConfirmDialog；resolve 经 state 回调完成 Promise。
+   saveText 存在时弹窗显示「退出并保存」按钮，resolve 返回对应决策。 */
+interface PendingDiscardConfirm {
+  message: string;
+  confirmText: string;
+  saveText: string | null;
+  resolve: (decision: 'cancel' | 'discard' | 'save') => void;
+}
 
 export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
@@ -364,26 +408,15 @@ export default function App() {
   const isNarrow = useMediaQuery(NARROW_QUERY);
   const isPhone = IS_ANDROID_APP && isNarrow;
 
-  const [tabs, setTabs] = useState<FileTab[]>(() => [
-    {
-      id: nextTabId(),
-      title: 'welcome.ts',
-      path: null,
-      handle: null,
-      content: SAMPLE_CODE,
-      originalContent: SAMPLE_CODE,
-      language: 'typescript',
-      isDirty: false,
-      readOnly: false,
-      mdView: 'edit',
-    },
-  ]);
+  const [tabs, setTabs] = useState<FileTab[]>(() => [makeWelcomeTab(INITIAL_WELCOME_ID)]);
   const [activeTabId, setActiveTabId] = useState<string>(() => '');
   const [saving, setSaving] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   /* 移动端：标签页抽屉开合 */
   const [tabSheetOpen, setTabSheetOpen] = useState(false);
+  /* 丢弃确认弹窗（退出应用 / 关闭脏标签共用），null 表示无待确认项 */
+  const [pendingDiscard, setPendingDiscard] = useState<PendingDiscardConfirm | null>(null);
   /* ---- 外部 Diff：每文件时间线（内存态，关闭最后一个引用该文件的标签页即丢弃） ---- */
   const [diffTimelines, setDiffTimelines] = useState<Record<string, ExternalDiffEntry[]>>({});
   const [diffModalOpen, setDiffModalOpen] = useState(false);
@@ -462,6 +495,8 @@ export default function App() {
   tabsRef.current = tabs;
   const setActiveTabIdRef = useRef(setActiveTabId);
   setActiveTabIdRef.current = setActiveTabId;
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
 
   /* ---- 外部 Diff：监听管理 + 变更应用 ---- */
 
@@ -618,7 +653,9 @@ export default function App() {
     };
   }, [openPathIntoTab]);
 
-  /* ---- 会话恢复（仅 Tauri）：启动时按持久化的路径重读磁盘，恢复上次打开的文件 ---- */
+  /* ---- 会话恢复（仅 Tauri）：启动时按快照重建上次会话 ----
+     file 条目重读磁盘（文件已删除/移动则跳过）；virtual 条目（未关闭且未编辑的
+     welcome / 空 untitled）确定性重建，保证「没关的标签页重启后还在」。 */
 
   /* 恢复尝试完成前不写入会话快照，避免启动瞬间把上次会话覆盖为空 */
   const hydratedRef = useRef(false);
@@ -634,6 +671,10 @@ export default function App() {
     (async () => {
       const restored: FileTab[] = [];
       for (const st of session.tabs) {
+        if (st.kind === 'virtual') {
+          restored.push(st.title === 'welcome.ts' ? makeWelcomeTab() : makeUntitledTab(st.title));
+          continue;
+        }
         try {
           const { content, name } = await readLocalPath(st.path);
           const language = detectLanguageFromPath(name);
@@ -661,10 +702,12 @@ export default function App() {
         return;
       }
       setTabs(prev => {
-        // 丢弃未被编辑过的初始 welcome 标签；恢复期间用户新建的标签保留
-        const kept = prev.filter(t => !(t.title === 'welcome.ts' && t.path === null && !t.isDirty));
+        // 快照完整描述上次会话：移除未被编辑过的初始 welcome 标签（若快照含 welcome 会随之重建）；
+        // 恢复期间用户新建/编辑过的标签保留
+        const kept = prev.filter(t => !(t.id === INITIAL_WELCOME_ID && !t.isDirty));
         return [...kept, ...restored];
       });
+      /* activePath 为 null（激活的是无路径标签）时恰好匹配第一个无路径标签（通常为 welcome） */
       const active = restored.find(t => t.path === session.activePath) ?? restored[restored.length - 1];
       setActiveTabId(active.id);
     })();
@@ -673,15 +716,25 @@ export default function App() {
     };
   }, []);
 
-  /* ---- 会话持久化：快照跟随有真实路径的标签页变化（无路径标签不持久化） ---- */
-
-  useEffect(() => {
+  /* ---- 会话持久化：快照跟随标签页变化 ----
+     file 标签存路径；无路径标签仅在未编辑时存为 virtual（内容可确定性重建）；
+     脏的无路径标签不持久化——其存亡由退出确认决定，用户确认放弃后不应「复活」。
+     提取为函数：除跟随变化外，「退出并保存」在销毁窗口前也显式写入一次，
+     避免状态更新对应的 effect 尚未执行、窗口已被销毁。 */
+  const writeSessionSnapshot = useCallback(() => {
     if (!isTauri || !hydratedRef.current) return;
     saveSessionState({
-      tabs: tabs.flatMap(t => t.path ? [{ path: t.path, mdView: t.mdView }] : []),
-      activePath: activeTab?.path ?? null,
+      tabs: tabsRef.current.flatMap((t): SessionTab[] => {
+        if (t.path) return [{ kind: 'file', path: t.path, mdView: t.mdView }];
+        return t.isDirty ? [] : [{ kind: 'virtual', title: t.title }];
+      }),
+      activePath: tabsRef.current.find(t => t.id === activeTabIdRef.current)?.path ?? null,
     });
-  }, [tabs, activeTab]);
+  }, []);
+
+  useEffect(() => {
+    writeSessionSnapshot();
+  }, [tabs, activeTab, writeSessionSnapshot]);
 
   /* ---- global shortcuts ---- */
   useEffect(() => {
@@ -724,24 +777,30 @@ export default function App() {
     }));
   }, [recordContentChange]);
 
-  /* 关闭单个标签前的丢弃确认：Tauri 环境走原生 ask 对话框
-    （WebView 对 window.confirm 的支持不可靠，安卓端同样） */
-  const confirmDiscardTab = useCallback(async (title: string): Promise<boolean> => {
-    const message = `"${title}" 有未保存的更改，确定关闭吗？`;
-    if (isTauri) {
-      const { ask } = await import('@tauri-apps/plugin-dialog');
-      return ask(message, { title: 'Nexus Editor', kind: 'warning' });
-    }
-    return window.confirm(message);
-  }, []);
+  /* ---- 丢弃确认（应用内自绘弹窗）：WebView 的 window.confirm 不可靠，
+     原生系统对话框与应用视觉割裂，三端（桌面/安卓/浏览器）统一走 ConfirmDialog。
+     已有待确认项时直接拒绝新请求，避免叠开多个弹窗。 */
+  const pendingDiscardRef = useRef<PendingDiscardConfirm | null>(null);
+  pendingDiscardRef.current = pendingDiscard;
 
-  const closeTab = useCallback(async (tabId: string) => {
-    const tab = tabsRef.current.find(t => t.id === tabId);
-    if (!tab) return;
-    if (tab.isDirty && !(await confirmDiscardTab(tab.title))) return;
-    historiesRef.current.delete(tabId);
-    setTabs(prev => prev.filter(t => t.id !== tabId));
-  }, [confirmDiscardTab]);
+  const askDiscardConfirm = useCallback((
+    message: string,
+    confirmText: string,
+    saveText?: string,
+  ): Promise<'cancel' | 'discard' | 'save'> => {
+    if (pendingDiscardRef.current) return Promise.resolve('cancel');
+    return new Promise(resolve => {
+      setPendingDiscard({
+        message,
+        confirmText,
+        saveText: saveText ?? null,
+        resolve: decision => {
+          setPendingDiscard(null);
+          resolve(decision);
+        },
+      });
+    });
+  }, []);
 
   const handleOpenFile = useCallback(async () => {
     /* 安卓：系统文档选择器（支持多选），逐个复用 openPathIntoTab */
@@ -789,24 +848,13 @@ export default function App() {
   }, [tabs]);
 
   const handleNewFile = useCallback(() => {
-    const newTab: FileTab = {
-      id: nextTabId(),
-      title: `untitled-${tabCounter + 1}.txt`,
-      path: null,
-      handle: null,
-      content: '',
-      originalContent: '',
-      language: 'plaintext',
-      isDirty: false,
-      readOnly: false,
-      mdView: 'edit',
-    };
+    const newTab = makeUntitledTab(`untitled-${tabCounter + 1}.txt`);
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
   }, []);
 
-  const persistTab = useCallback(async (tab: FileTab, saveAs: boolean) => {
-    if (tab.readOnly || savingRef.current) return;
+  const persistTab = useCallback(async (tab: FileTab, saveAs: boolean): Promise<boolean> => {
+    if (tab.readOnly || savingRef.current) return false;
     savingRef.current = true;
     setSaving(true);
     try {
@@ -821,11 +869,33 @@ export default function App() {
         // 自写识别：更新已知磁盘内容，后续 watch 事件比对无差异，不产生 diff
         if (savedPath) updateKnownDiskContent(savedPath, tab.content);
       }
+      return result.ok;
     } finally {
       savingRef.current = false;
       setSaving(false);
     }
   }, [updateKnownDiskContent]);
+
+  /* 关闭单个标签前的丢弃确认；「关闭并保存」先落盘（无路径走另存为），
+     保存被取消/失败则不关闭，与退出确认的「退出并保存」语义一致 */
+  const confirmDiscardTab = useCallback(async (tab: FileTab): Promise<boolean> => {
+    const decision = await askDiscardConfirm(
+      `"${tab.title}" 有未保存的更改，关闭后将丢失这些修改。`,
+      '关闭不保存',
+      '关闭并保存',
+    );
+    if (decision === 'cancel') return false;
+    if (decision === 'discard') return true;
+    return await persistTab(tab, !tab.path);
+  }, [askDiscardConfirm, persistTab]);
+
+  const closeTab = useCallback(async (tabId: string) => {
+    const tab = tabsRef.current.find(t => t.id === tabId);
+    if (!tab) return;
+    if (tab.isDirty && !(await confirmDiscardTab(tab))) return;
+    historiesRef.current.delete(tabId);
+    setTabs(prev => prev.filter(t => t.id !== tabId));
+  }, [confirmDiscardTab]);
 
   const handleSave = useCallback(async () => {
     if (!activeTab) return;
@@ -877,18 +947,35 @@ export default function App() {
     ));
   }, [activeTab]);
 
-  /* 关闭确认：有未保存标签时弹确认框，返回是否允许关闭 */
+  /* 关闭确认：有未保存标签时弹应用内确认弹窗，返回是否允许关闭 */
+  const exitingRef = useRef(false); // 保存并退出进行中，忽略期间的重复关闭请求
+
   const confirmWindowClose = useCallback(async (): Promise<boolean> => {
+    if (exitingRef.current) return false;
     const dirtyCount = tabsRef.current.filter(t => t.isDirty).length;
     if (dirtyCount === 0) return true;
-    const message = `${dirtyCount} 个标签页有未保存的更改，确定退出吗？`;
-    // Tauri 的 WebView2 不弹 window.confirm，桌面端走 dialog 插件的原生对话框
-    if (isTauri) {
-      const { ask } = await import('@tauri-apps/plugin-dialog');
-      return await ask(message, { title: 'Nexus Editor', kind: 'warning' });
+    const decision = await askDiscardConfirm(
+      `${dirtyCount} 个标签页有未保存的更改，退出后将丢失这些修改。`,
+      '退出不保存',
+      '退出并保存',
+    );
+    if (decision === 'cancel') return false;
+    if (decision === 'discard') return true;
+    /* 退出并保存：逐个落盘（有路径静默写盘，无路径走另存为对话框），
+       任一保存被取消/失败则中止退出留在应用，避免静默丢数据 */
+    exitingRef.current = true;
+    try {
+      const dirty = tabsRef.current.filter(t => t.isDirty && !t.readOnly);
+      for (const tab of dirty) {
+        const ok = await persistTab(tab, !tab.path);
+        if (!ok) return false;
+      }
+      writeSessionSnapshot();
+      return true;
+    } finally {
+      exitingRef.current = false;
     }
-    return window.confirm(message);
-  }, []);
+  }, [askDiscardConfirm, persistTab, writeSessionSnapshot]);
 
   /* ---- 窗口关闭统一拦截（仅 Tauri）：自定义按钮 / Alt+F4 / 任务栏关闭都走未保存确认 ----
      Tauri 在存在 close-requested 监听时自动拦截系统关闭并转发事件；
@@ -900,22 +987,17 @@ export default function App() {
     if (!isTauri) return;
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    let confirmInFlight = false; // 确认框等待期间忽略后续关闭请求，防止连弹多个对话框
     (async () => {
       try {
         const appWindow = getCurrentWindow();
         const fn = await appWindow.onCloseRequested(async (event) => {
           event.preventDefault();
-          if (confirmInFlight) return;
-          confirmInFlight = true;
           try {
             const confirmed = await confirmWindowCloseRef.current();
             if (confirmed) await appWindow.destroy();
           } catch (e) {
             // 确认流程出错：宁可关不掉也不静默丢数据
             console.error('窗口关闭确认失败:', e);
-          } finally {
-            confirmInFlight = false;
           }
         });
         if (disposed) fn();
@@ -931,12 +1013,13 @@ export default function App() {
   }, []);
 
   /* ---- 安卓系统返回键：逐层关闭弹层，最后走与桌面一致的未保存退出确认 ---- */
-  const overlayStateRef = useRef({ tabSheetOpen, menuOpen, aboutOpen });
-  overlayStateRef.current = { tabSheetOpen, menuOpen, aboutOpen };
+  const overlayStateRef = useRef({ tabSheetOpen, menuOpen, aboutOpen, pendingDiscard });
+  overlayStateRef.current = { tabSheetOpen, menuOpen, aboutOpen, pendingDiscard };
   useEffect(() => {
     if (!IS_ANDROID_APP) return;
     const onBack = () => {
       const o = overlayStateRef.current;
+      if (o.pendingDiscard) { o.pendingDiscard.resolve('cancel'); return; }
       if (o.tabSheetOpen) { setTabSheetOpen(false); return; }
       if (o.menuOpen) { setMenuOpen(false); return; }
       if (o.aboutOpen) { setAboutOpen(false); return; }
@@ -1062,7 +1145,7 @@ export default function App() {
 
   return (
     <div className={cn(
-      "h-dvh flex flex-col overflow-hidden",
+      "h-dvh flex flex-col overflow-hidden relative",
       isDarkMode ? "bg-zinc-900 text-zinc-200" : "bg-zinc-50 text-zinc-800"
     )}>
       {/* 标题栏：手机端用 TopAppBar 取代自绘标题栏 + 菜单栏；桌面与安卓平板保留原布局 */}
@@ -1530,6 +1613,22 @@ export default function App() {
         onCloseTab={(id) => { void closeTab(id); }}
         onNew={handleNewFile}
       />
+
+      {/* 丢弃确认弹窗（退出应用 / 关闭脏标签共用，自绘以统一三端视觉） */}
+      {pendingDiscard && (
+        <ConfirmDialog
+          title="未保存的更改"
+          message={pendingDiscard.message}
+          isDarkMode={isDarkMode}
+          confirmText={pendingDiscard.confirmText}
+          danger
+          extraAction={pendingDiscard.saveText
+            ? { text: pendingDiscard.saveText, onAction: () => pendingDiscard.resolve('save') }
+            : undefined}
+          onConfirm={() => pendingDiscard.resolve('discard')}
+          onCancel={() => pendingDiscard.resolve('cancel')}
+        />
+      )}
     </div>
   );
 }
