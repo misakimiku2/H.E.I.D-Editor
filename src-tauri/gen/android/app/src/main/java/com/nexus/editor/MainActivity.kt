@@ -5,7 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
-import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
@@ -15,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import org.json.JSONArray
+import java.nio.charset.Charset
 
 class MainActivity : TauriActivity() {
   private var webViewRef: WebView? = null
@@ -62,16 +62,43 @@ class MainActivity : TauriActivity() {
       createDocLauncher.launch(intent)
     }
 
-    /** 对 content URI 覆写内容（SAF 写授权在前端打开时持久化） */
+    /** 对 content URI 覆写内容（SAF 写授权在前端打开时持久化）。
+        content 为 JS 侧字符串，此处按 encoding label 编码为字节，支持 UTF-8 以外的编码写盘。 */
     @JavascriptInterface
-    fun writeBase64(uri: String, dataBase64: String): Boolean = try {
+    fun writeUri(uri: String, content: String, encoding: String, bom: Boolean): Boolean = try {
+      val charset = charsetFor(encoding)
+      var bytes = content.toByteArray(charset)
+      if (bom) {
+        val prefix: ByteArray = when (encoding.lowercase()) {
+          "utf-8" -> byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
+          "utf-16le" -> byteArrayOf(0xFF.toByte(), 0xFE.toByte())
+          "utf-16be" -> byteArrayOf(0xFE.toByte(), 0xFF.toByte())
+          else -> ByteArray(0)
+        }
+        if (prefix.isNotEmpty() && !(bytes.size >= prefix.size && prefix.indices.all { bytes[it] == prefix[it] })) {
+          bytes = prefix + bytes
+        }
+      }
       contentResolver.openOutputStream(Uri.parse(uri), "wt")?.use { os ->
-        os.write(Base64.decode(dataBase64, Base64.NO_WRAP))
+        os.write(bytes)
         os.flush()
         true
       } ?: false
     } catch (e: Exception) {
       false
+    }
+
+    /** WHATWG label → Charset（与前端 lib/encoding.ts 的选项一一对应） */
+    private fun charsetFor(label: String): Charset = when (label.lowercase()) {
+      "utf-8" -> Charsets.UTF_8
+      "utf-16le" -> Charsets.UTF_16LE
+      "utf-16be" -> Charsets.UTF_16BE
+      "gbk" -> Charset.forName("GBK")
+      "gb18030" -> Charset.forName("GB18030")
+      "big5" -> Charset.forName("Big5")
+      "shift_jis" -> Charset.forName("Shift_JIS")
+      "windows-1252" -> Charset.forName("windows-1252")
+      else -> Charsets.UTF_8
     }
 
     /** 退出应用（window.destroy 在 Android 上不可用） */

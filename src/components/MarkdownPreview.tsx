@@ -8,6 +8,8 @@ import { cn } from '../lib/utils';
 import { IS_ANDROID_APP } from '../lib/platform';
 import { FormatMenu, transformSlice, type MdOp, type MenuState } from './MarkdownTools';
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
+import { PreviewFindBar } from './PreviewFindBar';
+import type { PointerPos } from '../hooks/useLastPointer';
 
 /* ---- 本地图片：相对/绝对路径通过 Tauri fs 读取为 blob URL，带缓存 ---- */
 
@@ -249,8 +251,8 @@ const InsertMenu = React.memo<{
     <div
       ref={ref}
       className={cn(
-        "fixed z-[90] w-40 rounded-xl border shadow-xl p-1 flex flex-col",
-        isDarkMode ? "border-zinc-700 bg-zinc-800" : "border-zinc-200 bg-white"
+        "fixed z-[90] w-40 rounded-xl border shadow-xl backdrop-blur-md p-1 flex flex-col",
+        isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
       )}
       style={{ left, top }}
       onContextMenu={(e) => e.preventDefault()}
@@ -261,8 +263,8 @@ const InsertMenu = React.memo<{
       <button
         onClick={onTable}
         className={cn(
-          "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 rounded-md transition-colors",
-          isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+          "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
+          isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
         )}
       >
         <Table size={13} />
@@ -272,8 +274,8 @@ const InsertMenu = React.memo<{
       <button
         onClick={onImage}
         className={cn(
-          "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 rounded-md transition-colors",
-          isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+          "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
+          isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
         )}
       >
         <ImageIcon size={13} />
@@ -299,6 +301,11 @@ interface MarkdownPreviewProps {
   onRedo?: () => void;
   /** 滚动容器回调（分屏同步滚动用） */
   onScroller?: (el: HTMLDivElement | null) => void;
+  /** true 时渲染预览查找浮层（只搜渲染后的文本） */
+  findOpen?: boolean;
+  onFindClose?: () => void;
+  /** 查找浮层弹出定位（打开瞬间的指针位置） */
+  getPointer?: () => PointerPos;
 }
 
 interface PreviewMenuState extends MenuState {
@@ -340,6 +347,7 @@ export interface MarkdownPreviewHandle {
 
 export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle, MarkdownPreviewProps>(({
   content, isDarkMode, onChange, canUndo, canRedo, onUndo, onRedo, onScroller,
+  findOpen, onFindClose, getPointer,
 }, ref) => {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<PreviewMenuState | null>(null);
@@ -870,7 +878,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         contentRef.current = el;
         onScroller?.(el);
       }}
-      className="h-full overflow-auto"
+      className="h-full overflow-auto heid-scroll"
       onContextMenu={handleContextMenu}
       onMouseMove={handleMouseMove}
       onClick={handleContainerClick}
@@ -986,6 +994,17 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           onTable={handleInsertTable}
           onImage={() => { setImageModal(buildSourceSnippet(content, blankMenu.insertAt)); setBlankMenu(null); }}
           onClose={closeBlankMenu}
+        />
+      )}
+
+      {/* 预览查找浮层：只搜索渲染后的文本（portal 渲染到 body，弹出在指针位置） */}
+      {findOpen && (
+        <PreviewFindBar
+          getContainer={() => contentRef.current}
+          content={content}
+          isDarkMode={isDarkMode}
+          getPointer={getPointer}
+          onClose={() => onFindClose?.()}
         />
       )}
 

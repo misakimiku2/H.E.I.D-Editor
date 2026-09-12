@@ -211,8 +211,8 @@ export const FormatMenu = React.memo<{
     <div
       ref={ref}
       className={cn(
-        "fixed z-[90] rounded-xl border shadow-xl p-2 flex flex-col gap-1.5 select-none overflow-y-auto",
-        isDarkMode ? "border-zinc-700 bg-zinc-800" : "border-zinc-200 bg-white"
+        "fixed z-[90] rounded-xl border shadow-xl backdrop-blur-md p-2 flex flex-col gap-1.5 select-none overflow-y-auto",
+        isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
       )}
       style={{ left, top, width: MENU_W, maxHeight: 'calc(100dvh - 8px)' }}
       onContextMenu={(e) => e.preventDefault()}

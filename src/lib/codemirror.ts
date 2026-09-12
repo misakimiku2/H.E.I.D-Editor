@@ -1,19 +1,6 @@
 import { EditorView } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
-import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
-import { javascript } from '@codemirror/lang-javascript';
-import { python } from '@codemirror/lang-python';
-import { css } from '@codemirror/lang-css';
-import { html } from '@codemirror/lang-html';
-import { json } from '@codemirror/lang-json';
-import { rust } from '@codemirror/lang-rust';
-import { java } from '@codemirror/lang-java';
-import { cpp } from '@codemirror/lang-cpp';
-import { sql } from '@codemirror/lang-sql';
-import { yaml } from '@codemirror/lang-yaml';
-import { xml } from '@codemirror/lang-xml';
-import { php } from '@codemirror/lang-php';
 import type { Extension } from '@codemirror/state';
 
 const UI_FONT = '"Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
@@ -295,28 +282,50 @@ export const vsCodeLightHighlightStyle = HighlightStyle.define([
   { tag: t.list, color: '#000000' },
 ]);
 
-export function getLanguageExtension(lang: string): Extension {
-  switch (lang.toLowerCase()) {
-    case 'javascript': return javascript();
-    case 'typescript':
-    case 'tsx': return javascript({ jsx: true, typescript: true });
-    case 'jsx': return javascript({ jsx: true });
-    case 'python': return python();
-    case 'css': return css();
-    case 'html': return html();
-    case 'json': return json();
-    case 'rust': return rust();
-    case 'java': return java();
-    case 'c':
-    case 'cpp': return cpp();
-    case 'sql': return sql();
-    case 'yaml':
-    case 'yml': return yaml();
-    case 'xml': return xml();
-    case 'php': return php();
-    case 'markdown':
-    case 'md': return markdown({ base: markdownLanguage });
-    default: return [];
+/** 语言扩展懒加载注册表：按需 import()，语言包拆分为独立 chunk，不进主 bundle */
+type LanguageLoader = () => Promise<Extension>;
+
+const jsLoader = () => import('@codemirror/lang-javascript');
+
+const LANGUAGE_LOADERS: Record<string, LanguageLoader> = {
+  javascript: async () => (await jsLoader()).javascript(),
+  typescript: async () => (await jsLoader()).javascript({ jsx: true, typescript: true }),
+  tsx: async () => (await jsLoader()).javascript({ jsx: true, typescript: true }),
+  jsx: async () => (await jsLoader()).javascript({ jsx: true }),
+  python: async () => (await import('@codemirror/lang-python')).python(),
+  css: async () => (await import('@codemirror/lang-css')).css(),
+  html: async () => (await import('@codemirror/lang-html')).html(),
+  json: async () => (await import('@codemirror/lang-json')).json(),
+  rust: async () => (await import('@codemirror/lang-rust')).rust(),
+  java: async () => (await import('@codemirror/lang-java')).java(),
+  c: async () => (await import('@codemirror/lang-cpp')).cpp(),
+  cpp: async () => (await import('@codemirror/lang-cpp')).cpp(),
+  sql: async () => (await import('@codemirror/lang-sql')).sql(),
+  yaml: async () => (await import('@codemirror/lang-yaml')).yaml(),
+  xml: async () => (await import('@codemirror/lang-xml')).xml(),
+  php: async () => (await import('@codemirror/lang-php')).php(),
+  markdown: async () => {
+    const m = await import('@codemirror/lang-markdown');
+    return m.markdown({ base: m.markdownLanguage });
+  },
+};
+
+const languageExtCache = new Map<string, Extension>();
+
+/** 按语言名加载扩展（实例模块级缓存）；未知语言或加载失败返回 null（编辑功能不受影响） */
+export async function loadLanguageExtension(lang: string): Promise<Extension | null> {
+  const key = lang.toLowerCase();
+  const cached = languageExtCache.get(key);
+  if (cached) return cached;
+  const loader = LANGUAGE_LOADERS[key];
+  if (!loader) return null;
+  try {
+    const ext = await loader();
+    languageExtCache.set(key, ext);
+    return ext;
+  } catch (e) {
+    console.warn(`[codemirror] 语言扩展加载失败: ${lang}`, e);
+    return null;
   }
 }
 

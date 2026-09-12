@@ -1,6 +1,6 @@
 [package]
 name = "nexus-editor"
-version = "1.1.0"
+version = "0.4.0"
 description = "Nexus Editor - a standalone code editor extracted from nexus-ai-assistant"
 edition = "2021"
 rust-version = "1.77.2"
@@ -18,6 +18,7 @@ tauri-plugin-fs = { version = "2", features = ["watch"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+encoding_rs = "0.8"
 
 [profile.release]
 codegen-units = 1

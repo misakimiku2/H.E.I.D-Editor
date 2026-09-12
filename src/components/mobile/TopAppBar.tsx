@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   FileText, FolderOpen, Save, SaveAll, Plus, MoreVertical,
-  Sun, SunMoon, Moon, Info, X, Table, Image as ImageIcon,
+  Sun, SunMoon, Moon, Info, X, Table, Image as ImageIcon, Settings, Keyboard,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
@@ -24,6 +24,8 @@ interface TopAppBarProps {
   onInsertTable: () => void;
   onInsertImage: () => void;
   onCloseTab: () => void;
+  onSettings: () => void;
+  onShortcuts: () => void;
   onAbout: () => void;
 }
 
@@ -35,7 +37,7 @@ interface TopAppBarProps {
 export function TopAppBar({
   isDarkMode, title, isDirty, isMarkdown, saving, tabCount, themeMode,
   onThemeMode, onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage,
-  onCloseTab, onAbout,
+  onCloseTab, onSettings, onShortcuts, onAbout,
 }: TopAppBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -61,8 +63,8 @@ export function TopAppBar({
   }, [menuOpen]);
 
   const itemCls = cn(
-    'w-full px-4 min-h-[44px] text-sm font-medium flex items-center gap-3 transition-colors',
-    isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600'
+    'mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 min-h-[44px] text-sm font-medium flex items-center gap-3 transition-colors',
+    isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700'
   );
 
   const menuItem = (
@@ -136,8 +138,8 @@ export function TopAppBar({
           <div
             ref={menuBodyRef}
             className={cn(
-              'absolute right-1 top-full mt-1 z-50 w-56 rounded-lg border shadow-xl py-1 flex flex-col',
-              isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
+              'absolute right-1 top-full mt-1 z-50 w-56 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col',
+              isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70'
             )}
           >
             {menuItem(<FolderOpen size={16} className="shrink-0" />, '打开文件', onOpen)}
@@ -181,6 +183,8 @@ export function TopAppBar({
             </div>
             <div className={cn('h-px mx-3 my-1', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
             {menuItem(<X size={16} className="shrink-0" />, '关闭当前标签', onCloseTab)}
+            {menuItem(<Settings size={16} className="shrink-0" />, '设置', onSettings)}
+            {menuItem(<Keyboard size={16} className="shrink-0" />, '键盘快捷键', onShortcuts)}
             {menuItem(<Info size={16} className="shrink-0" />, '关于 H.E.I.D', onAbout)}
           </div>
         )}

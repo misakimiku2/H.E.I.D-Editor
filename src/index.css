@@ -27,23 +27,59 @@ body {
   overflow: auto;
 }
 
-/* thin scrollbars for the editor */
-.cm-scroller::-webkit-scrollbar {
+/* thin scrollbars：编辑器与 Markdown 预览等滚动容器共用（半透明灰，深浅主题通用） */
+.cm-scroller::-webkit-scrollbar,
+.heid-scroll::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
-.cm-scroller::-webkit-scrollbar-track {
+.cm-scroller::-webkit-scrollbar-track,
+.heid-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
-.cm-scroller::-webkit-scrollbar-thumb {
+.cm-scroller::-webkit-scrollbar-thumb,
+.heid-scroll::-webkit-scrollbar-thumb {
   background: rgba(128, 128, 128, 0.35);
   border-radius: 5px;
 }
-.cm-scroller::-webkit-scrollbar-thumb:hover {
+.cm-scroller::-webkit-scrollbar-thumb:hover,
+.heid-scroll::-webkit-scrollbar-thumb:hover {
   background: rgba(128, 128, 128, 0.55);
 }
-.cm-scroller::-webkit-scrollbar-corner {
+.cm-scroller::-webkit-scrollbar-corner,
+.heid-scroll::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/* 滚动条两端的箭头按钮：自定义样式会隐藏默认按钮，这里用 SVG 画回来（灰色，深浅主题通用） */
+.cm-scroller::-webkit-scrollbar-button,
+.heid-scroll::-webkit-scrollbar-button {
+  display: block;
+  width: 10px;
+  height: 10px;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.cm-scroller::-webkit-scrollbar-button:single-button:vertical:decrement,
+.heid-scroll::-webkit-scrollbar-button:single-button:vertical:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='10'%20height='10'%3E%3Cpath%20d='M2.5%206.5%20L5%204%20L7.5%206.5'%20stroke='%23808080'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.cm-scroller::-webkit-scrollbar-button:single-button:vertical:increment,
+.heid-scroll::-webkit-scrollbar-button:single-button:vertical:increment {
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='10'%20height='10'%3E%3Cpath%20d='M2.5%203.5%20L5%206%20L7.5%203.5'%20stroke='%23808080'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.cm-scroller::-webkit-scrollbar-button:single-button:horizontal:decrement,
+.heid-scroll::-webkit-scrollbar-button:single-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='10'%20height='10'%3E%3Cpath%20d='M6.5%202.5%20L4%205%20L6.5%207.5'%20stroke='%23808080'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.cm-scroller::-webkit-scrollbar-button:single-button:horizontal:increment,
+.heid-scroll::-webkit-scrollbar-button:single-button:horizontal:increment {
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='10'%20height='10'%3E%3Cpath%20d='M3.5%202.5%20L6%205%20L3.5%207.5'%20stroke='%23808080'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+/* 悬停时箭头加深，与滑块的 hover 反馈一致 */
+.cm-scroller::-webkit-scrollbar-button:single-button:hover,
+.heid-scroll::-webkit-scrollbar-button:single-button:hover {
+  filter: brightness(0.6);
 }
 
 /* ---- 移动端适配 ---- */
@@ -75,4 +111,13 @@ body {
 }
 .heid-fade-in {
   animation: heid-fade-in 0.15s ease-out;
+}
+/* ---- Markdown 预览查找高亮（CSS Custom Highlight API，浅深主题通用）---- */
+::highlight(heid-find) {
+  background-color: rgba(250, 204, 21, 0.45);
+  color: inherit;
+}
+::highlight(heid-find-current) {
+  background-color: #f59e0b;
+  color: #18181b;
 }

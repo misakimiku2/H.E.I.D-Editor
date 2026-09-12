@@ -26,6 +26,13 @@ export interface ExternalFileWatcherApi {
 /** watch 事件去抖窗口：合并外部程序的连发写入事件 */
 const WATCH_DEBOUNCE_MS = 300;
 
+/** 桌面端解码读文件（走 read_text_file 命令，编码感知），统一 LF 归一后返回 */
+async function readDecoded(path: string): Promise<string> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  const r = await invoke<{ text: string }>('read_text_file', { path, force: null });
+  return r.text.replace(/\r\n?/g, '\n');
+}
+
 export function useExternalFileWatcher({
   paths,
   enabled,
@@ -43,10 +50,11 @@ export function useExternalFileWatcher({
   const onExternalChangeRef = useRef(onExternalChange);
   onExternalChangeRef.current = onExternalChange;
 
-  /* 重读并做真实变更判定（越过的读取失败由调用链吞掉并告警） */
+  /* 重读并做真实变更判定（越过的读取失败由调用链吞掉并告警）。
+     桌面端经 read_text_file 命令解码（编码与打开时一致），文本统一 LF 归一后比对，
+     与编辑器内容空间保持同构，避免 GBK 等编码文件产生假 diff */
   const recheckFile = useCallback(async (path: string): Promise<void> => {
-    const { readFile } = await import('@tauri-apps/plugin-fs');
-    const content = new TextDecoder().decode(await readFile(path));
+    const content = await readDecoded(path);
     const known = diskContentsRef.current.get(path);
     if (known === undefined) {
       // 无基准（异常场景）：静默落下基准，不产生条目
@@ -70,9 +78,9 @@ export function useExternalFileWatcher({
 
   const createWatcher = useCallback(async (path: string): Promise<void> => {
     try {
-      const { watch, readFile } = await import('@tauri-apps/plugin-fs');
+      const { watch } = await import('@tauri-apps/plugin-fs');
       // 建立监听时读到磁盘内容作为基准（首条 diff 的 before 即此内容）
-      const content = new TextDecoder().decode(await readFile(path));
+      const content = await readDecoded(path);
       const unwatch = await watch(path, () => handleWatchEvent(path), {
         delayMs: WATCH_DEBOUNCE_MS,
       });

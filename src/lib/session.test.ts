@@ -101,4 +101,25 @@ describe('saveSessionState / loadSessionState', () => {
       activePath: 'C:/old.md',
     });
   });
+
+  it('virtual 条目的 draft=true 往返保留，draft 非 true 归一为 undefined', () => {
+    const storage = memoryStorage();
+    const state: SessionState = {
+      tabs: [
+        { kind: 'virtual', title: 'a.txt', draft: true },
+        { kind: 'virtual', title: 'b.txt', draft: false as unknown as undefined },
+        { kind: 'virtual', title: 'c.txt' },
+      ],
+      activePath: null,
+    };
+    saveSessionState(state, storage);
+    expect(loadSessionState(storage)).toEqual({
+      tabs: [
+        { kind: 'virtual', title: 'a.txt', draft: true },
+        { kind: 'virtual', title: 'b.txt' },
+        { kind: 'virtual', title: 'c.txt' },
+      ],
+      activePath: null,
+    });
+  });
 });

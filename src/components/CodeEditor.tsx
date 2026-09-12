@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
-import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine } from '@codemirror/view';
+import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, highlightWhitespace, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine } from '@codemirror/view';
 import { history, indentWithTab } from '@codemirror/commands';import { syntaxTree, ensureSyntaxTree, indentUnit, foldGutter, bracketMatching, indentOnInput, syntaxHighlighting, foldKeymap, HighlightStyle, defaultHighlightStyle } from '@codemirror/language';
 import { highlightSelectionMatches } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
@@ -10,17 +10,21 @@ import { EditorState, Extension, StateEffect } from '@codemirror/state';
 import { Type } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { FormatMenu, INLINE_WRAPS, transformSlice, type MdOp } from './MarkdownTools';
+import { FindReplaceBar } from './FindReplaceBar';
+import { findHighlightExtension } from '../lib/editorSearch';
+import { loadLanguageExtension } from '../lib/codemirror';
+import { DEFAULT_SETTINGS, type EditorSettings } from '../lib/settings';
 import {
   vsCodeDarkTheme, vsCodeLightTheme,
   vsCodeDarkHighlightStyle, vsCodeLightHighlightStyle,
-  getLanguageExtension,
 } from '../lib/codemirror';
 import { IS_ANDROID_APP } from '../lib/platform';
+import type { PointerPos } from '../hooks/useLastPointer';
 
 const CODE_FONT = '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace';
 
-/* 小地图/粘性滚动：桌面始终启用（零回归）；安卓按 ≥1024px（平板）启用，手机关闭 */
-function codeMapEnabled(): boolean {
+/* 安卓平台小地图/粘性滚动门槛：手机关闭，平板（≥1024px）开启；再叠加用户设置与大文件降级 */
+function platformCodeMapOk(): boolean {
   return !IS_ANDROID_APP || window.matchMedia('(min-width: 1024px)').matches;
 }
 
@@ -145,12 +149,24 @@ export interface CodeEditorProps {
   language: string;
   isDarkMode: boolean;
   editable?: boolean;
+  /** 编辑器设置（字体/缩进/换行/minimap 等），缺省用 DEFAULT_SETTINGS */
+  editorSettings?: EditorSettings;
+  /** 大文件降级：关闭语法高亮/补全/选区匹配/小地图/粘性滚动 */
+  lowPerf?: boolean;
   /** meta.major = true 表示这是离散操作（如 markdown 格式化），撤销历史独立成条 */
   onChange?: (value: string, meta?: { major?: boolean }) => void;
   onSave?: () => void;
   onCreateEditor?: (view: EditorView) => void;
   /** 滚动容器回调（分屏同步滚动用） */
   onScroller?: (el: HTMLElement | null) => void;
+  /** 光标/选区变化上报（状态栏 行:列 与选中字符数用） */
+  onCursor?: (info: { line: number; col: number; selChars: number }) => void;
+  /** 查找浮层状态（open 时渲染 FindReplaceBar） */
+  find?: { open: boolean; showReplace: boolean; goto: boolean };
+  /** 查找浮层关闭回调（Esc / 关闭按钮） */
+  onFindClose?: () => void;
+  /** 查找浮层弹出定位（打开瞬间的指针位置） */
+  getPointer?: () => PointerPos;
   /** 提供（markdown 且可编辑）时，选区右键弹 markdown 格式菜单 */
   markdownMenu?: {
     canUndo: boolean;
@@ -165,12 +181,19 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   language,
   isDarkMode,
   editable = true,
+  editorSettings,
+  lowPerf = false,
   onChange,
   onSave,
   onCreateEditor,
   onScroller,
+  onCursor,
+  find,
+  onFindClose,
+  getPointer,
   markdownMenu,
 }) => {
+  const settings = editorSettings ?? DEFAULT_SETTINGS;
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const stickyRef = useRef<HTMLElement | null>(null);
   const minimapRef = useRef<{ canvas: HTMLCanvasElement; container: HTMLElement } | null>(null);
@@ -178,15 +201,37 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const rafRef = useRef<number | null>(null);
   const viewReadyRef = useRef<EditorView | null>(null);
   const cleanupFns = useRef<(() => void)[]>([]);
+  /* 语言扩展懒加载：语言切换时先清空再异步载入（chunk 已缓存时几乎无感） */
+  const [langExtension, setLangExtension] = useState<Extension | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setLangExtension(null);
+    if (lowPerf) return;
+    void loadLanguageExtension(language).then(ext => {
+      if (!cancelled) setLangExtension(ext);
+    });
+    return () => { cancelled = true; };
+  }, [language, lowPerf]);
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const onScrollerRef = useRef(onScroller);
   onScrollerRef.current = onScroller;
+  const onCursorRef = useRef(onCursor);
+  onCursorRef.current = onCursor;
+  /* 查找浮层状态镜像进 ref：编辑器 keymap 的 Escape 需要同步读到最新值 */
+  const findOpenRef = useRef(!!find?.open);
+  findOpenRef.current = !!find?.open;
+  const onFindCloseRef = useRef(onFindClose);
+  onFindCloseRef.current = onFindClose;
+  /** 查找栏读取编辑器视图的稳定入口（FindReplaceBar 的 effect 依赖稳定性靠它保证） */
+  const getView = useCallback(() => viewReadyRef.current, []);
   /* markdown 右键格式化后，下一次 onChange 以 major 记入撤销历史 */
   const majorNextRef = useRef(false);
   const [mdMenu, setMdMenu] = useState<{ x: number; y: number; from: number; to: number; text: string } | null>(null);
+  /* 光标上报去重（extensions memo 重建时避免重复回调同值） */
+  const lastCursorRef = useRef<{ line: number; col: number; selChars: number } | null>(null);
   /* 触屏：选区非空时浮出「格式化」入口（长按 contextmenu 在安卓上不可靠） */
   const [touchFmtBtn, setTouchFmtBtn] = useState<{ x: number; y: number; from: number; to: number } | null>(null);
 
@@ -982,12 +1027,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     minimapRef.current = null;
     fixSelectionLayer(view);
     if (!IS_ANDROID_APP) setupLineNumberClick(view);
-    if (codeMapEnabled()) {
-      setupStickyScroll(view);
-      setupMinimap(view);
+    if (!lowPerf && platformCodeMapOk()) {
+      if (settings.stickyScroll) setupStickyScroll(view);
+      if (settings.minimap) setupMinimap(view);
     }
     onCreateEditor?.(view);
-  }, [fixSelectionLayer, setupLineNumberClick, setupStickyScroll, setupMinimap, onCreateEditor]);
+  }, [fixSelectionLayer, setupLineNumberClick, setupStickyScroll, setupMinimap, onCreateEditor, lowPerf, settings.stickyScroll, settings.minimap]);
 
   /* 拆掉并按当前断点重建粘性滚动/小地图（主题切换与平板旋转断点共用） */
   const reinstallCodeMapFeatures = useCallback(() => {
@@ -1008,11 +1053,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       minimapRafRef.current = null;
     }
     fixSelectionLayer(view);
-    if (codeMapEnabled()) {
-      setupStickyScroll(view);
-      setupMinimap(view);
+    if (!lowPerf && platformCodeMapOk()) {
+      if (settings.stickyScroll) setupStickyScroll(view);
+      if (settings.minimap) setupMinimap(view);
     }
-  }, [fixSelectionLayer, setupStickyScroll, setupMinimap]);
+  }, [fixSelectionLayer, setupStickyScroll, setupMinimap, lowPerf, settings.stickyScroll, settings.minimap]);
 
   /* re-setup features on theme change */
   useEffect(() => {
@@ -1043,9 +1088,19 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     };
   }, []);
 
+  /* 字体/字号/行高：独立小主题叠加在基础主题之后，随设置即时生效 */
+  const fontTheme = useMemo(() => EditorView.theme({
+    '&': { fontSize: `${settings.fontSize}px`, fontFamily: settings.fontFamily, lineHeight: String(settings.lineHeight) },
+    '.cm-scroller': { fontFamily: settings.fontFamily },
+    '.cm-content': { fontFamily: settings.fontFamily },
+    '.cm-gutters': { fontFamily: settings.fontFamily },
+  }), [settings.fontSize, settings.fontFamily, settings.lineHeight]);
+
   const extensions = useMemo(() => {
     const lineCount = value.split('\n').length;
-    const isLargeFile = lineCount > 1000;
+    const isLargeFile = lowPerf || lineCount > 1000;
+    const wrapEnabled = settings.lineWrapMode === 'always'
+      || (settings.lineWrapMode === 'markdown' && language === 'markdown');
     const exts: Extension[] = [
       syntaxHighlighting(isDarkMode ? vsCodeDarkHighlightStyle : vsCodeLightHighlightStyle),
       highlightSpecialChars(),
@@ -1053,7 +1108,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       drawSelection(),
       dropCursor(),
       EditorState.allowMultipleSelections.of(true),
-      indentUnit.of('  '),
+      indentUnit.of(settings.insertSpaces ? ' '.repeat(settings.tabSize) : '\t'),
+      EditorState.tabSize.of(settings.tabSize),
+      fontTheme,
       lineNumbers(),
       highlightActiveLineGutter(),
       highlightActiveLine(),
@@ -1077,11 +1134,20 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         ...closeBracketsKeymap,
         indentWithTab,
         { key: 'Mod-s', run: () => { onSaveRef.current?.(); return true; } },
+        { key: 'Escape', run: () => {
+          if (!findOpenRef.current) return false;
+          onFindCloseRef.current?.();
+          return true;
+        } },
         ...foldKeymap,
       ]),
+      findHighlightExtension(),
     ];
-    if (language === 'markdown') {
+    if (wrapEnabled) {
       exts.push(EditorView.lineWrapping);
+    }
+    if (settings.showWhitespace) {
+      exts.push(highlightWhitespace());
     }
     /* 触屏选区跟随：非空选区时在其上方浮出格式化入口按钮 */
     exts.push(EditorView.updateListener.of((u) => {
@@ -1092,15 +1158,31 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       if (!coords) { setTouchFmtBtn(null); return; }
       setTouchFmtBtn({ x: coords.left, y: coords.top, from: sel.from, to: sel.to });
     }));
-    const langExt = getLanguageExtension(language);
-    if (langExt) exts.push(langExt);
+    /* 光标/选区变化上报（状态栏 行:列 / 选中字符数）；值未变化时跳过 */
+    exts.push(EditorView.updateListener.of((u) => {
+      if (!u.selectionSet && !u.docChanged) return;
+      const cb = onCursorRef.current;
+      if (!cb) return;
+      const sel = u.state.selection.main;
+      const line = u.state.doc.lineAt(sel.head);
+      const info = {
+        line: line.number,
+        col: sel.head - line.from + 1,
+        selChars: Math.abs(sel.to - sel.from),
+      };
+      const last = lastCursorRef.current;
+      if (last && last.line === info.line && last.col === info.col && last.selChars === info.selChars) return;
+      lastCursorRef.current = info;
+      cb(info);
+    }));
+    if (langExtension) exts.push(langExtension);
     if (!isLargeFile) {
       exts.push(highlightSelectionMatches());
       exts.push(autocompletion());
       exts.push(indentOnInput());
     }
     return exts;
-  }, [language, value, isDarkMode]);
+  }, [language, value, isDarkMode, settings, fontTheme, langExtension, lowPerf]);
 
   /* onChange 统一经此中转：markdown 格式化等离散操作附带 major 标记 */
   const handleValueChange = useCallback((val: string) => {
@@ -1110,7 +1192,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   }, []);
 
   return (
-    <div className="h-full w-full" onContextMenu={handleEditorContextMenu}>
+    <div className="relative h-full w-full" onContextMenu={handleEditorContextMenu}>
       <CodeMirror
         ref={cmRef}
         value={value}
@@ -1128,6 +1210,17 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           fontSize: IS_ANDROID_APP ? '14px' : '13px',
         }}
       />
+      {find?.open && (
+        <FindReplaceBar
+          getView={getView}
+          isDarkMode={isDarkMode}
+          showReplace={find.showReplace}
+          gotoMode={find.goto}
+          canReplace={!!editable}
+          getPointer={getPointer}
+          onClose={() => onFindCloseRef.current?.()}
+        />
+      )}
       {mdMenu && markdownMenu && (
         <FormatMenu
           menu={mdMenu}

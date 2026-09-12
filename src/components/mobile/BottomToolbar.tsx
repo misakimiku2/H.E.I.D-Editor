@@ -1,4 +1,4 @@
-import { FolderOpen, Save, Undo2, Redo2, Eye, Pencil } from 'lucide-react';
+import { FolderOpen, Save, Undo2, Redo2, Eye, Pencil, Search } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 interface BottomToolbarProps {
@@ -15,15 +15,16 @@ interface BottomToolbarProps {
   onUndo: () => void;
   onRedo: () => void;
   onToggleView: () => void;
+  onFind: () => void;
 }
 
 /**
- * 手机端底部工具栏（拇指区）：打开 / 撤销 / 保存 / 重做 / 编辑预览切换。
+ * 手机端底部工具栏（拇指区）：打开 / 撤销 / 保存 / 重做 / 查找 / 编辑预览切换。
  * 取代桌面端键盘快捷键；触控目标 ≥44px。
  */
 export function BottomToolbar({
   isDarkMode, isDirty, canUndo, canRedo, saving, isMarkdown, view,
-  onOpen, onSave, onUndo, onRedo, onToggleView,
+  onOpen, onSave, onUndo, onRedo, onToggleView, onFind,
 }: BottomToolbarProps) {
   const btnCls = (disabled?: boolean) => cn(
     'flex-1 min-h-[52px] rounded-lg flex flex-col items-center justify-center gap-0.5 transition-colors',
@@ -67,6 +68,11 @@ export function BottomToolbar({
       <button onClick={onRedo} disabled={!canRedo} className={btnCls(!canRedo)} aria-label="重做">
         <Redo2 size={19} />
         重做
+      </button>
+      {/* 编辑/预览态都可用：预览态自动路由到预览查找（只搜渲染文本） */}
+      <button onClick={onFind} className={btnCls()} aria-label="查找替换">
+        <Search size={19} />
+        查找
       </button>
       <button
         onClick={onToggleView}

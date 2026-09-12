@@ -2,8 +2,10 @@
  * 会话持久化（仅 Tauri 桌面端使用）：
  * 记录上次会话的标签页列表与激活标签，重启时由 App 重建。
  * - file 标签：只存路径 + markdown 视图模式，恢复时重读磁盘（磁盘内容为准，恢复为干净状态）；
- * - virtual 标签：无路径且未编辑的标签（welcome 示例页 / 空的 untitled），内容可确定性重建，恢复无损；
- *   脏的无路径标签不持久化——其存亡由退出确认决定，用户确认放弃后不应"复活"。
+ *   脏的 file 标签同样只存路径——未保存内容由草稿（lib/drafts）按路径承载，恢复时叠加并标脏；
+ * - virtual 标签：无路径的标签（welcome 示例页 / untitled），draft=false 表示内容可确定性重建；
+ *   draft=true 表示退出时是脏标签，未保存内容在草稿里（lib/drafts 的 untitled:<title> 键），
+ *   仅用于异常退出后的恢复；用户明确「不保存」退出时草稿与快照条目一并清除，标签不应"复活"。
  */
 
 export type SessionMdView = 'edit' | 'split' | 'preview';
@@ -11,7 +13,7 @@ export type SessionMdView = 'edit' | 'split' | 'preview';
 /** 一个可恢复标签页的持久化描述 */
 export type SessionTab =
   | { kind: 'file'; path: string; mdView: SessionMdView }
-  | { kind: 'virtual'; title: string };
+  | { kind: 'virtual'; title: string; draft?: boolean };
 
 export interface SessionState {
   tabs: SessionTab[];
@@ -52,7 +54,7 @@ export function loadSessionState(storage: Storage | null = defaultStorage()): Se
       const rec = t as Record<string, unknown>;
       if (rec.kind === 'virtual') {
         if (typeof rec.title === 'string' && rec.title.length > 0) {
-          parsed.push({ kind: 'virtual', title: rec.title });
+          parsed.push({ kind: 'virtual', title: rec.title, draft: rec.draft === true ? true : undefined });
         }
         continue;
       }

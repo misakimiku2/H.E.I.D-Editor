@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
-  FileText, Code2, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
+  FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
-  GitCompare, Columns2,
+  GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -12,7 +13,6 @@ import { MarkdownPreview, type MarkdownPreviewHandle } from './components/Markdo
 import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
-import { detectLanguageFromPath, LANGUAGE_LABELS } from './lib/codemirror';
 import {
   appendEntry, removeEntry, revertEntry, trimTimeline, clampDiffEntries,
   DEFAULT_DIFF_ENTRIES, type ExternalDiffEntry,
@@ -21,7 +21,25 @@ import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { loadSessionState, saveSessionState, type SessionMdView, type SessionTab } from './lib/session';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath } from './lib/platform';
+import { detectLanguageFromPath, LANGUAGE_LABELS } from './lib/codemirror';
+import {
+  applyLineEnding, detectLineEnding, normalizeToLf,
+  EOL_LABELS, type LineEnding,
+} from './lib/lineEndings';
+import {
+  decodeAs, detectEncoding, encodingLabel, ENCODING_OPTIONS,
+} from './lib/encoding';
+import {
+  addRecentFile, clearRecentFiles, listRecentFiles, type RecentFile,
+} from './lib/recentFiles';
+import {
+  loadSettings, saveSettings, DEFAULT_SETTINGS, type EditorSettings,
+} from './lib/settings';
+import { deleteDraft, draftKeyForTab, getDraft, saveDraft } from './lib/drafts';
+import { SettingsDialog } from './components/SettingsDialog';
+import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
+import { useLastPointer } from './hooks/useLastPointer';
 import { TopAppBar } from './components/mobile/TopAppBar';
 import { BottomToolbar } from './components/mobile/BottomToolbar';
 import { TabSheet } from './components/mobile/TabSheet';
@@ -42,7 +60,22 @@ interface FileTab {
   isDirty: boolean;
   readOnly: boolean;
   mdView: MdViewMode;
+  /** 文件编码（WHATWG label；浏览器保存始终 UTF-8） */
+  encoding: string;
+  /** 文件是否带 BOM（UTF-8 / UTF-16 写回时保持） */
+  bom: boolean;
+  /** 当前目标换行符（编辑器内统一 LF，保存时转换） */
+  eol: LineEnding;
+  /** 磁盘上的原换行符（eol 与其不同即视为有未保存修改） */
+  originalEol: LineEnding;
+  /** 疑似二进制文件（检测含 NUL），只读预览 */
+  binary?: boolean;
+  /** 大文件（超降级阈值）：关闭语法高亮/小地图等保证流畅 */
+  large?: boolean;
 }
+
+/** 大文件降级阈值（字符数）：超过即关闭语法高亮、小地图、补全等重计算特性 */
+const LARGE_FILE_CHARS = 2_000_000;
 
 /* ---------- file system helpers (Tauri desktop / web File System Access API) ---------- */
 
@@ -65,6 +98,40 @@ interface OpenedFile {
   name: string;
   path: string | null;
   handle: FileSystemFileHandle | null;
+  encoding: string;
+  bom: boolean;
+  eol: LineEnding;
+  binary?: boolean;
+}
+
+/** 从解码结果构造 OpenedFile：文本统一 LF 归一，原始换行符记入 eol */
+function openedFromDecoded(
+  decoded: { text: string; encoding: string; bom: boolean; binary?: boolean },
+  meta: { name: string; path: string | null; handle: FileSystemFileHandle | null },
+): OpenedFile {
+  const detection = detectLineEnding(decoded.text);
+  return {
+    content: normalizeToLf(decoded.text),
+    name: meta.name,
+    path: meta.path,
+    handle: meta.handle,
+    encoding: decoded.encoding,
+    bom: decoded.bom,
+    eol: detection.eol,
+    binary: decoded.binary,
+  };
+}
+
+/** 字节 → OpenedFile（安卓 SAF 与浏览器路径：JS 侧启发式检测） */
+function openedFromBytes(
+  bytes: Uint8Array,
+  meta: { name: string; path: string | null; handle: FileSystemFileHandle | null },
+  forceEncoding?: string,
+): OpenedFile {
+  const decoded = forceEncoding
+    ? { ...decodeAs(bytes, forceEncoding), encoding: forceEncoding }
+    : detectEncoding(bytes);
+  return openedFromDecoded(decoded, meta);
 }
 
 /* ---- Android SAF 桥（MainActivity 提供）：系统文档选择器 + content URI 写回 ----
@@ -102,22 +169,25 @@ function androidCreateDoc(name: string, mime: string): Promise<AndroidSafFile | 
   });
 }
 
-async function androidWriteUri(uri: string, content: string): Promise<boolean> {
+async function androidWriteUri(uri: string, content: string, encoding: string, bom: boolean): Promise<boolean> {
   const bridge = (window as any).HeidBridge;
-  if (!bridge?.writeBase64) return false;
-  const bytes = new TextEncoder().encode(content);
-  let binary = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  /* writeUri 在原生侧按指定编码编码字节（JS 的 TextEncoder 只支持 UTF-8）；
+     桥不可用时回退 UTF-8 直接写 */
+  if (!bridge?.writeUri) {
+    if (!bridge?.writeBase64) return false;
+    const bytes = new TextEncoder().encode(content);
+    let binary = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    }
+    return bridge.writeBase64(uri, btoa(binary)) === true;
   }
-  return bridge.writeBase64(uri, btoa(binary)) === true;
+  return bridge.writeUri(uri, content, encoding, bom) === true;
 }
 
-async function readLocalPath(path: string): Promise<OpenedFile> {
-  const { readFile } = await import('@tauri-apps/plugin-fs');
-  const bytes = await readFile(path);
-  const content = new TextDecoder().decode(bytes);
+/* 桌面（Tauri Windows/桌面平台）读取：Rust 侧 encoding_rs 检测编码；force 指定编码重新解码 */
+async function readLocalPath(path: string, forceEncoding?: string): Promise<OpenedFile> {
   let name = displayNameFromPath(path);
   /* 数字型 content URI（如 content://media/.../file/1000000018）解析不出可读名，走原生桥查 DISPLAY_NAME */
   if (path.startsWith('content://')) {
@@ -129,7 +199,16 @@ async function readLocalPath(path: string): Promise<OpenedFile> {
       } catch { /* 桥不可用时沿用解析结果 */ }
     }
   }
-  return { content, name, path, handle: null };
+  if (isTauri && !IS_ANDROID_APP) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const r = await invoke<{ text: string; encoding: string; bom: boolean; lossy: boolean; binary: boolean }>(
+      'read_text_file', { path, force: forceEncoding ?? null },
+    );
+    return openedFromDecoded(r, { name, path, handle: null });
+  }  /* 安卓 / 纯 Tauri 移动端：SAF 字节流 → JS 启发式检测 */
+  const { readFile } = await import('@tauri-apps/plugin-fs');
+  const bytes = await readFile(path);
+  return openedFromBytes(bytes, { name, path, handle: null }, forceEncoding);
 }
 
 async function pickAndReadFile(): Promise<OpenedFile | null> {
@@ -150,8 +229,8 @@ async function pickAndReadFile(): Promise<OpenedFile | null> {
         types: [{ description: 'Text files', accept: { 'text/*': READ_EXTENSIONS } }],
       });
       const file = await handle.getFile();
-      const content = await file.text();
-      return { content, name: file.name, path: file.name, handle };
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      return openedFromBytes(bytes, { name: file.name, path: file.name, handle });
     } catch (e: any) {
       if (e?.name === 'AbortError') return null;
       // fall through to input fallback
@@ -164,8 +243,8 @@ async function pickAndReadFile(): Promise<OpenedFile | null> {
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return resolve(null);
-      const content = await file.text();
-      resolve({ content, name: file.name, path: file.name, handle: null });
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      resolve(openedFromBytes(bytes, { name: file.name, path: file.name, handle: null }));
     };
     input.click();
   });
@@ -176,14 +255,23 @@ interface SaveResult {
   savedPath: string | null;
 }
 
-async function writeLocalPath(path: string, content: string): Promise<void> {
+/* 桌面：Tauri 命令按编码写盘；其余场景 UTF-8 由调用方处理 */
+async function writeLocalPath(path: string, content: string, encoding = 'utf-8', bom = false): Promise<void> {
+  if (isTauri && !IS_ANDROID_APP) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('write_text_file', { path, content, encoding, bom });
+    return;
+  }
   const { writeFile } = await import('@tauri-apps/plugin-fs');
   await writeFile(path, new TextEncoder().encode(content));
 }
 
-/* saveAs = true 时忽略已有路径，总是弹出保存对话框另选位置 */
-async function saveFileToDisk(tab: FileTab, content: string, saveAs = false): Promise<SaveResult> {
-  /* 安卓：写盘走 SAF 桥；另存为/无路径时先经系统新建文档取得可写 URI */
+/* saveAs = true 时忽略已有路径，总是弹出保存对话框另选位置；
+   silent = true 时不弹错误提示（自动保存用，失败只返回 false） */
+async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = false, silent = false): Promise<SaveResult> {
+  /* 编辑器内是 LF，落盘前按标签页的目标换行符还原 */
+  const content = applyLineEnding(contentLf, tab.eol);
+  /* 安卓：写盘走 SAF 桥（按编码编码字节）；另存为/无路径时先经系统新建文档取得可写 URI */
   if (IS_ANDROID_APP) {
     let target = tab.path;
     if (saveAs || !target) {
@@ -191,9 +279,9 @@ async function saveFileToDisk(tab: FileTab, content: string, saveAs = false): Pr
       if (!created) return { ok: false, savedPath: null };
       target = created.uri;
     }
-    const ok = await androidWriteUri(target, content);
+    const ok = await androidWriteUri(target, content, tab.encoding, tab.bom);
     if (!ok) {
-      alert('保存失败：无法写入所选文档');
+      if (!silent) alert('保存失败：无法写入所选文档');
       return { ok: false, savedPath: null };
     }
     return { ok: true, savedPath: target };
@@ -201,11 +289,11 @@ async function saveFileToDisk(tab: FileTab, content: string, saveAs = false): Pr
   const encoder = new TextEncoder();
   if (!saveAs && tab.path && isTauri) {
       try {
-        await writeLocalPath(tab.path, content);
+        await writeLocalPath(tab.path, content, tab.encoding, tab.bom);
         return { ok: true, savedPath: tab.path };
       } catch (e) {
         console.error('Save failed:', e);
-        alert(`保存失败：${String(e)}`);
+        if (!silent) alert(`保存失败：${String(e)}`);
         return { ok: false, savedPath: null };
       }
     }
@@ -214,11 +302,11 @@ async function saveFileToDisk(tab: FileTab, content: string, saveAs = false): Pr
       const target = await save({ defaultPath: tab.title });
       if (!target) return { ok: false, savedPath: null };
       try {
-        await writeLocalPath(target, content);
+        await writeLocalPath(target, content, tab.encoding, tab.bom);
         return { ok: true, savedPath: target };
       } catch (e) {
         console.error('Save failed:', e);
-        alert(`保存失败：${String(e)}`);
+        if (!silent) alert(`保存失败：${String(e)}`);
         return { ok: false, savedPath: null };
       }
     }
@@ -249,7 +337,7 @@ async function saveFileToDisk(tab: FileTab, content: string, saveAs = false): Pr
       if (e?.name === 'AbortError') return { ok: false, savedPath: null };
     }
   }
-  // fallback: download
+  // fallback: download（浏览器模式仅支持 UTF-8）
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -332,6 +420,10 @@ function makeWelcomeTab(id: string = nextTabId()): FileTab {
     isDirty: false,
     readOnly: false,
     mdView: 'edit',
+    encoding: 'utf-8',
+    bom: false,
+    eol: 'lf',
+    originalEol: 'lf',
   };
 }
 
@@ -347,6 +439,10 @@ function makeUntitledTab(title: string): FileTab {
     isDirty: false,
     readOnly: false,
     mdView: 'edit',
+    encoding: 'utf-8',
+    bom: false,
+    eol: 'lf',
+    originalEol: 'lf',
   };
 }
 
@@ -405,6 +501,11 @@ export default function App() {
 
   const isDarkMode = themeMode === 'dark' || (themeMode === 'system' && systemDark);
 
+  /* 原生滚动条与表单控件跟随主题：Chromium 依据根元素的 color-scheme 渲染深色滚动条 */
+  useEffect(() => {
+    document.documentElement.style.colorScheme = isDarkMode ? 'dark' : 'light';
+  }, [isDarkMode]);
+
   /* 移动端形态：安卓且窄屏（手机）采用专属布局；安卓宽屏（平板）沿用桌面布局 */
   const isNarrow = useMediaQuery(NARROW_QUERY);
   const isPhone = IS_ANDROID_APP && isNarrow;
@@ -413,6 +514,46 @@ export default function App() {
   const [activeTabId, setActiveTabId] = useState<string>(() => '');
   const [saving, setSaving] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  /* 标签栏右键菜单（tabId 为 null 表示右键在标签条空白处，无「关闭其他」锚点） */
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tabId: string | null } | null>(null);
+  /* 主菜单「最近打开」二级子菜单开合（菜单整体关闭时一并复位）。
+     关闭走短延迟：鼠标从触发项移向子菜单（经过桥接区）时不中断 */
+  const [recentSubOpen, setRecentSubOpen] = useState(false);
+  const recentSubTimerRef = useRef<number | null>(null);
+  const recentTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const recentSubRef = useRef<HTMLDivElement | null>(null);
+  const [recentSubPos, setRecentSubPos] = useState<{ left: number; top: number } | null>(null);
+  const openRecentSub = useCallback(() => {
+    if (recentSubTimerRef.current !== null) {
+      clearTimeout(recentSubTimerRef.current);
+      recentSubTimerRef.current = null;
+    }
+    setRecentSubOpen(true);
+    /* portal 到 body 后需自行定位：贴触发项右侧展开（触发项距主菜单右缘内缩 6px，
+       偏移取 14px 即子菜单与主菜单面板之间留约 8px 间隙），越界收进视口 */
+    const el = recentTriggerRef.current;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      setRecentSubPos({
+        left: Math.max(4, Math.min(r.right + 10, window.innerWidth - 268)),
+        top: Math.max(4, Math.min(r.top - 4, window.innerHeight - 360)),
+      });
+    }
+  }, []);
+  const scheduleCloseRecentSub = useCallback(() => {
+    if (recentSubTimerRef.current !== null) clearTimeout(recentSubTimerRef.current);
+    recentSubTimerRef.current = window.setTimeout(() => {
+      recentSubTimerRef.current = null;
+      setRecentSubOpen(false);
+    }, 180);
+  }, []);
+  const cancelRecentSubTimer = useCallback(() => {
+    if (recentSubTimerRef.current !== null) {
+      clearTimeout(recentSubTimerRef.current);
+      recentSubTimerRef.current = null;
+    }
+  }, []);
+  useEffect(() => cancelRecentSubTimer, [cancelRecentSubTimer]);
   const [aboutOpen, setAboutOpen] = useState(false);
   /* 移动端：标签页抽屉开合 */
   const [tabSheetOpen, setTabSheetOpen] = useState(false);
@@ -426,6 +567,8 @@ export default function App() {
     const raw = localStorage.getItem('heid-diff-max-entries');
     return raw === null ? DEFAULT_DIFF_ENTRIES : clampDiffEntries(raw);
   });
+  /* 最近打开文件（菜单数据源；addRecentFile 后同步刷新） */
+  const [recentFiles, setRecentFiles] = useState<RecentFile[]>(() => listRecentFiles());
   const menuRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<MarkdownPreviewHandle | null>(null);
   const historiesRef = useRef<Map<string, TabHistory>>(new Map());
@@ -471,9 +614,15 @@ export default function App() {
 
   /* 菜单：点击外部或 Esc 关闭 */
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen) {
+      cancelRecentSubTimer();
+      setRecentSubOpen(false);
+      return;
+    }
     const onDown = (e: MouseEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+      if (menuRef.current?.contains(e.target as Node)) return;
+      if (recentSubRef.current?.contains(e.target as Node)) return;
+      setMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setMenuOpen(false);
@@ -485,6 +634,24 @@ export default function App() {
       document.removeEventListener('keydown', onKey);
     };
   }, [menuOpen]);
+
+  /* 标签右键菜单：点击外部或 Esc 关闭 */
+  const tabMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!tabMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!tabMenuRef.current?.contains(e.target as Node)) setTabMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTabMenu(null);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [tabMenu]);
 
   useEffect(() => {
     if (!tabs.find(t => t.id === activeTabId)) {
@@ -526,7 +693,7 @@ export default function App() {
         return { ...t, content: after, originalContent: after, isDirty: false };
       }
       // 脏：编辑器内容不动，originalContent 跟踪磁盘最后已知状态，保留冲突标记
-      return { ...t, originalContent: after, isDirty: t.content !== after };
+      return { ...t, originalContent: after, isDirty: t.content !== after || t.eol !== t.originalEol };
     }));
   }, [recordContentChange, maxDiffEntries]);
 
@@ -582,12 +749,16 @@ export default function App() {
     });
   }, []);
 
-  /* 撤销修改：经确认后把该条 before 写回磁盘，编辑器同步回退，该条及其后所有条目一并移除 */
+  /* 撤销修改：经确认后把该条 before 写回磁盘（按该文件标签页的编码/换行符），编辑器同步回退，该条及其后所有条目一并移除 */
   const handleRevertDiff = useCallback(async (path: string, entryId: string) => {
     const entry = (diffTimelinesRef.current[path] ?? []).find(e => e.id === entryId);
     if (!entry) return;
+    const refTab = tabsRef.current.find(t => t.path === path);
+    const encoding = refTab?.encoding ?? 'utf-8';
+    const bom = refTab?.bom ?? false;
+    const eol = refTab?.eol ?? 'lf';
     try {
-      await writeLocalPath(path, entry.before);
+      await writeLocalPath(path, applyLineEnding(entry.before, eol), encoding, bom);
     } catch (e) {
       console.error('撤销外部修改失败（写回磁盘）:', path, e);
       return;
@@ -611,38 +782,48 @@ export default function App() {
         return { ...t, content: entry.before, originalContent: entry.before, isDirty: false };
       }
       // 脏：本地内容不动，isDirty 依据新的 originalContent 重新成立
-      return { ...t, originalContent: entry.before, isDirty: t.content !== entry.before };
+      return { ...t, originalContent: entry.before, isDirty: t.content !== entry.before || t.eol !== t.originalEol };
     }));
   }, [recordContentChange, updateKnownDiskContent]);
 
 
   const openPathIntoTab = useCallback(async (path: string) => {
     try {
-      const { content, name } = await readLocalPath(path);
-      const language = detectLanguageFromPath(name);
+      const file = await readLocalPath(path);
+      const language = detectLanguageFromPath(file.name);
       const existing = tabsRef.current.find(t => t.path === path);
       if (existing) {
         setTabs(prev => prev.map(t => t.id === existing.id
-          ? { ...t, content, originalContent: content, isDirty: false }
+          ? { ...t, content: file.content, originalContent: file.content, isDirty: false, encoding: file.encoding, bom: file.bom, eol: file.eol, originalEol: file.eol }
           : t
         ));
         setActiveTabIdRef.current(existing.id);
+        addRecentFile(path, file.name);
+        setRecentFiles(listRecentFiles());
         return;
       }
       const newTab: FileTab = {
         id: nextTabId(),
-        title: name,
+        title: file.name,
         path,
         handle: null,
-        content,
-        originalContent: content,
+        content: file.content,
+        originalContent: file.content,
         language,
         isDirty: false,
-        readOnly: false,
+        readOnly: !!file.binary,
         mdView: language === 'markdown' ? 'preview' : 'edit',
+        encoding: file.encoding,
+        bom: file.bom,
+        eol: file.eol,
+        originalEol: file.eol,
+        binary: file.binary,
+        large: file.content.length > LARGE_FILE_CHARS,
       };
       setTabs(prev => [...prev, newTab]);
       setActiveTabIdRef.current(newTab.id);
+      addRecentFile(path, file.name);
+      setRecentFiles(listRecentFiles());
     } catch (e) {
       console.error('Failed to open file:', path, e);
       alert(`无法打开文件：${path}`);
@@ -695,23 +876,41 @@ export default function App() {
       const restored: FileTab[] = [];
       for (const st of session.tabs) {
         if (st.kind === 'virtual') {
-          restored.push(st.title === 'welcome.ts' ? makeWelcomeTab() : makeUntitledTab(st.title));
+          const base = st.title === 'welcome.ts' ? makeWelcomeTab() : makeUntitledTab(st.title);
+          if (st.draft) {
+            /* 脏的无路径标签：内容在草稿里，恢复并标脏（草稿丢失则退化为空标签） */
+            const draft = getDraft(draftKeyForTab({ path: null, title: st.title }));
+            if (draft !== null) {
+              base.content = draft;
+              base.isDirty = true;
+            }
+          }
+          restored.push(base);
           continue;
         }
         try {
-          const { content, name } = await readLocalPath(st.path);
-          const language = detectLanguageFromPath(name);
+          const file = await readLocalPath(st.path);
+          const language = detectLanguageFromPath(file.name);
+          /* 草稿叠加：上次退出时该文件有未保存内容，恢复并标脏 */
+          const draft = getDraft(draftKeyForTab({ path: st.path, title: file.name }));
+          const hasDraft = draft !== null && draft !== file.content;
           restored.push({
             id: nextTabId(),
-            title: name,
+            title: file.name,
             path: st.path,
             handle: null,
-            content,
-            originalContent: content,
+            content: hasDraft ? draft : file.content,
+            originalContent: file.content,
             language,
-            isDirty: false,
-            readOnly: false,
+            isDirty: hasDraft,
+            readOnly: !!file.binary,
             mdView: language === 'markdown' ? st.mdView : 'edit',
+            encoding: file.encoding,
+            bom: file.bom,
+            eol: file.eol,
+            originalEol: file.eol,
+            binary: file.binary,
+            large: file.content.length > LARGE_FILE_CHARS,
           });
         } catch {
           // 文件已被删除/移动：跳过该标签
@@ -749,7 +948,11 @@ export default function App() {
     saveSessionState({
       tabs: tabsRef.current.flatMap((t): SessionTab[] => {
         if (t.path) return [{ kind: 'file', path: t.path, mdView: t.mdView }];
-        return t.isDirty ? [] : [{ kind: 'virtual', title: t.title }];
+        /* 脏的无路径标签：内容在草稿（lib/drafts），快照只记 draft 标志；
+           用户确认「不保存」退出时草稿与快照条目一并清除（见 confirmWindowClose / closeTab） */
+        return t.isDirty
+          ? [{ kind: 'virtual', title: t.title, draft: !t.readOnly }]
+          : [{ kind: 'virtual', title: t.title }];
       }),
       activePath: tabsRef.current.find(t => t.id === activeTabIdRef.current)?.path ?? null,
     });
@@ -783,6 +986,23 @@ export default function App() {
       } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
         e.preventDefault();
         handleRedo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !e.shiftKey) {
+        if (hasTabRef.current) { e.preventDefault(); openFind(false, false); }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
+        if (hasTabRef.current) { e.preventDefault(); openFind(true, false); }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+        if (hasTabRef.current) { e.preventDefault(); openFind(false, true); }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
+        /* 浏览器里 Ctrl+W 归浏览器管无法拦截；打包后的应用内生效 */
+        e.preventDefault();
+        if (activeTabIdRef.current) void closeTab(activeTabIdRef.current);
+      } else if (e.ctrlKey && e.key === 'Tab') {
+        e.preventDefault();
+        const list = tabsRef.current;
+        if (list.length < 2) return;
+        const idx = list.findIndex(t => t.id === activeTabIdRef.current);
+        const delta = e.shiftKey ? -1 : 1;
+        setActiveTabIdRef.current(list[(idx + delta + list.length) % list.length].id);
       }
     };
     window.addEventListener('keydown', handler);
@@ -796,7 +1016,8 @@ export default function App() {
     if (tab) recordContentChange(tabId, tab.content, content, opts?.major);
     setTabs(prev => prev.map(t => {
       if (t.id !== tabId) return t;
-      return { ...t, content, isDirty: content !== t.originalContent };
+      /* eol 与磁盘原值不同同样构成未保存状态（保存时才真正换行符转换） */
+      return { ...t, content, isDirty: content !== t.originalContent || t.eol !== t.originalEol };
     }));
   }, [recordContentChange]);
 
@@ -842,7 +1063,7 @@ export default function App() {
       return;
     }
     if (!result) return;
-    const { content, name, path, handle } = result;
+    const { content, name, path, handle, encoding, bom, eol, binary } = result;
     const language = detectLanguageFromPath(name);
     const newTab: FileTab = {
       id: nextTabId(),
@@ -853,14 +1074,20 @@ export default function App() {
       originalContent: content,
       language,
       isDirty: false,
-      readOnly: false,
+      readOnly: !!binary,
       mdView: language === 'markdown' ? 'preview' : 'edit',
+      encoding,
+      bom,
+      eol,
+      originalEol: eol,
+      binary,
+      large: content.length > LARGE_FILE_CHARS,
     };
     // if same file is already open, focus it
     const existing = tabs.find(t => t.path === path && !t.isDirty);
     if (existing) {
       setTabs(prev => prev.map(t => t.id === existing.id
-        ? { ...t, content, originalContent: content, handle }
+        ? { ...t, content, originalContent: content, handle, encoding, bom, eol, originalEol: eol }
         : t
       ));
       setActiveTabId(existing.id);
@@ -868,6 +1095,10 @@ export default function App() {
     }
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
+    if (path) {
+      addRecentFile(path, name);
+      setRecentFiles(listRecentFiles());
+    }
   }, [tabs]);
 
   const handleNewFile = useCallback(() => {
@@ -876,21 +1107,26 @@ export default function App() {
     setActiveTabId(newTab.id);
   }, []);
 
-  const persistTab = useCallback(async (tab: FileTab, saveAs: boolean): Promise<boolean> => {
+  const persistTab = useCallback(async (tab: FileTab, saveAs: boolean, opts?: { silent?: boolean }): Promise<boolean> => {
     if (tab.readOnly || savingRef.current) return false;
     savingRef.current = true;
     setSaving(true);
     try {
-      const result = await saveFileToDisk(tab, tab.content, saveAs);
+      const result = await saveFileToDisk(tab, tab.content, saveAs, opts?.silent ?? false);
       if (result.ok) {
         const savedPath = result.savedPath ?? tab.path;
         const savedTitle = savedPath ? displayNameFromPath(savedPath) : tab.title;
+        /* encoding/bom 从传入的 tab（可能已带新编码）回写，编码转换保存后状态栏即时生效 */
         setTabs(prev => prev.map(t => t.id === tab.id
-          ? { ...t, originalContent: t.content, isDirty: false, path: savedPath, title: savedTitle }
+          ? { ...t, originalContent: t.content, isDirty: false, path: savedPath, title: savedTitle, originalEol: t.eol, encoding: tab.encoding, bom: tab.bom }
           : t
         ));
         // 自写识别：更新已知磁盘内容，后续 watch 事件比对无差异，不产生 diff
-        if (savedPath) updateKnownDiskContent(savedPath, tab.content);
+        if (savedPath) {
+          updateKnownDiskContent(savedPath, tab.content);
+          addRecentFile(savedPath, savedTitle);
+          setRecentFiles(listRecentFiles());
+        }
       }
       return result.ok;
     } finally {
@@ -908,7 +1144,11 @@ export default function App() {
       '关闭并保存',
     );
     if (decision === 'cancel') return false;
-    if (decision === 'discard') return true;
+    if (decision === 'discard') {
+      /* 用户明确放弃：清除该标签的草稿，避免崩溃恢复时"复活" */
+      deleteDraft(draftKeyForTab(tab));
+      return true;
+    }
     return await persistTab(tab, !tab.path);
   }, [askDiscardConfirm, persistTab]);
 
@@ -919,6 +1159,20 @@ export default function App() {
     historiesRef.current.delete(tabId);
     setTabs(prev => prev.filter(t => t.id !== tabId));
   }, [confirmDiscardTab]);
+
+  /* ---- 标签栏右键菜单：批量关闭（脏标签逐个走确认弹窗，取消即中断余项） ---- */
+  const closeOtherTabs = useCallback(async (keepId: string) => {
+    for (const t of [...tabsRef.current]) {
+      if (t.id === keepId) continue;
+      await closeTab(t.id);
+    }
+  }, [closeTab]);
+
+  const closeAllTabs = useCallback(async () => {
+    for (const t of [...tabsRef.current]) {
+      await closeTab(t.id);
+    }
+  }, [closeTab]);
 
   const handleSave = useCallback(async () => {
     if (!activeTab) return;
@@ -936,6 +1190,127 @@ export default function App() {
     updateTabContent(activeTab.id, activeTab.originalContent);
   }, [activeTab, updateTabContent]);
 
+  /* ---- 查找 / 替换 / 跳转到行（编辑器内浮层 + 预览查找，弹出在指针位置）---- */
+  const [findState, setFindState] = useState({ open: false, showReplace: false, goto: false });
+  const openFind = useCallback((showReplace = false, goto = false) => {
+    setFindState({ open: true, showReplace, goto });
+  }, []);
+  const closeFind = useCallback(() => {
+    setFindState(s => ({ ...s, open: false }));
+  }, []);
+  const getPointer = useLastPointer();
+
+  /* ---- 编辑器设置（弹窗修改即时生效 + 持久化）---- */
+  const [settings, setSettings] = useState<EditorSettings>(() => loadSettings());
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  useEffect(() => {
+    saveSettings(settings);
+  }, [settings]);
+
+  /* ---- 状态栏弹出菜单（编码 / 换行符）---- */
+  type StatusMenu = null | 'encoding-root' | 'encoding-reopen' | 'encoding-save' | 'eol';
+  const [statusMenu, setStatusMenu] = useState<StatusMenu>(null);
+  const statusItemCls = cn(
+    "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors text-left",
+    isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+  );
+
+  /* ---- 编码 / 换行符（状态栏入口）---- */
+
+  /** 以指定编码重新打开当前文件（重读磁盘并重新解码；脏标签先确认丢弃） */
+  const reopenWithEncoding = useCallback(async (tab: FileTab, encoding: string) => {
+    if (!tab.path) {
+      // 无路径标签：仅记录偏好，供另存时生效
+      setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, encoding } : t));
+      return;
+    }
+    if (tab.isDirty) {
+      const decision = await askDiscardConfirm(
+        `"${tab.title}" 有未保存的更改，以其他编码重新打开将丢失这些修改。`,
+        '不保存重新打开',
+      );
+      if (decision !== 'discard') return;
+    }
+    try {
+      const file = await readLocalPath(tab.path, encoding);
+      setTabs(prev => prev.map(t => t.id === tab.id
+        ? {
+          ...t,
+          content: file.content,
+          originalContent: file.content,
+          isDirty: false,
+          encoding,
+          bom: file.bom,
+          eol: file.eol,
+          originalEol: file.eol,
+        }
+        : t
+      ));
+      if (file.encoding !== encoding) {
+        // 引擎不支持该编码时 readLocalPath 可能回退，同步真实值
+        setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, encoding: file.encoding } : t));
+      }
+    } catch (e) {
+      console.error('以指定编码重新打开失败:', e);
+      alert(`无法以 ${encodingLabel(encoding)} 重新打开该文件`);
+    }
+  }, [askDiscardConfirm]);
+
+  /** 转换编码并立即保存（有路径时）；无路径仅记录，另存时生效 */
+  const convertEncoding = useCallback(async (tab: FileTab, encoding: string) => {
+    if (!tab.path || tab.readOnly) {
+      setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, encoding } : t));
+      return;
+    }
+    const ok = await persistTab({ ...tab, encoding }, false);
+    if (!ok) alert('编码转换保存失败，文件未改动');
+  }, [persistTab]);
+
+  /** 切换换行符（保存时生效；与磁盘原值不同即标记未保存） */
+  const setTabEol = useCallback((tab: FileTab, eol: LineEnding) => {
+    setTabs(prev => prev.map(t => t.id === tab.id
+      ? { ...t, eol, isDirty: t.content !== t.originalContent || eol !== t.originalEol }
+      : t
+    ));
+  }, []);
+
+  /* ---- 自动保存：按设置间隔把「有路径且脏」的文件静默落盘（无路径标签由草稿兜底） ---- */
+  useEffect(() => {
+    if (!settings.autosaveEnabled) return;
+    const ms = Math.max(5, settings.autosaveIntervalSec) * 1000;
+    const id = setInterval(() => {
+      /* 确认弹窗 / 退出流程 / 保存进行中：不自动保存，避免和用户「不保存」的决策打架 */
+      if (pendingDiscardRef.current || exitingRef.current || savingRef.current) return;
+      const targets = tabsRef.current.filter(t => t.isDirty && t.path && !t.readOnly);
+      if (targets.length === 0) return;
+      void (async () => {
+        for (const tab of targets) {
+          if (!tabsRef.current.includes(tab)) continue; /* 期间被关闭 */
+          await persistTab(tab, false, { silent: true });
+        }
+      })();
+    }, ms);
+    return () => clearInterval(id);
+  }, [settings.autosaveEnabled, settings.autosaveIntervalSec, persistTab]);
+
+  /* ---- 草稿捕获（崩溃保护，始终开启）：脏标签内容防抖 3s 写入本地草稿；
+     干净标签的既有草稿即时清除。保存成功后 isDirty 变 false，同机制自动清草稿 ---- */
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      for (const tab of tabsRef.current) {
+        const key = draftKeyForTab(tab);
+        if (tab.isDirty && !tab.readOnly) {
+          saveDraft(key, tab.content);
+        } else if (getDraft(key) !== null) {
+          deleteDraft(key);
+        }
+      }
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [tabs]);
+
+
   /* ---- 撤销 / 重做（作用于当前标签页内容历史） ---- */
 
   const canUndo = !!activeTab && (historiesRef.current.get(activeTab.id)?.index ?? 0) > 0;
@@ -952,7 +1327,7 @@ export default function App() {
     h.index -= 1;
     h.lastAt = Date.now();
     setTabs(prev => prev.map(t => t.id === activeTab.id
-      ? { ...t, content, isDirty: content !== t.originalContent }
+      ? { ...t, content, isDirty: content !== t.originalContent || t.eol !== t.originalEol }
       : t
     ));
   }, [activeTab]);
@@ -965,7 +1340,7 @@ export default function App() {
     h.index += 1;
     h.lastAt = Date.now();
     setTabs(prev => prev.map(t => t.id === activeTab.id
-      ? { ...t, content, isDirty: content !== t.originalContent }
+      ? { ...t, content, isDirty: content !== t.originalContent || t.eol !== t.originalEol }
       : t
     ));
   }, [activeTab]);
@@ -983,7 +1358,14 @@ export default function App() {
       '退出并保存',
     );
     if (decision === 'cancel') return false;
-    if (decision === 'discard') return true;
+    if (decision === 'discard') {
+      /* 用户明确放弃：清除脏标签草稿并刷新快照，标签不应在崩溃恢复中"复活" */
+      for (const t of tabsRef.current) {
+        if (t.isDirty) deleteDraft(draftKeyForTab(t));
+      }
+      writeSessionSnapshot();
+      return true;
+    }
     /* 退出并保存：逐个落盘（有路径静默写盘，无路径走另存为对话框），
        任一保存被取消/失败则中止退出留在应用，避免静默丢数据 */
     exitingRef.current = true;
@@ -1036,13 +1418,17 @@ export default function App() {
   }, []);
 
   /* ---- 安卓系统返回键：逐层关闭弹层，最后走与桌面一致的未保存退出确认 ---- */
-  const overlayStateRef = useRef({ tabSheetOpen, menuOpen, aboutOpen, pendingDiscard });
-  overlayStateRef.current = { tabSheetOpen, menuOpen, aboutOpen, pendingDiscard };
+  const overlayStateRef = useRef({ tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, shortcutsOpen, tabMenuOpen: !!tabMenu });
+  overlayStateRef.current = { tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, shortcutsOpen, tabMenuOpen: !!tabMenu };
   useEffect(() => {
     if (!IS_ANDROID_APP) return;
     const onBack = () => {
       const o = overlayStateRef.current;
       if (o.pendingDiscard) { o.pendingDiscard.resolve('cancel'); return; }
+      if (o.findOpen) { closeFind(); return; }
+      if (o.settingsOpen) { setSettingsOpen(false); return; }
+      if (o.shortcutsOpen) { setShortcutsOpen(false); return; }
+      if (o.tabMenuOpen) { setTabMenu(null); return; }
       if (o.tabSheetOpen) { setTabSheetOpen(false); return; }
       if (o.menuOpen) { setMenuOpen(false); return; }
       if (o.aboutOpen) { setAboutOpen(false); return; }
@@ -1130,8 +1516,24 @@ export default function App() {
     setMdView(effectiveView === 'preview' ? 'edit' : 'preview');
   };
 
+  /* 编辑器面板当前是否渲染（分屏/编辑态 Ctrl+F 搜索源码）；同步进 ref 供 window 快捷键读取 */
+  const editorVisible = !!activeTab && !(isMarkdown && effectiveView === 'preview');
+  const editorVisibleRef = useRef(editorVisible);
+  editorVisibleRef.current = editorVisible;
+  /* 有标签页即允许查找（纯预览态 Ctrl+F 走 PreviewFindBar） */
+  const hasTabRef = useRef(!!activeTab);
+  hasTabRef.current = !!activeTab;
+
+  /* 状态栏光标信息（行/列/选中字符数） */
+  const [cursorInfo, setCursorInfo] = useState({ line: 1, col: 1, selChars: 0 });
+  useEffect(() => {
+    setCursorInfo({ line: 1, col: 1, selChars: 0 });
+  }, [activeTabId]);
+
   const renderMdPreview = () => {
     if (!activeTab) return null;
+    /* 预览查找仅在纯预览形态启用（分屏时 Ctrl+F 搜索编辑器源码） */
+    const previewOnly = isMarkdown && effectiveView === 'preview';
     return (
       <MarkdownPreview
         ref={previewRef}
@@ -1143,6 +1545,9 @@ export default function App() {
         onUndo={handleUndo}
         onRedo={handleRedo}
         onScroller={attachPreviewScroller}
+        findOpen={previewOnly && findState.open ? true : undefined}
+        onFindClose={closeFind}
+        getPointer={getPointer}
       />
     );
   };
@@ -1156,9 +1561,15 @@ export default function App() {
         language={activeTab.language}
         isDarkMode={isDarkMode}
         editable={!activeTab.readOnly}
+        editorSettings={settings}
+        lowPerf={!!activeTab.large}
         onChange={(v, meta) => updateTabContent(activeTab.id, v, meta)}
         onSave={handleSave}
         onScroller={attachEditorScroller}
+        onCursor={setCursorInfo}
+        find={findState.open ? findState : undefined}
+        onFindClose={closeFind}
+        getPointer={getPointer}
         markdownMenu={isMarkdown && !activeTab.readOnly
           ? { canUndo, canRedo, onUndo: handleUndo, onRedo: handleRedo }
           : undefined}
@@ -1190,6 +1601,8 @@ export default function App() {
           onInsertTable={() => previewRef.current?.insertTable()}
           onInsertImage={() => previewRef.current?.openImageModal()}
           onCloseTab={() => activeTab && void closeTab(activeTab.id)}
+          onSettings={() => setSettingsOpen(true)}
+          onShortcuts={() => setShortcutsOpen(true)}
           onAbout={() => setAboutOpen(true)}
         />
       ) : (
@@ -1206,7 +1619,15 @@ export default function App() {
         </div>
 
         {/* 标签页 */}
-        <div data-tauri-drag-region className="min-w-0 flex items-center gap-0.5 overflow-x-auto">
+        <div
+          data-tauri-drag-region
+          className="min-w-0 flex items-center gap-0.5 overflow-x-auto"
+          onContextMenu={(e) => {
+            /* 空白处右键：无锚点标签，只提供新建与全部关闭 */
+            e.preventDefault();
+            setTabMenu({ x: e.clientX, y: e.clientY, tabId: null });
+          }}
+        >
           {tabs.map((tab) => {
             /* 脏且存在未处理外部 diff：橙色提示点（外圈样式区别于琥珀色脏状态点） */
             const conflicted = tab.isDirty && !!tab.path && (diffTimelines[tab.path]?.length ?? 0) > 0;
@@ -1214,6 +1635,11 @@ export default function App() {
             <div
               key={tab.id}
               onClick={() => setActiveTabId(tab.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setTabMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
+              }}
               className={cn(
                 "px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-all group max-w-[180px] shrink-0",
               activeTabId === tab.id
@@ -1249,7 +1675,7 @@ export default function App() {
           onClick={handleNewFile}
           className={cn(
             "p-1.5 rounded-md transition-colors shrink-0",
-            isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-100 text-zinc-500"
+            isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
           )}
           title="新建文件 (Ctrl+N)"
         >
@@ -1293,7 +1719,7 @@ export default function App() {
             onClick={() => setDiffModalOpen(true)}
             className={cn(
               "relative mr-2 p-1.5 rounded-md transition-colors shrink-0",
-              isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-100 text-zinc-500"
+              isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
             )}
             title={activeTab ? `外部修改 diff（${activeTab.title}）` : '外部修改 diff'}
           >
@@ -1374,26 +1800,86 @@ export default function App() {
 
         {menuOpen && (
           <div className={cn(
-            "absolute left-2 top-full -mt-px z-50 w-52 rounded-md border shadow-lg py-1 flex flex-col",
-            isDarkMode ? "border-zinc-700 bg-zinc-800" : "border-zinc-200 bg-white"
+            "absolute left-2 top-full -mt-px z-50 w-52 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col",
+            isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
           )}>
             <button
               onClick={() => { setMenuOpen(false); handleOpenFile(); }}
               className={cn(
-                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
-                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
               <FolderOpen size={14} />
               打开文件
               <span className="ml-auto text-[10px] opacity-50">Ctrl+O</span>
             </button>
+            {/* 最近打开（二级菜单，悬停/点击展开；portal 渲染到 body——
+                嵌套在主菜单面板内时子元素的 backdrop-filter 采不到面板外的内容，毛玻璃会失效） */}
+            <div
+              onMouseEnter={openRecentSub}
+              onMouseLeave={scheduleCloseRecentSub}
+            >
+              <button
+                ref={recentTriggerRef}
+                onClick={() => setRecentSubOpen(v => !v)}
+                disabled={recentFiles.length === 0}
+                className={cn(
+                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40 disabled:pointer-events-none",
+                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                )}
+              >
+                <History size={14} />
+                最近打开
+                <ChevronRight size={12} className="ml-auto opacity-50" />
+              </button>
+              {recentSubOpen && recentFiles.length > 0 && recentSubPos && createPortal(
+                <div
+                  ref={recentSubRef}
+                  onMouseEnter={openRecentSub}
+                  onMouseLeave={scheduleCloseRecentSub}
+                  className={cn(
+                    "fixed z-[70] w-64 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col",
+                    isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
+                  )}
+                  style={recentSubPos}
+                >
+                    {recentFiles.slice(0, 10).map(f => (
+                      <button
+                        key={f.path}
+                        onClick={() => { setMenuOpen(false); void openPathIntoTab(f.path); }}
+                        className={cn(
+                          "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs flex items-center gap-2 transition-colors",
+                          isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
+                        )}
+                        title={f.path}
+                      >
+                        <FileText size={13} className="shrink-0 opacity-60" />
+                        <span className="truncate">{f.name}</span>
+                      </button>
+                    ))}
+                    <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+                    <button
+                      onClick={() => { setRecentFiles(clearRecentFiles()); }}
+                      className={cn(
+                        "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                        isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                      )}
+                    >
+                      <Trash2 size={13} />
+                      清空最近打开
+                    </button>
+                </div>,
+                document.body
+              )}
+            </div>
+            <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
             <button
               onClick={() => { setMenuOpen(false); handleSave(); }}
               disabled={!activeTab || activeTab.readOnly || saving}
               className={cn(
-                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
-                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
               <Save size={14} />
@@ -1404,8 +1890,8 @@ export default function App() {
               onClick={() => { setMenuOpen(false); handleSaveAs(); }}
               disabled={!activeTab || activeTab.readOnly || saving}
               className={cn(
-                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
-                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
               <SaveAll size={14} />
@@ -1417,8 +1903,8 @@ export default function App() {
               onClick={() => { setMenuOpen(false); handleUndo(); }}
               disabled={!canUndo}
               className={cn(
-                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
-                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
               <Undo2 size={14} />
@@ -1429,8 +1915,8 @@ export default function App() {
               onClick={() => { setMenuOpen(false); handleRedo(); }}
               disabled={!canRedo}
               className={cn(
-                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
-                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
               <Redo2 size={14} />
@@ -1439,10 +1925,30 @@ export default function App() {
             </button>
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
             <button
+              onClick={() => { setMenuOpen(false); setSettingsOpen(true); }}
+              className={cn(
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+              )}
+            >
+              <Settings size={14} />
+              设置
+            </button>
+            <button
+              onClick={() => { setMenuOpen(false); setShortcutsOpen(true); }}
+              className={cn(
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+              )}
+            >
+              <Keyboard size={14} />
+              键盘快捷键
+            </button>
+            <button
               onClick={() => { setMenuOpen(false); setAboutOpen(true); }}
               className={cn(
-                "w-full px-3 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
-                isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
               <Info size={14} />
@@ -1478,44 +1984,154 @@ export default function App() {
               </div>
             )}
 
-            {/* bottom status bar（手机端隐藏）：文件信息 + 还原 + 模式 */}
+            {/* bottom status bar（手机端隐藏）：文件信息 + 光标位置 + 编码/换行符 + 还原 */}
             {!isPhone && (<div className={cn(
-              "h-6 border-t flex items-center px-4 gap-2 text-[11px] shrink-0",
+              "h-6 border-t flex items-center px-4 gap-2 text-[11px] shrink-0 relative",
               isDarkMode ? "border-zinc-700 bg-zinc-800 text-zinc-500" : "border-zinc-200 bg-zinc-100 text-zinc-500"
             )}>
               <span className="truncate" title={activeTab.path || '未保存'}>{activeTab.path || '未保存'}</span>
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{LANGUAGE_LABELS[activeTab.language] || activeTab.language}</span>
+              {activeTab.binary && (
+                <span className="shrink-0 text-orange-400 font-medium" title="疑似二进制文件，以只读方式预览">二进制 · 只读</span>
+              )}
+              {!activeTab.binary && activeTab.large && (
+                <span className="shrink-0" title="文件较大，已关闭语法高亮/小地图/补全以保证流畅">大文件</span>
+              )}
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{formatFileSize(activeTab.content)}</span>
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{activeTab.content.split('\n').length} 行</span>
+              {/* 行列位置：仅编辑器可见时显示（预览态无光标概念） */}
+              {editorVisible && (
+                <>
+                  <span className="shrink-0 opacity-50">|</span>
+                  <span className="shrink-0 tabular-nums" title="光标位置（行, 列）">
+                    行 {cursorInfo.line}, 列 {cursorInfo.col}
+                    {cursorInfo.selChars > 0 && `（选中 ${cursorInfo.selChars}）`}
+                  </span>
+                </>
+              )}
               {activeTab.isDirty && <span className="shrink-0 text-amber-500 font-medium">未保存</span>}
               <div className="flex-1" />
+
+              {/* 换行符菜单 */}
+              <button
+                onClick={() => setStatusMenu(m => m === 'eol' ? null : 'eol')}
+                className={cn(
+                  "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 shrink-0",
+                  isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
+                )}
+                title="换行符"
+              >
+                {EOL_LABELS[activeTab.eol]}
+              </button>
+              {/* 编码菜单 */}
+              <button
+                onClick={() => setStatusMenu(m => m === 'encoding-root' ? null : 'encoding-root')}
+                className={cn(
+                  "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 shrink-0",
+                  isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
+                )}
+                title="文件编码"
+              >
+                {encodingLabel(activeTab.encoding)}
+                {activeTab.bom && ' BOM'}
+              </button>
               {!activeTab.readOnly && (
                 <button
                   onClick={handleRevert}
                   disabled={!activeTab.isDirty}
                   className={cn(
-                    "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 disabled:opacity-40",
-                    isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                    "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0",
+                    isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                   )}
                   title="还原到上次保存的内容"
                 >
                   <RotateCcw size={10} /> 还原
                 </button>
               )}
+
+              {/* 状态栏弹出菜单（点击遮罩关闭） */}
+              {statusMenu && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setStatusMenu(null)} />
+                  <div className={cn(
+                    "absolute bottom-full mb-1 right-2 z-50 w-56 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col",
+                    isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
+                  )}>
+                    {statusMenu === 'encoding-root' && (<>
+                      <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>文件编码</div>
+                      <button
+                        onClick={() => setStatusMenu('encoding-reopen')}
+                        className={statusItemCls}
+                      >
+                        <RotateCcw size={12} className="shrink-0" />
+                        以编码重新打开…
+                      </button>
+                      <button
+                        onClick={() => setStatusMenu('encoding-save')}
+                        disabled={!activeTab.path || activeTab.readOnly}
+                        className={cn(statusItemCls, "disabled:opacity-40")}
+                      >
+                        <Save size={12} className="shrink-0" />
+                        转换编码并保存…
+                      </button>
+                      {!activeTab.path && (
+                        <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+                          未保存文件：编码将在另存时生效
+                        </div>
+                      )}
+                    </>)}
+                    {(statusMenu === 'encoding-reopen' || statusMenu === 'encoding-save') && (
+                      <>
+                        <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+                          {statusMenu === 'encoding-reopen' ? '以编码重新打开' : '转换编码并保存'}
+                        </div>
+                        {ENCODING_OPTIONS.map(opt => (
+                          <button
+                            key={opt.id}
+                            onClick={() => {
+                              setStatusMenu(null);
+                              if (statusMenu === 'encoding-reopen') void reopenWithEncoding(activeTab, opt.id);
+                              else void convertEncoding(activeTab, opt.id);
+                            }}
+                            className={cn(statusItemCls, "justify-between")}
+                          >
+                            <span className="flex items-center gap-2">
+                              {opt.id === 'utf-8' && activeTab.bom ? 'UTF-8 BOM' : opt.label}
+                            </span>
+                            {opt.id === activeTab.encoding && <span className="text-emerald-500">✓</span>}
+                          </button>
+                        ))}
+                      </>
+                    )}
+                    {statusMenu === 'eol' && (<>
+                      <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>换行符</div>
+                      {(['lf', 'crlf', 'cr'] as LineEnding[]).map(e => (
+                        <button
+                          key={e}
+                          onClick={() => { setStatusMenu(null); setTabEol(activeTab, e); }}
+                          className={cn(statusItemCls, "justify-between")}
+                        >
+                          <span>{EOL_LABELS[e]}{e === 'lf' ? '（Unix/macOS）' : e === 'crlf' ? '（Windows）' : '（经典 Mac）'}</span>
+                          {activeTab.eol === e && <span className="text-emerald-500">✓</span>}
+                        </button>
+                      ))}
+                    </>)}
+                  </div>
+                </>
+              )}
             </div>)}
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center p-6">
-            <div className={cn(
-              "w-20 h-20 rounded-full flex items-center justify-center mb-4",
-              isDarkMode ? "bg-zinc-800" : "bg-zinc-200"
-            )}>
-              <Code2 size={32} className={cn(isDarkMode ? "text-zinc-400" : "text-zinc-500")} />
-            </div>
-            <h3 className="text-lg font-medium mb-1">Nexus Editor</h3>
+            <img
+              src={isDarkMode ? heidIconLight : heidIconDark} /* 资源名按图标自身配色命名：dark=深色底图标（适合浅色界面），故深色主题用 light */
+              alt="H.E.I.D"
+              className="w-20 h-20 drop-shadow-md mb-4"
+            />
+            <h3 className="text-lg font-medium mb-1">H.E.I.D</h3>
             <p className="text-sm text-zinc-500 max-w-sm text-center mb-4">
               打开一个文件开始编辑，或新建一个空白文件
             </p>
@@ -1539,6 +2155,40 @@ export default function App() {
                 <Plus size={16} /> 新建文件
               </button>
             </div>
+
+            {/* 最近打开（最多 5 条，悬浮显示完整路径） */}
+            {recentFiles.length > 0 && (
+              <div className="mt-7 w-full max-w-md flex flex-col items-center">
+                <span className={cn(
+                  "text-[10px] font-semibold tracking-wider uppercase mb-2",
+                  isDarkMode ? "text-zinc-500" : "text-zinc-400"
+                )}>
+                  最近打开
+                </span>
+                <div className="w-full flex flex-col gap-0.5">
+                  {recentFiles.slice(0, 5).map(f => (
+                    <button
+                      key={f.path}
+                      onClick={() => void openPathIntoTab(f.path)}
+                      className={cn(
+                        "w-full px-3 py-1.5 rounded-md text-xs flex items-center gap-2 transition-colors min-w-0",
+                        isDarkMode ? "hover:bg-zinc-800 text-zinc-400" : "hover:bg-zinc-200/70 text-zinc-500"
+                      )}
+                      title={f.path}
+                    >
+                      <FileText size={13} className="shrink-0 opacity-60" />
+                      <span className="truncate">{f.name}</span>
+                      <span className={cn(
+                        "ml-auto shrink-0 max-w-[45%] truncate text-[10px] hidden sm:inline",
+                        isDarkMode ? "text-zinc-600" : "text-zinc-400"
+                      )}>
+                        {f.path}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1553,6 +2203,24 @@ export default function App() {
             onClose={() => setDiffModalOpen(false)}
             onAccept={handleAcceptDiff}
             onRevert={handleRevertDiff}
+          />
+        )}
+
+        {/* 设置弹窗 */}
+        {settingsOpen && (
+          <SettingsDialog
+            isDarkMode={isDarkMode}
+            settings={settings}
+            onChange={setSettings}
+            onClose={() => setSettingsOpen(false)}
+          />
+        )}
+
+        {/* 快捷键帮助弹窗 */}
+        {shortcutsOpen && (
+          <ShortcutHelpDialog
+            isDarkMode={isDarkMode}
+            onClose={() => setShortcutsOpen(false)}
           />
         )}
 
@@ -1578,7 +2246,7 @@ export default function App() {
                 <X size={14} />
               </button>
               <img
-                src={isDarkMode ? heidIconDark : heidIconLight}
+                src={isDarkMode ? heidIconLight : heidIconDark} /* 资源名按图标自身配色命名：dark=深色底图标（适合浅色界面），故深色主题用 light */
                 alt="H.E.I.D"
                 className="w-20 h-20 drop-shadow-md"
               />
@@ -1590,7 +2258,7 @@ export default function App() {
                 "mt-3 px-2.5 py-0.5 rounded-full text-[10px] font-medium border",
                 isDarkMode ? "border-zinc-600 text-zinc-400" : "border-zinc-300 text-zinc-500"
               )}>
-                版本 1.1.0
+                版本 0.4.0
               </div>
               <p className={cn(
                 "mt-4 text-xs leading-relaxed",
@@ -1611,6 +2279,40 @@ export default function App() {
         )}
       </div>
 
+      {/* 标签栏右键菜单 */}
+      {tabMenu && (
+        <div
+          ref={tabMenuRef}
+          className={cn(
+            "fixed z-[95] w-44 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col",
+            isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
+          )}
+          style={{
+            left: Math.max(4, Math.min(tabMenu.x, window.innerWidth - 190)),
+            top: Math.max(4, Math.min(tabMenu.y, window.innerHeight - 130)),
+          }}
+        >
+          {([
+            { icon: <Plus size={13} />, label: '新建标签页', action: () => handleNewFile(), disabled: false },
+            { icon: <X size={13} />, label: '关闭其他标签页', action: () => void closeOtherTabs(tabMenu.tabId!), disabled: !tabMenu.tabId || tabs.length <= 1 },
+            { icon: <Trash2 size={13} />, label: '关闭所有标签页', action: () => void closeAllTabs(), disabled: tabs.length === 0 },
+          ] as const).map(({ icon, label, action, disabled }) => (
+            <button
+              key={label}
+              onClick={action}
+              disabled={disabled}
+              className={cn(
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40 disabled:pointer-events-none",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+              )}
+            >
+              {icon}
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* 手机端底部工具栏（拇指区，取代键盘快捷键） */}
       {isPhone && activeTab && (
         <BottomToolbar
@@ -1626,6 +2328,7 @@ export default function App() {
           onUndo={handleUndo}
           onRedo={handleRedo}
           onToggleView={toggleMdView}
+          onFind={() => openFind(false, false)}
         />
       )}
 
