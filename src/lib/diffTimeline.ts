@@ -17,8 +17,17 @@ export interface ExternalDiffEntry {
   detectedAt: number;
 }
 
-/** 每文件时间线上限，追加时超出即丢弃最旧 */
-export const MAX_DIFF_ENTRIES = 10;
+/** 时间线保留条数的可调范围与默认值（用户可在 Diff 弹窗中设置） */
+export const MIN_DIFF_ENTRIES = 5;
+export const MAX_DIFF_ENTRIES = 50;
+export const DEFAULT_DIFF_ENTRIES = 30;
+
+/** 把任意输入钳制为合法的保留条数（整数，5~50）；无法解析为数字时回退默认值 */
+export function clampDiffEntries(value: unknown): number {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return DEFAULT_DIFF_ENTRIES;
+  return Math.min(MAX_DIFF_ENTRIES, Math.max(MIN_DIFF_ENTRIES, n));
+}
 
 let entryCounter = 0;
 function nextEntryId(): string {
@@ -29,17 +38,22 @@ function nextEntryId(): string {
 /**
  * 追加一条外部修改记录。before 应为调用方最后已知的磁盘内容
  * （即上一条的 after；首条为建立监听时读到的磁盘内容），链式衔接由此保证。
+ * 超出 maxEntries 即丢弃最旧。
  */
 export function appendEntry(
   timeline: ExternalDiffEntry[],
   before: string,
   after: string,
-  detectedAt: number = Date.now()
+  detectedAt: number = Date.now(),
+  maxEntries: number = DEFAULT_DIFF_ENTRIES
 ): ExternalDiffEntry[] {
   const next = [...timeline, { id: nextEntryId(), before, after, detectedAt }];
-  return next.length > MAX_DIFF_ENTRIES
-    ? next.slice(next.length - MAX_DIFF_ENTRIES)
-    : next;
+  return next.length > maxEntries ? next.slice(next.length - maxEntries) : next;
+}
+
+/** 裁剪到 maxEntries 条（保留最新）；未超限时返回原数组引用 */
+export function trimTimeline(timeline: ExternalDiffEntry[], maxEntries: number): ExternalDiffEntry[] {
+  return timeline.length > maxEntries ? timeline.slice(timeline.length - maxEntries) : timeline;
 }
 
 /** 接受：仅移除该条目，其余不动 */

@@ -92,6 +92,7 @@ const MarkdownImage = React.memo<{
     <img
       src={imgSrc} alt={(alt || '').split('|||LOCAL-FILE:')[0] || ''}
       loading="lazy"
+      onError={() => setLoadError('图片加载失败')}
       style={{ maxWidth: '100%', height: 'auto', borderRadius: '0.5rem', display: 'block', marginLeft: 'auto', marginRight: 'auto', margin: '1.5rem 0' }}
     />
   );
@@ -141,6 +142,71 @@ function insertBlockAt(content: string, at: number, block: string): string {
 }
 
 const BLANK_TABLE = '|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |';
+
+/* 本地路径 → markdown 图片 URL：反斜杠转正斜杠并对空格/括号/#/? 百分号编码。
+   不编码的话解析器会在第一个空格或括号处截断 URL，产生裂图和残留文本 */
+const encodeLocalImageUrl = (p: string): string => {
+  const normalized = p.replace(/\\/g, '/');
+  const prefixed = /^[A-Za-z]:/.test(normalized) ? 'file:///' + normalized : normalized;
+  return encodeURI(prefixed)
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\?/g, '%3F')
+    .replace(/#/g, '%23');
+};
+
+/* ---- 图片插入弹窗的源码上下文：以插入锚点所在行为中心取最多 7 行 ----
+   caret 为锚点在片段内的偏移，用户在源码框中移动光标后按光标绝对位置精确插入 */
+export interface SourceSnippet {
+  text: string;
+  caret: number;
+  start: number;
+}
+
+function buildSourceSnippet(content: string, at: number): SourceSnippet {
+  const lines: Array<{ text: string; start: number }> = [];
+  let pos = 0;
+  for (const line of content.split('\n')) {
+    lines.push({ text: line, start: pos });
+    pos += line.length + 1;
+  }
+  let idx = lines.findIndex(l => at <= l.start + l.text.length);
+  if (idx < 0) idx = lines.length - 1;
+  const from = Math.max(0, idx - 3);
+  const to = Math.min(lines.length - 1, idx + 3);
+  const text = lines.slice(from, to + 1).map(l => l.text).join('\n');
+  return {
+    text,
+    caret: Math.min(Math.max(0, at - lines[from].start), text.length),
+    start: lines[from].start,
+  };
+}
+
+/* 鼠标未点中任何渲染块时（落在空隙/空白处），按 Y 坐标就近取块边界作为插入锚点，
+   避免退化成“追加到文档末尾” */
+function findNearestBlockBoundary(root: HTMLElement, clientY: number): number | null {
+  const proseEl = root.querySelector('.prose') as HTMLElement | null;
+  if (!proseEl) return null;
+  const blocks = (Array.from(proseEl.children) as HTMLElement[])
+    .filter(c => c.dataset?.mdStart && c.dataset?.mdEnd);
+  if (blocks.length === 0) return null;
+  const rects = blocks.map(b => b.getBoundingClientRect());
+  if (clientY <= rects[0].top) return Number(blocks[0].dataset.mdStart);
+  for (let i = 0; i < blocks.length; i++) {
+    const r = rects[i];
+    const next = i + 1 < rects.length ? rects[i + 1] : null;
+    if (clientY >= r.top && clientY <= r.bottom) {
+      /* 点在块内但没被上游命中（如块内空白较大处）：取更近的上下边缘 */
+      return (clientY - r.top <= r.bottom - clientY)
+        ? (i === 0 ? Number(blocks[0].dataset.mdStart) : Number(blocks[i - 1].dataset.mdEnd))
+        : Number(blocks[i].dataset.mdEnd);
+    }
+    if (next && clientY > r.bottom && clientY < next.top) {
+      return Number(blocks[i].dataset.mdEnd);
+    }
+  }
+  return Number(blocks[blocks.length - 1].dataset.mdEnd);
+}
 
 /* ---- 空白处右键插入菜单 ---- */
 
@@ -278,14 +344,14 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<PreviewMenuState | null>(null);
   const [blankMenu, setBlankMenu] = useState<{ x: number; y: number; insertAt: number } | null>(null);
-  const [imageModal, setImageModal] = useState<{ insertAt: number } | null>(null);
+  const [imageModal, setImageModal] = useState<SourceSnippet | null>(null);
   const [tableAction, setTableAction] = useState<TableAction | null>(null);
   const [cellEdit, setCellEdit] = useState<CellEdit | null>(null);
 
   /* 顶栏「插入表格/插入图片」入口（移动端编辑视图下也能插入） */
   React.useImperativeHandle(ref, () => ({
     insertTable: () => { if (onChange) onChange(insertBlockAt(content, content.length, BLANK_TABLE)); },
-    openImageModal: () => { setImageModal({ insertAt: content.length }); },
+    openImageModal: () => { setImageModal(buildSourceSnippet(content, content.length)); },
   }), [content, onChange]);
 
   /* 剥离语法高亮主题的背景色，交给外层容器控制 */
@@ -447,7 +513,10 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         } else if (!fixedUrl.startsWith('/') && !fixedUrl.startsWith('./') && !fixedUrl.startsWith('file://')) {
           fixedUrl = 'file:///' + fixedUrl;
         }
-        const filePath = fixedUrl.replace(/^file:\/+/, '');
+        const rawPath = fixedUrl.replace(/^file:\/+/, '');
+        /* 插入端写入的是百分号编码后的 URL，这里还原为真实路径再交给 fs 读取 */
+        let filePath = rawPath;
+        try { filePath = decodeURIComponent(rawPath); } catch { /* 含孤立 % 时保留原样 */ }
         const encodedAlt = `${alt}|||LOCAL-FILE:${filePath}`;
         return `![${encodedAlt}](https://local-image.placeholder)`;
       }
@@ -537,7 +606,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       }
     }
 
-    /* 空白处（无选区）：插入点 = 悬停位置最外层源码块的末尾；无块则追加到文末 */
+    /* 空白处（无选区）：插入锚点 = 点中块的最外层末尾；未点中块（空隙/空白）→ 按鼠标 Y 就近取块边界 */
     e.preventDefault();
     setMenu(null);
     setTableAction(null);
@@ -548,7 +617,13 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       if (cand && cand.dataset.mdEnd) mdEnd = Number(cand.dataset.mdEnd);
       el = el.parentElement;
     }
-    setBlankMenu({ x: e.clientX, y: e.clientY, insertAt: mdEnd ?? content.length });
+    let insertAt = mdEnd;
+    if (insertAt == null) {
+      const root = contentRef.current;
+      const near = root ? findNearestBlockBoundary(root, e.clientY) : null;
+      insertAt = near ?? content.length;
+    }
+    setBlankMenu({ x: e.clientX, y: e.clientY, insertAt });
   }, [onChange, content.length]);
 
   /* 选区格式化：从后往前替换，保证偏移量不失效 */
@@ -576,12 +651,22 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     setBlankMenu(null);
   }, [blankMenu, content, onChange]);
 
-  const handleInsertImages = useCallback((images: InsertImage[]) => {
-    if (!imageModal || !onChange || images.length === 0) return;
-    const block = images.map(img => `![${img.name}](${img.src})`).join('\n');
-    onChange(insertBlockAt(content, imageModal.insertAt, block));
+  const handleInsertImages = useCallback((images: InsertImage[], caretAbs: number) => {
+    if (!onChange || images.length === 0) return;
+    const at = Math.min(Math.max(0, caretAbs), content.length);
+    const before = content.slice(0, at);
+    const after = content.slice(at);
+    /* 图片独立成段：光标在行中时自动补前后空行 */
+    const head = before.length === 0 ? '' : (before.endsWith('\n\n') ? before : before.replace(/\n+$/, '') + '\n\n');
+    const tail = after.length === 0 ? '' : (after.startsWith('\n\n') ? after : (after.startsWith('\n') ? '\n' + after : '\n\n' + after));
+    const block = images.map(img => {
+      const isLocal = !/^(https?:|data:)/.test(img.src);
+      const url = isLocal ? encodeLocalImageUrl(img.src) : img.src;
+      return `![${img.name}](${url})`;
+    }).join('\n');
+    onChange(head + block + tail);
     setImageModal(null);
-  }, [imageModal, content, onChange]);
+  }, [content, onChange]);
 
   /* ---- 渲染表格的可视化编辑：悬停边线出单个圆形按钮 ----
      线头（两端）= 「−」删除整条线；线段中点 = 「+」插入一条垂直于它的线。
@@ -899,7 +984,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           y={blankMenu.y}
           isDarkMode={isDarkMode}
           onTable={handleInsertTable}
-          onImage={() => { setImageModal({ insertAt: blankMenu.insertAt }); setBlankMenu(null); }}
+          onImage={() => { setImageModal(buildSourceSnippet(content, blankMenu.insertAt)); setBlankMenu(null); }}
           onClose={closeBlankMenu}
         />
       )}
@@ -908,6 +993,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       {imageModal && onChange && (
         <ImageInsertModal
           isDarkMode={isDarkMode}
+          snippet={imageModal}
           onConfirm={handleInsertImages}
           onClose={() => setImageModal(null)}
         />

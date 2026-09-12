@@ -16,7 +16,8 @@ export interface ConfirmDialogProps {
 }
 
 /**
- * 通用小型二次确认模态，渲染于父级弹窗之上（absolute 铺满父容器）。
+ * 通用小型二次确认模态。fixed 覆盖整个视口而非父级 padding box：
+ * 父级弹窗的边框在确认态下需一并压暗，否则会残留一圈亮色描边。
  * Tauri WebView2 下 window.confirm 不可靠，且自绘与应用视觉统一。
  * Esc / 点击遮罩等同取消。
  */
@@ -40,8 +41,8 @@ export function ConfirmDialog({
   }, [onCancel]);
 
   return (
-    <div className="absolute inset-0 z-[120] flex items-center justify-center">
-      <div className="absolute inset-0 bg-zinc-950/50 backdrop-blur-[2px]" onClick={onCancel} />
+    <div className="fixed inset-0 z-[120] flex items-center justify-center">
+      <div className="absolute inset-0 bg-zinc-950/50" onClick={onCancel} />
       <div className={cn(
         "relative w-72 rounded-xl border shadow-2xl p-4",
         isDarkMode ? "border-zinc-700 bg-zinc-800 text-zinc-100" : "border-zinc-200 bg-white text-zinc-800"

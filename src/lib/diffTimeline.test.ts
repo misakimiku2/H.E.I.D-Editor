@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MIN_DIFF_ENTRIES,
   MAX_DIFF_ENTRIES,
+  DEFAULT_DIFF_ENTRIES,
   appendEntry,
   removeEntry,
   revertEntry,
+  trimTimeline,
+  clampDiffEntries,
   detectExternalChange,
   diffStats,
   buildDiffRows,
@@ -13,11 +17,12 @@ import {
 /**
  * 模拟磁盘连续变化：contents[0] 为建立监听时的基准内容，
  * 之后 contents[i-1] → contents[i] 依次外部修改（before 恒取最后已知内容，与 hook 用法一致）。
+ * maxEntries 不传时走 appendEntry 默认值。
  */
-function simulateChanges(contents: string[], t0 = 1_000): ExternalDiffEntry[] {
+function simulateChanges(contents: string[], t0 = 1_000, maxEntries?: number): ExternalDiffEntry[] {
   let timeline: ExternalDiffEntry[] = [];
   for (let i = 1; i < contents.length; i++) {
-    timeline = appendEntry(timeline, contents[i - 1], contents[i], t0 + i);
+    timeline = appendEntry(timeline, contents[i - 1], contents[i], t0 + i, maxEntries);
   }
   return timeline;
 }
@@ -45,17 +50,32 @@ describe('appendEntry / 时间线', () => {
     expect(timeline.map(e => e.detectedAt)).toEqual([1001, 1002]);
   });
 
-  it(`上限裁剪：超过 ${MAX_DIFF_ENTRIES} 条丢弃最旧`, () => {
-    // v0 → v1 → ... → v11 共 12 个版本、11 次变化，超出上限 1 条
-    const versions = Array.from({ length: MAX_DIFF_ENTRIES + 2 }, (_, i) => `v${i}`);
+  it('上限裁剪：显式 maxEntries，超出丢弃最旧', () => {
+    // v0 → ... → v5 共 6 个版本、5 次变化，上限 3 条
+    const versions = Array.from({ length: 6 }, (_, i) => `v${i}`);
+    const timeline = simulateChanges(versions, 1_000, 3);
+    expect(timeline).toHaveLength(3);
+    // 最旧两条（v0→v1、v1→v2）被丢弃，现存最早的是 v2→v3
+    expect(timeline[0]).toMatchObject({ before: 'v2', after: 'v3' });
+    expect(timeline[timeline.length - 1]).toMatchObject({ before: 'v4', after: 'v5' });
+  });
+
+  it(`上限裁剪：不传 maxEntries 时默认保留 ${DEFAULT_DIFF_ENTRIES} 条`, () => {
+    const versions = Array.from({ length: DEFAULT_DIFF_ENTRIES + 2 }, (_, i) => `v${i}`);
     const timeline = simulateChanges(versions);
-    expect(timeline).toHaveLength(MAX_DIFF_ENTRIES);
+    expect(timeline).toHaveLength(DEFAULT_DIFF_ENTRIES);
     // 最旧一条（v0→v1）被丢弃，现存最早的是 v1→v2
     expect(timeline[0]).toMatchObject({ before: 'v1', after: 'v2' });
     expect(timeline[timeline.length - 1]).toMatchObject({
-      before: `v${MAX_DIFF_ENTRIES}`,
-      after: `v${MAX_DIFF_ENTRIES + 1}`,
+      before: `v${DEFAULT_DIFF_ENTRIES}`,
+      after: `v${DEFAULT_DIFF_ENTRIES + 1}`,
     });
+  });
+
+  it('取值范围常量：5 ~ 50，默认 30', () => {
+    expect(MIN_DIFF_ENTRIES).toBe(5);
+    expect(MAX_DIFF_ENTRIES).toBe(50);
+    expect(DEFAULT_DIFF_ENTRIES).toBe(30);
   });
 
   it('不修改原数组（纯函数）', () => {
@@ -63,6 +83,42 @@ describe('appendEntry / 时间线', () => {
     const snapshot = [...original];
     appendEntry(original, 'b', 'c');
     expect(original).toEqual(snapshot);
+  });
+});
+
+describe('trimTimeline（设置调低时即时裁剪）', () => {
+  it('超限裁剪保留最新', () => {
+    const timeline = simulateChanges(['v0', 'v1', 'v2', 'v3']);
+    const trimmed = trimTimeline(timeline, 2);
+    expect(trimmed).toHaveLength(2);
+    expect(trimmed[0]).toMatchObject({ before: 'v1', after: 'v2' });
+    expect(trimmed[1]).toMatchObject({ before: 'v2', after: 'v3' });
+  });
+
+  it('未超限返回原数组引用', () => {
+    const timeline = simulateChanges(['v0', 'v1']);
+    expect(trimTimeline(timeline, 10)).toBe(timeline);
+  });
+});
+
+describe('clampDiffEntries（设置取值钳制）', () => {
+  it('低于下限钳到最小值', () => {
+    expect(clampDiffEntries(0)).toBe(MIN_DIFF_ENTRIES);
+    expect(clampDiffEntries(-3)).toBe(MIN_DIFF_ENTRIES);
+  });
+
+  it('高于上限钳到最大值', () => {
+    expect(clampDiffEntries(999)).toBe(MAX_DIFF_ENTRIES);
+  });
+
+  it('范围内整数原值返回，小数四舍五入', () => {
+    expect(clampDiffEntries(30)).toBe(30);
+    expect(clampDiffEntries(7.6)).toBe(8);
+  });
+
+  it('无法解析为数字时回退默认值', () => {
+    expect(clampDiffEntries('abc')).toBe(DEFAULT_DIFF_ENTRIES);
+    expect(clampDiffEntries(NaN)).toBe(DEFAULT_DIFF_ENTRIES);
   });
 });
 

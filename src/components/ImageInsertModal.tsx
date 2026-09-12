@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { X, ImagePlus, Trash2 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import type { SourceSnippet } from './MarkdownPreview';
 
-/* ---- 插入图片弹窗：本地（可多选）/ 网络链接（可多条），带缩略图预览 ---- */
+/* ---- 插入图片弹窗：本地（可多选）/ 网络链接（可多条），带缩略图预览 ----
+   顶部源码框显示右键位置的上下文（最多 7 行），移动光标即可精确选择插入点 */
 
 export interface InsertImage {
   name: string;
@@ -11,8 +13,34 @@ export interface InsertImage {
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico'];
 
-/* 预览图：本地绝对路径经 convertFileSrc 转换，网络/数据 URL 直接使用 */
-const PreviewThumb = React.memo<{ img: InsertImage }>(({ img }) => {
+const MIME_MAP: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+  gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp',
+  bmp: 'image/bmp', ico: 'image/x-icon',
+};
+
+/* 本地路径 → 可预览 URL：优先 fs 读为 blob（不依赖资源协议配置），失败回退 convertFileSrc */
+const previewUrlCache = new Map<string, string>();
+
+async function resolvePreviewUrl(path: string): Promise<string> {
+  const cached = previewUrlCache.get(path);
+  if (cached) return cached;
+  try {
+    const { readFile } = await import('@tauri-apps/plugin-fs');
+    const data = await readFile(path);
+    const ext = path.split('.').pop()?.toLowerCase() || 'png';
+    const blob = new Blob([new Uint8Array(data)], { type: MIME_MAP[ext] || 'image/png' });
+    const url = URL.createObjectURL(blob);
+    previewUrlCache.set(path, url);
+    return url;
+  } catch {
+    const { convertFileSrc } = await import('@tauri-apps/api/core');
+    const p = /^[A-Za-z]:/.test(path) ? '/' + path.replace(/\\/g, '/') : path;
+    return convertFileSrc(p);
+  }
+}
+
+const PreviewThumb = React.memo<{ img: InsertImage; isDarkMode: boolean }>(({ img, isDarkMode }) => {
   const [src, setSrc] = useState('');
   const [broken, setBroken] = useState(false);
 
@@ -25,11 +53,13 @@ const PreviewThumb = React.memo<{ img: InsertImage }>(({ img }) => {
     let cancelled = false;
     (async () => {
       try {
-        const { convertFileSrc } = await import('@tauri-apps/api/core');
-        const p = /^[A-Za-z]:/.test(img.src) ? '/' + img.src.replace(/\\/g, '/') : img.src;
-        if (!cancelled) setSrc(convertFileSrc(p));
+        const url = await resolvePreviewUrl(img.src);
+        if (!cancelled) {
+          if (url) setSrc(url);
+          else setBroken(true);
+        }
       } catch {
-        if (!cancelled) setSrc('');
+        if (!cancelled) setBroken(true);
       }
     })();
     return () => { cancelled = true; };
@@ -37,8 +67,11 @@ const PreviewThumb = React.memo<{ img: InsertImage }>(({ img }) => {
 
   if (broken || !src) {
     return (
-      <div className="w-full h-20 rounded-md border border-dashed border-zinc-400/50 flex flex-col items-center justify-center text-zinc-400 text-[10px] gap-1">
-        <ImagePlus size={16} />
+      <div className={cn(
+        "w-full h-20 rounded-md border border-dashed flex flex-col items-center justify-center text-[10px] gap-1 overflow-hidden",
+        isDarkMode ? "border-zinc-600 text-zinc-500" : "border-zinc-300 text-zinc-400"
+      )}>
+        <ImagePlus size={16} className="shrink-0" />
         <span className="px-1 truncate max-w-full">{img.name}</span>
       </div>
     );
@@ -49,7 +82,10 @@ const PreviewThumb = React.memo<{ img: InsertImage }>(({ img }) => {
       alt={img.name}
       loading="lazy"
       onError={() => setBroken(true)}
-      className="w-full h-20 object-cover rounded-md border"
+      className={cn(
+        "block w-full h-20 object-cover rounded-md border",
+        isDarkMode ? "border-zinc-600" : "border-zinc-200"
+      )}
     />
   );
 });
@@ -58,16 +94,28 @@ PreviewThumb.displayName = 'PreviewThumb';
 
 export const ImageInsertModal = React.memo<{
   isDarkMode: boolean;
-  onConfirm: (images: InsertImage[]) => void;
+  snippet: SourceSnippet;
+  /** absolutePos = snippet.start + 源码框内光标偏移 */
+  onConfirm: (images: InsertImage[], absolutePos: number) => void;
   onClose: () => void;
-}>(({ isDarkMode, onConfirm, onClose }) => {
+}>(({ isDarkMode, snippet, onConfirm, onClose }) => {
   const [tab, setTab] = useState<'local' | 'url'>('local');
   const [images, setImages] = useState<InsertImage[]>([]);
   const [urlInput, setUrlInput] = useState('');
   const [error, setError] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const snippetRef = useRef<HTMLTextAreaElement | null>(null);
 
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+  /* 挂载后聚焦源码框并把光标放到右键位置 */
+  useEffect(() => {
+    const ta = snippetRef.current;
+    if (!ta) return;
+    ta.focus();
+    const pos = Math.min(Math.max(0, snippet.caret), snippet.text.length);
+    ta.setSelectionRange(pos, pos);
+  }, [snippet]);
 
   /* Esc 关闭 */
   useEffect(() => {
@@ -101,7 +149,7 @@ export const ImageInsertModal = React.memo<{
         const name = p.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '图片';
         addImage({ name, src: p });
       });
-    } catch (e) {
+    } catch {
       setError('无法打开文件选择器');
     }
   };
@@ -133,6 +181,21 @@ export const ImageInsertModal = React.memo<{
     setUrlInput('');
   };
 
+  const confirm = () => {
+    if (images.length === 0) return;
+    const ta = snippetRef.current;
+    const caret = ta ? ta.selectionStart : snippet.caret;
+    onConfirm(images, snippet.start + caret);
+  };
+
+  /* 源码框只作定位用：放行光标移动/全选/复制，拦截一切会修改内容的输入（含中文输入法） */
+  const SNIPPET_NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
+  const blockSnippetEdit = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (SNIPPET_NAV_KEYS.has(e.key)) return;
+    if ((e.ctrlKey || e.metaKey) && ['a', 'c'].includes(e.key.toLowerCase())) return;
+    e.preventDefault();
+  };
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       <div
@@ -140,7 +203,7 @@ export const ImageInsertModal = React.memo<{
         onClick={onClose}
       />
       <div className={cn(
-        "relative w-[440px] rounded-2xl border shadow-2xl p-5 flex flex-col gap-3",
+        "relative w-[460px] max-w-[92vw] max-h-[550px] rounded-2xl border shadow-2xl p-5 flex flex-col gap-3",
         isDarkMode ? "border-zinc-700 bg-zinc-800/95 text-zinc-100" : "border-zinc-200 bg-white/95 text-zinc-800"
       )}>
         <button
@@ -153,14 +216,37 @@ export const ImageInsertModal = React.memo<{
         >
           <X size={14} />
         </button>
-        <div className="text-sm font-semibold">插入图片</div>
+        <div className="text-sm font-semibold shrink-0">插入图片</div>
+
+        {/* 源码上下文：光标位置 = 插入点 */}
+        <div className="flex flex-col gap-1 shrink-0">
+          <div className={cn("text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+            源码（移动光标选择精确插入点）
+          </div>
+          <textarea
+            ref={snippetRef}
+            rows={7}
+            spellCheck={false}
+            value={snippet.text}
+            onKeyDown={blockSnippetEdit}
+            onPaste={(e) => e.preventDefault()}
+            onDrop={(e) => e.preventDefault()}
+            onCompositionStart={(e) => e.preventDefault()}
+            className={cn(
+              "w-full box-border px-3 py-2 rounded-lg text-xs outline-none border transition-colors resize-none font-mono leading-5 whitespace-pre overflow-auto caret-indigo-500",
+              isDarkMode
+                ? "bg-zinc-900/60 border-zinc-600 focus:border-indigo-400 text-zinc-200"
+                : "bg-white border-zinc-300 focus:border-indigo-400 text-zinc-800"
+            )}
+          />
+        </div>
 
         {/* 来源切换：本地 | 网络 */}
         <div
           role="group"
           aria-label="图片来源"
           className={cn(
-            "flex items-center rounded-full p-0.5 w-fit",
+            "flex items-center rounded-full p-0.5 w-fit shrink-0",
             isDarkMode ? "bg-zinc-700/60" : "bg-zinc-200/80"
           )}
         >
@@ -185,7 +271,7 @@ export const ImageInsertModal = React.memo<{
 
         {/* 本地：选择文件（Tauri 原生多选 / Web 文件输入多选） */}
         {tab === 'local' && (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 shrink-0">
             <button
               onClick={() => {
                 if (isTauri) pickLocalTauri();
@@ -219,7 +305,7 @@ export const ImageInsertModal = React.memo<{
 
         {/* 网络：输入链接，逐条添加 */}
         {tab === 'url' && (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 shrink-0">
             <div className="flex gap-2">
               <input
                 value={urlInput}
@@ -227,7 +313,7 @@ export const ImageInsertModal = React.memo<{
                 onKeyDown={(e) => { if (e.key === 'Enter') addUrl(); }}
                 placeholder="https://example.com/image.png"
                 className={cn(
-                  "flex-1 px-3 py-2 rounded-lg text-xs outline-none border transition-colors",
+                  "flex-1 min-w-0 px-3 py-2 rounded-lg text-xs outline-none border transition-colors",
                   isDarkMode
                     ? "bg-zinc-900/60 border-zinc-600 focus:border-indigo-400 text-zinc-200 placeholder:text-zinc-500"
                     : "bg-white border-zinc-300 focus:border-indigo-400 text-zinc-800 placeholder:text-zinc-400"
@@ -236,8 +322,8 @@ export const ImageInsertModal = React.memo<{
               <button
                 onClick={addUrl}
                 className={cn(
-                  "px-3 rounded-lg text-xs font-medium transition-colors",
-                  isDarkMode ? "bg-indigo-600 hover:bg-indigo-500 text-white" : "bg-indigo-600 hover:bg-indigo-500 text-white"
+                  "px-3 rounded-lg text-xs font-medium transition-colors shrink-0",
+                  "bg-indigo-600 hover:bg-indigo-500 text-white"
                 )}
               >
                 添加
@@ -247,31 +333,33 @@ export const ImageInsertModal = React.memo<{
           </div>
         )}
 
-        {error && <div className="text-[11px] text-red-500">{error}</div>}
+        {error && <div className="text-[11px] text-red-500 shrink-0">{error}</div>}
 
-        {/* 已选图片预览 */}
+        {/* 已选图片预览：区域弹性伸缩，仅纵向滚动；内边距给删除按钮留出空间 */}
         {images.length > 0 ? (
-          <div className="grid grid-cols-3 gap-2 max-h-44 overflow-auto pr-1">
-            {images.map(img => (
-              <div key={img.src} className="relative group">
-                <PreviewThumb img={img} />
-                <button
-                  onClick={() => removeImage(img.src)}
-                  className={cn(
-                    "absolute -top-1.5 -right-1.5 w-4.5 h-4.5 p-1 rounded-full shadow transition-colors flex items-center justify-center",
-                    isDarkMode ? "bg-zinc-700 hover:bg-red-500 text-zinc-300" : "bg-white hover:bg-red-500 hover:text-white text-zinc-500 border"
-                  )}
-                  title="移除"
-                >
-                  <Trash2 size={9} />
-                </button>
-                <div className="mt-0.5 text-[9px] opacity-60 truncate text-center" title={img.name}>{img.name}</div>
-              </div>
-            ))}
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pt-2 pr-2 -mt-1">
+            <div className="grid grid-cols-3 gap-2">
+              {images.map(img => (
+                <div key={img.src} className="relative group min-w-0">
+                  <PreviewThumb img={img} isDarkMode={isDarkMode} />
+                  <button
+                    onClick={() => removeImage(img.src)}
+                    className={cn(
+                      "absolute -top-1.5 -right-1.5 w-[18px] h-[18px] p-1 rounded-full shadow transition-colors flex items-center justify-center",
+                      isDarkMode ? "bg-zinc-700 hover:bg-red-500 text-zinc-300" : "bg-white hover:bg-red-500 hover:text-white text-zinc-500 border"
+                    )}
+                    title="移除"
+                  >
+                    <Trash2 size={9} />
+                  </button>
+                  <div className="mt-0.5 text-[9px] opacity-60 truncate text-center" title={img.name}>{img.name}</div>
+                </div>
+              ))}
+            </div>
           </div>
         ) : (
           <div className={cn(
-            "h-16 rounded-lg flex items-center justify-center text-[11px] border border-dashed",
+            "h-16 rounded-lg flex items-center justify-center text-[11px] border border-dashed shrink-0",
             isDarkMode ? "border-zinc-600 text-zinc-500" : "border-zinc-300 text-zinc-400"
           )}>
             尚未选择图片
@@ -279,7 +367,7 @@ export const ImageInsertModal = React.memo<{
         )}
 
         {/* 底部操作 */}
-        <div className="flex justify-end gap-2 pt-1">
+        <div className="flex justify-end gap-2 pt-1 shrink-0">
           <button
             onClick={onClose}
             className={cn(
@@ -290,7 +378,7 @@ export const ImageInsertModal = React.memo<{
             取消
           </button>
           <button
-            onClick={() => onConfirm(images)}
+            onClick={confirm}
             disabled={images.length === 0}
             className={cn(
               "px-4 py-1.5 text-xs rounded-lg font-medium transition-colors bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"

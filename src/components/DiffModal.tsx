@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { X, Check, RotateCcw, FileText, GitCompare } from 'lucide-react';
+import { X, Check, RotateCcw, FileText, GitCompare, Minus, Plus } from 'lucide-react';
 import { cn } from '../lib/utils';
 import {
   buildDiffRows,
   diffStats,
+  MAX_DIFF_ENTRIES,
+  MIN_DIFF_ENTRIES,
   type DiffRow,
   type ExternalDiffEntry,
 } from '../lib/diffTimeline';
@@ -54,13 +56,27 @@ export interface DiffModalProps {
   /** 文件路径 → 该文件的未处理时间线（空时间线的文件不展示） */
   timelines: Record<string, ExternalDiffEntry[]>;
   isDarkMode: boolean;
+  /** 打开弹窗时优先展示该文件（当前激活标签页）的最新条目 */
+  focusPath?: string | null;
+  /** 时间线每文件保留条数（5~50），页脚可调 */
+  maxEntries: number;
+  onChangeMaxEntries: (n: number) => void;
   onClose: () => void;
   onAccept: (path: string, entryId: string) => void;
   onRevert: (path: string, entryId: string) => void;
 }
 
 /** 外部修改 Diff 弹窗：左侧按文件分组的时间线 + 右侧选中条目的左右双栏对比 */
-export function DiffModal({ timelines, isDarkMode, onClose, onAccept, onRevert }: DiffModalProps) {
+export function DiffModal({
+  timelines,
+  isDarkMode,
+  focusPath,
+  maxEntries,
+  onChangeMaxEntries,
+  onClose,
+  onAccept,
+  onRevert,
+}: DiffModalProps) {
   const [selected, setSelected] = useState<Selection | null>(null);
   const [confirming, setConfirming] = useState<PendingConfirm | null>(null);
 
@@ -71,14 +87,20 @@ export function DiffModal({ timelines, isDarkMode, onClose, onAccept, onRevert }
       .map(([path, entries]) => ({ path, name: basename(path), entries: [...entries].reverse() }));
   }, [timelines]);
 
-  /* 选中条目失效（被接受/撤销移除）时，自动回落到最新一条 */
+  /* 默认选中：优先 focusPath（激活标签页对应文件）的最新条目，否则取第一个文件的最新条目 */
+  const preferredSelection = useMemo<Selection | null>(() => {
+    const group = focusPath ? groups.find(g => g.path === focusPath) : undefined;
+    const first = group ?? groups[0];
+    return first ? { path: first.path, id: first.entries[0].id } : null;
+  }, [focusPath, groups]);
+
+  /* 选中条目失效（被接受/撤销移除）时，自动回落到默认选中 */
   const effectiveSelection = useMemo<Selection | null>(() => {
     if (selected && groups.some(g => g.path === selected.path && g.entries.some(e => e.id === selected.id))) {
       return selected;
     }
-    const first = groups[0];
-    return first ? { path: first.path, id: first.entries[0].id } : null;
-  }, [selected, groups]);
+    return preferredSelection;
+  }, [selected, groups, preferredSelection]);
 
   const selectedEntry = useMemo<ExternalDiffEntry | null>(() => {
     if (!effectiveSelection) return null;
@@ -236,8 +258,45 @@ export function DiffModal({ timelines, isDarkMode, onClose, onAccept, onRevert }
           )}
         </div>
 
-        {/* footer：操作按钮（作用于选中条目） */}
+        {/* footer：左侧保留条数设置 + 右侧操作按钮（作用于选中条目） */}
         <div className={cn("h-12 border-t flex items-center justify-end px-4 gap-2 shrink-0", softBorder)}>
+          {/* 时间线保留条数设置：每文件保留的最大条数，超出丢弃最旧 */}
+          <div className="mr-auto flex items-center gap-2 text-[11px]">
+            <span className={isDarkMode ? "text-zinc-500" : "text-zinc-400"}>保留条数</span>
+            <div className={cn(
+              "flex items-center rounded-md border overflow-hidden shrink-0",
+              isDarkMode ? "border-zinc-700" : "border-zinc-200"
+            )}>
+              <button
+                onClick={() => onChangeMaxEntries(maxEntries - 1)}
+                disabled={maxEntries <= MIN_DIFF_ENTRIES}
+                title={`减少保留条数（最小 ${MIN_DIFF_ENTRIES}）`}
+                className={cn(
+                  "w-6 h-6 flex items-center justify-center transition-colors disabled:opacity-30",
+                  isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                )}
+              >
+                <Minus size={11} />
+              </button>
+              <span
+                className="w-8 text-center tabular-nums font-medium"
+                title={`时间线每文件保留的最大条数，超出丢弃最旧（${MIN_DIFF_ENTRIES} ~ ${MAX_DIFF_ENTRIES}）`}
+              >
+                {maxEntries}
+              </span>
+              <button
+                onClick={() => onChangeMaxEntries(maxEntries + 1)}
+                disabled={maxEntries >= MAX_DIFF_ENTRIES}
+                title={`增加保留条数（最大 ${MAX_DIFF_ENTRIES}）`}
+                className={cn(
+                  "w-6 h-6 flex items-center justify-center transition-colors disabled:opacity-30",
+                  isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
+                )}
+              >
+                <Plus size={11} />
+              </button>
+            </div>
+          </div>
           <button
             onClick={() => effectiveSelection && setConfirming({ kind: 'accept', ...effectiveSelection })}
             disabled={!effectiveSelection}

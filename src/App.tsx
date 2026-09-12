@@ -14,7 +14,8 @@ import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { detectLanguageFromPath, LANGUAGE_LABELS } from './lib/codemirror';
 import {
-  appendEntry, removeEntry, revertEntry, type ExternalDiffEntry,
+  appendEntry, removeEntry, revertEntry, trimTimeline, clampDiffEntries,
+  DEFAULT_DIFF_ENTRIES, type ExternalDiffEntry,
 } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { loadSessionState, saveSessionState, type SessionMdView, type SessionTab } from './lib/session';
@@ -420,6 +421,11 @@ export default function App() {
   /* ---- 外部 Diff：每文件时间线（内存态，关闭最后一个引用该文件的标签页即丢弃） ---- */
   const [diffTimelines, setDiffTimelines] = useState<Record<string, ExternalDiffEntry[]>>({});
   const [diffModalOpen, setDiffModalOpen] = useState(false);
+  /* 时间线每文件保留条数（5~50，默认 30；localStorage 持久化，仅影响后续追加与即时裁剪） */
+  const [maxDiffEntries, setMaxDiffEntries] = useState<number>(() => {
+    const raw = localStorage.getItem('heid-diff-max-entries');
+    return raw === null ? DEFAULT_DIFF_ENTRIES : clampDiffEntries(raw);
+  });
   const menuRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<MarkdownPreviewHandle | null>(null);
   const historiesRef = useRef<Map<string, TabHistory>>(new Map());
@@ -506,9 +512,9 @@ export default function App() {
     [tabs]
   );
 
-  /* 检测到真实外部修改：追加时间线条目，并按标签页脏状态分流处理 */
+  /* 检测到真实外部修改：追加时间线条目（按用户设置的保留条数裁剪），并按标签页脏状态分流处理 */
   const handleExternalChange = useCallback((path: string, before: string, after: string) => {
-    setDiffTimelines(prev => ({ ...prev, [path]: appendEntry(prev[path] ?? [], before, after) }));
+    setDiffTimelines(prev => ({ ...prev, [path]: appendEntry(prev[path] ?? [], before, after, Date.now(), maxDiffEntries) }));
     // 先为干净标签页以 major 方式记撤销历史（Ctrl+Z 可回退这次外部替换），再统一更新状态
     for (const t of tabsRef.current) {
       if (t.path === path && !t.isDirty) recordContentChange(t.id, t.content, after, true);
@@ -522,7 +528,7 @@ export default function App() {
       // 脏：编辑器内容不动，originalContent 跟踪磁盘最后已知状态，保留冲突标记
       return { ...t, originalContent: after, isDirty: t.content !== after };
     }));
-  }, [recordContentChange]);
+  }, [recordContentChange, maxDiffEntries]);
 
   const { updateKnownDiskContent } = useExternalFileWatcher({
     paths: watchedPaths,
@@ -533,10 +539,8 @@ export default function App() {
   const diffTimelinesRef = useRef(diffTimelines);
   diffTimelinesRef.current = diffTimelines;
 
-  const totalPendingDiffs = useMemo(
-    () => Object.values(diffTimelines).reduce((sum, entries) => sum + entries.length, 0),
-    [diffTimelines]
-  );
+  /* 提醒与当前标签页联动：只统计激活文件自己的未处理条数（每标签独立，切换标签页即切换提醒） */
+  const activePendingDiffs = activeTab?.path ? (diffTimelines[activeTab.path]?.length ?? 0) : 0;
 
   /* 路径不再被任何标签页引用：丢弃其时间线（监听由 hook 自行拆除清理） */
   useEffect(() => {
@@ -549,6 +553,25 @@ export default function App() {
       return next;
     });
   }, [watchedPaths]);
+
+  /* 保留条数设置持久化 */
+  useEffect(() => {
+    localStorage.setItem('heid-diff-max-entries', String(maxDiffEntries));
+  }, [maxDiffEntries]);
+
+  /* 调低保留条数时立即裁剪所有时间线（丢弃最旧） */
+  useEffect(() => {
+    setDiffTimelines(prev => {
+      let changed = false;
+      const next: Record<string, ExternalDiffEntry[]> = {};
+      for (const [p, entries] of Object.entries(prev)) {
+        const trimmed = trimTimeline(entries, maxDiffEntries);
+        if (trimmed !== entries) changed = true;
+        next[p] = trimmed;
+      }
+      return changed ? next : prev;
+    });
+  }, [maxDiffEntries]);
 
   /* 接受：经确认后仅移除该条目，磁盘与编辑器均不动 */
   const handleAcceptDiff = useCallback((path: string, entryId: string) => {
@@ -1263,19 +1286,20 @@ export default function App() {
 
         <div className="flex-1" />
 
-        {/* 外部修改 Diff 入口：存在未处理条目时才出现 */}
-        {totalPendingDiffs > 0 && (
+        {/* 外部修改 Diff 入口：提醒跟随当前标签页——仅显示激活文件自己的未处理条数，
+            切换到其他标签页则换成该文件的提醒（无则隐藏）；其他文件的冲突仍以标签页橙点提示 */}
+        {activePendingDiffs > 0 && (
           <button
             onClick={() => setDiffModalOpen(true)}
             className={cn(
               "relative mr-2 p-1.5 rounded-md transition-colors shrink-0",
               isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-100 text-zinc-500"
             )}
-            title="外部修改 diff"
+            title={activeTab ? `外部修改 diff（${activeTab.title}）` : '外部修改 diff'}
           >
             <GitCompare size={15} />
             <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-orange-500 text-white text-[9px] font-bold flex items-center justify-center leading-none">
-              {totalPendingDiffs > 99 ? '99+' : totalPendingDiffs}
+              {activePendingDiffs > 99 ? '99+' : activePendingDiffs}
             </span>
           </button>
         )}
@@ -1523,6 +1547,9 @@ export default function App() {
           <DiffModal
             timelines={diffTimelines}
             isDarkMode={isDarkMode}
+            focusPath={activeTab?.path ?? null}
+            maxEntries={maxDiffEntries}
+            onChangeMaxEntries={(n) => setMaxDiffEntries(clampDiffEntries(n))}
             onClose={() => setDiffModalOpen(false)}
             onAccept={handleAcceptDiff}
             onRevert={handleRevertDiff}
