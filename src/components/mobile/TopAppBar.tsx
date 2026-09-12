@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   FileText, FolderOpen, Save, SaveAll, Plus, MoreVertical,
-  Sun, SunMoon, Moon, Info, X, Table, Image as ImageIcon, Settings, Keyboard,
+  Sun, SunMoon, Moon, Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useT } from '../../lib/i18nContext';
@@ -24,6 +24,8 @@ interface TopAppBarProps {
   onSaveAs: () => void;
   onInsertTable: () => void;
   onInsertImage: () => void;
+  /** 从网址导入（仅原生环境提供；浏览器无原生 HTTP 入口） */
+  onImportUrl?: () => void;
   onCloseTab: () => void;
   onSettings: () => void;
   onShortcuts: () => void;
@@ -37,7 +39,7 @@ interface TopAppBarProps {
  */
 export function TopAppBar({
   isDarkMode, title, isDirty, isMarkdown, saving, tabCount, themeMode,
-  onThemeMode, onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage,
+  onThemeMode, onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage, onImportUrl,
   onCloseTab, onSettings, onShortcuts, onAbout,
 }: TopAppBarProps) {
   const t = useT();
@@ -148,6 +150,7 @@ export function TopAppBar({
             {menuItem(<Save size={16} className="shrink-0" />, t('menu.save'), onSave, { disabled: saving })}
             {menuItem(<SaveAll size={16} className="shrink-0" />, t('menu.saveAs'), onSaveAs, { disabled: saving })}
             {menuItem(<Plus size={16} className="shrink-0" />, t('menu.newFile'), onNew)}
+            {onImportUrl && menuItem(<Link2 size={16} className="shrink-0" />, t('import.menu'), onImportUrl)}
             {isMarkdown && (
               <>
                 {menuItem(<Table size={16} className="shrink-0" />, t('tools.insertTable'), onInsertTable)}

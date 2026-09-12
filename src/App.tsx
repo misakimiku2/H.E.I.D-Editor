@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
-  GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard, FileDown,
+  GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard, FileDown, Link2,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -40,6 +40,8 @@ import { countWords } from './lib/wordCount';
 import { translate, resolveSystemLang, type Lang, type MessageKey } from './lib/i18n';
 import { I18nProvider, rt, setRuntimeLang } from './lib/i18nContext';
 import { SettingsDialog } from './components/SettingsDialog';
+import { UrlImportModal } from './components/UrlImportModal';
+import type { UrlImportResult } from './lib/urlImport';
 import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
 import { useLastPointer } from './hooks/useLastPointer';
@@ -1206,6 +1208,7 @@ export default function App() {
   /* ---- 编辑器设置（弹窗修改即时生效 + 持久化）---- */
   const [settings, setSettings] = useState<EditorSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [urlImportOpen, setUrlImportOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   useEffect(() => {
     saveSettings(settings);
@@ -1217,6 +1220,20 @@ export default function App() {
     : settings.language;
   const t = useCallback((key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars), [lang]);
   useEffect(() => { setRuntimeLang(lang); }, [lang]);
+
+  /* ---- 网址导入：转换结果以 Markdown 新标签页打开（分屏视图，标脏） ---- */
+  const handleUrlImported = useCallback((result: UrlImportResult) => {
+    const newTab: FileTab = {
+      ...makeUntitledTab(result.filename),
+      content: result.markdown,
+      language: 'markdown',
+      isDirty: true,
+      mdView: 'split',
+    };
+    setUrlImportOpen(false);
+    setTabs(prev => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+  }, []);
 
   /* ---- Markdown 导出为单文件 HTML（桌面另存对话框 / 安卓 SAF 新建文档 / 浏览器 Blob 下载） ---- */
   const handleExportHtml = useCallback(async () => {
@@ -1653,6 +1670,7 @@ export default function App() {
           onOpen={handleOpenFile}
           onSave={handleSave}
           onSaveAs={handleSaveAs}
+          onImportUrl={isTauri ? () => setUrlImportOpen(true) : undefined}
           onInsertTable={() => previewRef.current?.insertTable()}
           onInsertImage={() => previewRef.current?.openImageModal()}
           onCloseTab={() => activeTab && void closeTab(activeTab.id)}
@@ -1964,6 +1982,18 @@ export default function App() {
               <FileDown size={14} />
               {t('export.htmlMenu')}
             </button>
+            {isTauri && (
+              <button
+                onClick={() => { setMenuOpen(false); setUrlImportOpen(true); }}
+                className={cn(
+                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                )}
+              >
+                <Link2 size={14} />
+                {t('import.menu')}
+              </button>
+            )}
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
             <button
               onClick={() => { setMenuOpen(false); handleUndo(); }}
@@ -2346,6 +2376,15 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* 网址导入弹窗 */}
+      {urlImportOpen && (
+        <UrlImportModal
+          isDarkMode={isDarkMode}
+          onImported={handleUrlImported}
+          onClose={() => setUrlImportOpen(false)}
+        />
+      )}
 
       {/* 标签栏右键菜单 */}
       {tabMenu && (

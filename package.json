@@ -31,6 +31,7 @@
     "@tauri-apps/plugin-fs": "^2.4.5",
     "@uiw/react-codemirror": "^4.25.9",
     "clsx": "^2.1.1",
+    "defuddle": "^0.19.3",
     "diff": "^9.0.0",
     "lucide-react": "^0.546.0",
     "react": "^19.2.5",
@@ -38,7 +39,9 @@
     "react-markdown": "^10.1.0",
     "react-syntax-highlighter": "^16.1.1",
     "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^3.5.0"
+    "tailwind-merge": "^3.5.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2"
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.20",
@@ -48,6 +51,7 @@
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.5",
     "@types/react-syntax-highlighter": "^15.5.13",
+    "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^5.0.4",
     "autoprefixer": "^10.4.21",
     "tailwindcss": "^4.1.14",

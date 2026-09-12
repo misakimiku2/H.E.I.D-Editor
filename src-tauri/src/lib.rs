@@ -1,4 +1,5 @@
 mod encoding;
+mod http;
 
 /// 文本文件读取：自动检测编码（BOM / UTF-8 / GBK 系）并解码。
 /// force 传入编码 label 时按该编码解码（「以该编码重新打开」）。
@@ -61,7 +62,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![read_text_file, write_text_file])
+        .invoke_handler(tauri::generate_handler![read_text_file, write_text_file, http::http_get])
         .setup(|app| {
             #[cfg(desktop)]
             theme_icon::setup(app.handle())?;
