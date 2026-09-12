@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
-  GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard, FileDown, Link2,
+  GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -41,6 +41,8 @@ import { translate, resolveSystemLang, type Lang, type MessageKey } from './lib/
 import { I18nProvider, rt, setRuntimeLang } from './lib/i18nContext';
 import { SettingsDialog } from './components/SettingsDialog';
 import { UrlImportModal } from './components/UrlImportModal';
+import { FileTreeSidebar } from './components/FileTreeSidebar';
+import { getDirLister } from './lib/fileTree';
 import type { UrlImportResult } from './lib/urlImport';
 import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
@@ -398,6 +400,18 @@ interface TabHistory {
   stack: string[];
   index: number;
   lastAt: number;
+}
+
+/* 文件树侧栏：记住最后一次打开的文件夹（抽屉本身每次启动保持关闭） */
+const TREE_ROOT_KEY = 'heid-tree-root';
+function loadTreeRoot(): string | null {
+  try { return localStorage.getItem(TREE_ROOT_KEY); } catch { return null; }
+}
+function saveTreeRoot(path: string | null): void {
+  try {
+    if (path) localStorage.setItem(TREE_ROOT_KEY, path);
+    else localStorage.removeItem(TREE_ROOT_KEY);
+  } catch { /* 忽略持久化失败 */ }
 }
 
 const MAX_HISTORY = 200;
@@ -1209,6 +1223,9 @@ export default function App() {
   const [settings, setSettings] = useState<EditorSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [urlImportOpen, setUrlImportOpen] = useState(false);
+  const [treeOpen, setTreeOpen] = useState(false);
+  const [treeRootPath, setTreeRootPath] = useState<string | null>(() => loadTreeRoot());
+  useEffect(() => { saveTreeRoot(treeRootPath); }, [treeRootPath]);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   useEffect(() => {
     saveSettings(settings);
@@ -1220,6 +1237,23 @@ export default function App() {
     : settings.language;
   const t = useCallback((key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars), [lang]);
   useEffect(() => { setRuntimeLang(lang); }, [lang]);
+
+  /* ---- 文件树侧栏：选择器走平台提供者；记忆根目录，抽屉默认关闭 ---- */
+  const chooseTreeFolder = useCallback(async () => {
+    const l = getDirLister(isTauri, IS_ANDROID_APP);
+    if (!l) return;
+    const p = await l.chooseRoot();
+    if (p) { setTreeRootPath(p); setTreeOpen(true); }
+  }, []);
+  const handleToggleTree = useCallback(() => {
+    if (treeOpen) { setTreeOpen(false); return; }
+    if (!treeRootPath) { void chooseTreeFolder(); return; }
+    setTreeOpen(true);
+  }, [treeOpen, treeRootPath, chooseTreeFolder]);
+  const handleTreeRootChange = useCallback((p: string | null) => {
+    setTreeRootPath(p);
+    if (!p) setTreeOpen(false);
+  }, []);
 
   /* ---- 网址导入：转换结果以 Markdown 新标签页打开（分屏视图，标脏） ---- */
   const handleUrlImported = useCallback((result: UrlImportResult) => {
@@ -1691,6 +1725,19 @@ export default function App() {
           <span className="text-sm font-semibold tracking-tight" data-tauri-drag-region>H.E.I.D</span>
         </div>
 
+        <button
+          onClick={handleToggleTree}
+          title={t('tree.toggle')}
+          className={cn(
+            "w-7 h-6 rounded-md flex items-center justify-center transition-colors shrink-0",
+            treeOpen
+              ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
+              : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
+          )}
+        >
+          <PanelLeft size={14} />
+        </button>
+
         {/* 标签页 */}
         <div
           data-tauri-drag-region
@@ -1887,6 +1934,30 @@ export default function App() {
               {t('menu.openFile')}
               <span className="ml-auto text-[10px] opacity-50">Ctrl+O</span>
             </button>
+            {isTauri && (
+              <button
+                onClick={() => { setMenuOpen(false); void chooseTreeFolder(); }}
+                className={cn(
+                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                )}
+              >
+                <FolderOpen size={14} />
+                {t('tree.openFolder')}
+              </button>
+            )}
+            {isTauri && treeRootPath && (
+              <button
+                onClick={() => { setMenuOpen(false); handleTreeRootChange(null); }}
+                className={cn(
+                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                )}
+              >
+                <FolderX size={14} />
+                {t('tree.closeFolder')}
+              </button>
+            )}
             {/* 最近打开（二级菜单，悬停/点击展开；portal 渲染到 body——
                 嵌套在主菜单面板内时子元素的 backdrop-filter 采不到面板外的内容，毛玻璃会失效） */}
             <div
@@ -2055,8 +2126,22 @@ export default function App() {
       </div>
       )}
 
-      {/* editor area */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      {/* editor area（桌面/平板：文件树侧栏开启时编辑区让位；手机无侧栏） */}
+      <div className="flex flex-1 overflow-hidden">
+        {treeOpen && !isPhone && isTauri && treeRootPath && (
+          <FileTreeSidebar
+            rootPath={treeRootPath}
+            open={treeOpen}
+            overlay={IS_ANDROID_APP}
+            isDarkMode={isDarkMode}
+            activeTabId={activeTabId}
+            tabs={tabs}
+            onOpenFile={(p) => void openPathIntoTab(p)}
+            onRootChange={handleTreeRootChange}
+            onClose={() => setTreeOpen(false)}
+          />
+        )}
+        <div className="flex-1 flex flex-col overflow-hidden">
         {activeTab ? (
           <>
             {/* markdown 分屏（左预览右源码）/ 预览 / 编辑器 */}
@@ -2375,6 +2460,7 @@ export default function App() {
             </div>
           </div>
         )}
+      </div>
       </div>
 
       {/* 网址导入弹窗 */}

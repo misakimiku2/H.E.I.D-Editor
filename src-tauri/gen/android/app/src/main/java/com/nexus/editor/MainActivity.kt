@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -25,6 +26,7 @@ class MainActivity : TauriActivity() {
 
   private lateinit var openDocLauncher: ActivityResultLauncher<Intent>
   private lateinit var createDocLauncher: ActivityResultLauncher<Intent>
+  private lateinit var openTreeLauncher: ActivityResultLauncher<Intent>
 
   /** 前端桥：安全区 / SAF 文件访问（读写 content URI） */
   private inner class InsetBridge {
@@ -88,6 +90,48 @@ class MainActivity : TauriActivity() {
       false
     }
 
+    /** 系统目录树选择器（文件树侧栏）。结果经 heid-saf 事件回传（kind:'tree'，path=treeUri）。 */
+    @JavascriptInterface
+    fun openTree() {
+      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+      openTreeLauncher.launch(intent)
+    }
+
+    /** 列出 SAF 目录子项（同步返回 JSON 数组）。
+        dirPath 前端约定为 "treeUri\u0000相对路径"（根目录可只传 treeUri）；
+        每项 {name,isDir,uri}，uri 为可直接读写的 document URI（文件打开用）。 */
+    @JavascriptInterface
+    fun listTree(treeUri: String, relPath: String): String = try {
+      val root = Uri.parse(treeUri)
+      val treeDocId = DocumentsContract.getTreeDocumentId(root)
+      val parentDocId = if (relPath.isBlank()) treeDocId else "$treeDocId/$relPath"
+      val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(root, parentDocId)
+      val items = ArrayList<String>()
+      contentResolver.query(
+        childrenUri,
+        arrayOf(
+          DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+          DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+          DocumentsContract.Document.COLUMN_MIME_TYPE
+        ),
+        null, null, null
+      )?.use { c ->
+        while (c.moveToNext()) {
+          val docId = c.getString(0) ?: continue
+          val name = c.getString(1) ?: continue
+          val mime = c.getString(2)
+          val isDir = mime == DocumentsContract.Document.MIME_TYPE_DIR
+          val docUri = DocumentsContract.buildDocumentUriUsingTree(root, docId)
+          items.add(
+            "{\"name\":\"${jsonEscape(name)}\",\"isDir\":$isDir,\"uri\":\"${jsonEscape(docUri.toString())}\"}"
+          )
+        }
+      }
+      "[${items.joinToString(",")}]"
+    } catch (e: Exception) {
+      "[]"
+    }
+
     /** WHATWG label → Charset（与前端 lib/encoding.ts 的选项一一对应） */
     private fun charsetFor(label: String): Charset = when (label.lowercase()) {
       "utf-8" -> Charsets.UTF_8
@@ -131,6 +175,16 @@ class MainActivity : TauriActivity() {
       evalJs(
         "window.dispatchEvent(new CustomEvent('heid-saf',{detail:{kind:'open'," +
           "canceled:${files.isEmpty()},files:[${files.joinToString(",")}]}}))"
+      )
+    }
+
+    openTreeLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+      val uri = if (res.resultCode == Activity.RESULT_OK) res.data?.data else null
+      if (uri != null && res.data != null) takePersistable(uri, res.data!!.flags)
+      val pathJson = if (uri != null) "\"" + jsonEscape(uri.toString()) + "\"" else "null"
+      evalJs(
+        "window.dispatchEvent(new CustomEvent('heid-saf',{detail:{kind:'tree'," +
+          "canceled:${uri == null},path:$pathJson}}))"
       )
     }
 
