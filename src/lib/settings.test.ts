@@ -56,4 +56,19 @@ describe('settings', () => {
     expect(loaded.minimap).toBe(DEFAULT_SETTINGS.minimap);
     expect(loaded.insertSpaces).toBe(DEFAULT_SETTINGS.insertSpaces);
   });
+
+  it('界面语言默认跟随系统，非法值回退', () => {
+    expect(DEFAULT_SETTINGS.language).toBe('system');
+    const s = memoryStorage();
+    s.setItem('heid-settings', JSON.stringify({ language: 'klingon' }));
+    expect(loadSettings(s).language).toBe('system');
+  });
+
+  it('界面语言合法值往返', () => {
+    const next = normalizeSettings({ language: 'en' });
+    expect(next.language).toBe('en');
+    const s = memoryStorage();
+    saveSettings(next, s);
+    expect(loadSettings(s).language).toBe('en');
+  });
 });

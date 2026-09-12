@@ -4,6 +4,7 @@ import {
   Sun, SunMoon, Moon, Info, X, Table, Image as ImageIcon, Settings, Keyboard,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { useT } from '../../lib/i18nContext';
 
 type ThemeMode = 'light' | 'dark' | 'system';
 
@@ -39,6 +40,7 @@ export function TopAppBar({
   onThemeMode, onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage,
   onCloseTab, onSettings, onShortcuts, onAbout,
 }: TopAppBarProps) {
+  const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const menuBodyRef = useRef<HTMLDivElement | null>(null);
@@ -96,7 +98,7 @@ export function TopAppBar({
           'flex items-center gap-1 px-2.5 h-9 rounded-md shrink-0 transition-colors',
           isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600'
         )}
-        aria-label="打开标签页列表"
+        aria-label={t('mobile.openTabs')}
       >
         <FileText size={17} />
         <span
@@ -129,7 +131,7 @@ export function TopAppBar({
               ? (isDarkMode ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-200 text-zinc-700')
               : (isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500')
           )}
-          aria-label="更多菜单"
+          aria-label={t('mobile.moreMenu')}
         >
           <MoreVertical size={18} />
         </button>
@@ -142,26 +144,26 @@ export function TopAppBar({
               isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70'
             )}
           >
-            {menuItem(<FolderOpen size={16} className="shrink-0" />, '打开文件', onOpen)}
-            {menuItem(<Save size={16} className="shrink-0" />, '保存', onSave, { disabled: saving })}
-            {menuItem(<SaveAll size={16} className="shrink-0" />, '另存为', onSaveAs, { disabled: saving })}
-            {menuItem(<Plus size={16} className="shrink-0" />, '新建文件', onNew)}
+            {menuItem(<FolderOpen size={16} className="shrink-0" />, t('menu.openFile'), onOpen)}
+            {menuItem(<Save size={16} className="shrink-0" />, t('menu.save'), onSave, { disabled: saving })}
+            {menuItem(<SaveAll size={16} className="shrink-0" />, t('menu.saveAs'), onSaveAs, { disabled: saving })}
+            {menuItem(<Plus size={16} className="shrink-0" />, t('menu.newFile'), onNew)}
             {isMarkdown && (
               <>
-                {menuItem(<Table size={16} className="shrink-0" />, '插入表格', onInsertTable)}
-                {menuItem(<ImageIcon size={16} className="shrink-0" />, '插入图片', onInsertImage)}
+                {menuItem(<Table size={16} className="shrink-0" />, t('tools.insertTable'), onInsertTable)}
+                {menuItem(<ImageIcon size={16} className="shrink-0" />, t('tools.insertImage'), onInsertImage)}
               </>
             )}
             <div className={cn('h-px mx-3 my-1', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
             {/* 主题三档 */}
             <div className={cn('px-4 py-1 text-[11px]', isDarkMode ? 'text-zinc-500' : 'text-zinc-400')}>
-              主题
+              {t('theme.label')}
             </div>
             <div className="px-3 pb-1.5 flex items-center gap-2">
               {([
-                { mode: 'light', icon: Sun, label: '浅色' },
-                { mode: 'system', icon: SunMoon, label: '系统' },
-                { mode: 'dark', icon: Moon, label: '深色' },
+                { mode: 'light', icon: Sun, label: t('theme.light') },
+                { mode: 'system', icon: SunMoon, label: t('theme.system') },
+                { mode: 'dark', icon: Moon, label: t('theme.dark') },
               ] as const).map(({ mode: m, icon: Icon, label }) => {
                 const active = themeMode === m;
                 return (
@@ -182,10 +184,10 @@ export function TopAppBar({
               })}
             </div>
             <div className={cn('h-px mx-3 my-1', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
-            {menuItem(<X size={16} className="shrink-0" />, '关闭当前标签', onCloseTab)}
-            {menuItem(<Settings size={16} className="shrink-0" />, '设置', onSettings)}
-            {menuItem(<Keyboard size={16} className="shrink-0" />, '键盘快捷键', onShortcuts)}
-            {menuItem(<Info size={16} className="shrink-0" />, '关于 H.E.I.D', onAbout)}
+            {menuItem(<X size={16} className="shrink-0" />, t('menu.closeCurrentTab'), onCloseTab)}
+            {menuItem(<Settings size={16} className="shrink-0" />, t('menu.settings'), onSettings)}
+            {menuItem(<Keyboard size={16} className="shrink-0" />, t('menu.shortcuts'), onShortcuts)}
+            {menuItem(<Info size={16} className="shrink-0" />, t('menu.about'), onAbout)}
           </div>
         )}
       </div>

@@ -8,6 +8,7 @@ import { Tag, tags as t, highlightTree, type Highlighter } from '@lezer/highligh
 import type { Tree } from '@lezer/common';
 import { EditorState, Extension, StateEffect } from '@codemirror/state';
 import { Type } from 'lucide-react';
+import { useT } from '../lib/i18nContext';
 import { cn } from '../lib/utils';
 import { FormatMenu, INLINE_WRAPS, transformSlice, type MdOp } from './MarkdownTools';
 import { FindReplaceBar } from './FindReplaceBar';
@@ -193,6 +194,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   getPointer,
   markdownMenu,
 }) => {
+  /* tags 以 t 导入（@lezer/highlight），翻译函数让位使用别名 tr */
+  const tr = useT();
   const settings = editorSettings ?? DEFAULT_SETTINGS;
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const stickyRef = useRef<HTMLElement | null>(null);
@@ -995,7 +998,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       }
     }
 
-    const replaced = transformSlice(op, doc.sliceString(from, to), mdMenu.text);
+    const replaced = transformSlice(op, doc.sliceString(from, to), mdMenu.text, tr('md.tableTemplate'));
     majorNextRef.current = true;
     view.dispatch({
       changes: { from, to, insert: replaced },
@@ -1252,7 +1255,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           }}
         >
           <Type size={14} />
-          格式化
+          {tr('md.format')}
         </button>
       )}
     </div>

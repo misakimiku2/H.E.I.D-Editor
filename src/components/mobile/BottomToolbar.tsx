@@ -1,5 +1,6 @@
 import { FolderOpen, Save, Undo2, Redo2, Eye, Pencil, Search } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { useT } from '../../lib/i18nContext';
 
 interface BottomToolbarProps {
   isDarkMode: boolean;
@@ -26,6 +27,7 @@ export function BottomToolbar({
   isDarkMode, isDirty, canUndo, canRedo, saving, isMarkdown, view,
   onOpen, onSave, onUndo, onRedo, onToggleView, onFind,
 }: BottomToolbarProps) {
+  const t = useT();
   const btnCls = (disabled?: boolean) => cn(
     'flex-1 min-h-[52px] rounded-lg flex flex-col items-center justify-center gap-0.5 transition-colors',
     'text-[10px] font-medium',
@@ -42,20 +44,20 @@ export function BottomToolbar({
         isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
       )}
     >
-      <button onClick={onOpen} className={btnCls()} aria-label="打开文件">
+      <button onClick={onOpen} className={btnCls()} aria-label={t('menu.openFile')}>
         <FolderOpen size={19} />
-        打开
+        {t('common.open')}
       </button>
-      <button onClick={onUndo} disabled={!canUndo} className={btnCls(!canUndo)} aria-label="撤销">
+      <button onClick={onUndo} disabled={!canUndo} className={btnCls(!canUndo)} aria-label={t('menu.undo')}>
         <Undo2 size={19} />
-        撤销
+        {t('menu.undo')}
       </button>
       {/* 保存：高频操作居中，脏状态时文件图标带琥珀点 */}
       <button
         onClick={onSave}
         disabled={saving}
         className={cn(btnCls(saving), 'relative')}
-        aria-label="保存"
+        aria-label={t('menu.save')}
       >
         <span className="relative">
           <Save size={21} />
@@ -63,25 +65,25 @@ export function BottomToolbar({
             <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-amber-500" />
           )}
         </span>
-        保存
+        {t('menu.save')}
       </button>
-      <button onClick={onRedo} disabled={!canRedo} className={btnCls(!canRedo)} aria-label="重做">
+      <button onClick={onRedo} disabled={!canRedo} className={btnCls(!canRedo)} aria-label={t('menu.redo')}>
         <Redo2 size={19} />
-        重做
+        {t('menu.redo')}
       </button>
       {/* 编辑/预览态都可用：预览态自动路由到预览查找（只搜渲染文本） */}
-      <button onClick={onFind} className={btnCls()} aria-label="查找替换">
+      <button onClick={onFind} className={btnCls()} aria-label={t('find.replaceTitle')}>
         <Search size={19} />
-        查找
+        {t('common.find')}
       </button>
       <button
         onClick={onToggleView}
         disabled={!isMarkdown}
         className={btnCls(!isMarkdown)}
-        aria-label={view === 'preview' ? '切换到编辑' : '切换到预览'}
+        aria-label={view === 'preview' ? t('mobile.switchToEdit') : t('mobile.switchToPreview')}
       >
         {view === 'preview' ? <Pencil size={19} /> : <Eye size={19} />}
-        {view === 'preview' ? '编辑' : '预览'}
+        {view === 'preview' ? t('common.edit') : t('common.preview')}
       </button>
     </div>
   );

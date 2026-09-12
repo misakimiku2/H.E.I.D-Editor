@@ -14,6 +14,7 @@ import {
   replacementFor, RESCAN_DOC_LIMIT, type MatchRange, type SearchOptions,
 } from '../lib/searchCore';
 import type { PointerPos } from '../hooks/useLastPointer';
+import { useT } from '../lib/i18nContext';
 
 export interface FindReplaceBarProps {
   /** 取当前编辑器视图（由 CodeEditor 提供 viewReadyRef 的读取器） */
@@ -43,6 +44,7 @@ interface MatchState {
  * - 手机端为近全宽紧凑布局，触控目标 ≥28px。
  */
 export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, canReplace, getPointer, onClose }: FindReplaceBarProps) {
+  const t = useT();
   const [query, setQuery] = useState('');
   const [replaceText, setReplaceText] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
@@ -257,9 +259,9 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   );
 
   const countLabel = matchStateRef.current.error
-    ? '正则无效'
+    ? t('find.invalidRegex')
     : count.total === 0
-      ? (query ? '无结果' : '')
+      ? (query ? t('find.noResults') : '')
       : count.capped ? `${count.total}+` : `${current + 1}/${count.total}`;
 
   return createPortal(
@@ -278,8 +280,8 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
           <button
             onClick={() => setReplaceOpen(v => !v)}
             className={navBtn}
-            title={replaceOpen ? '收起替换' : '展开替换'}
-            aria-label={replaceOpen ? '收起替换' : '展开替换'}
+            title={replaceOpen ? t('find.collapseReplace') : t('find.expandReplace')}
+            aria-label={replaceOpen ? t('find.collapseReplace') : t('find.expandReplace')}
           >
             <ChevronDown size={14} className={cn('transition-transform', replaceOpen && 'rotate-180')} />
           </button>
@@ -290,7 +292,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => onKeyDown(e, 'find')}
-            placeholder="查找"
+            placeholder={t('find.placeholderFind')}
             className={cn(inputCls, 'pr-16')}
           />
           <span
@@ -302,23 +304,23 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
             {countLabel}
           </span>
         </div>
-        <button onClick={() => setCaseSensitive(v => !v)} className={optBtn(caseSensitive)} title="区分大小写" aria-label="区分大小写">
+        <button onClick={() => setCaseSensitive(v => !v)} className={optBtn(caseSensitive)} title={t('find.caseSensitive')} aria-label={t('find.caseSensitive')}>
           <CaseSensitive size={15} />
         </button>
-        <button onClick={() => setWholeWord(v => !v)} className={optBtn(wholeWord)} title="全词匹配" aria-label="全词匹配">
+        <button onClick={() => setWholeWord(v => !v)} className={optBtn(wholeWord)} title={t('find.wholeWord')} aria-label={t('find.wholeWord')}>
           <WholeWord size={15} />
         </button>
-        <button onClick={() => setRegexp(v => !v)} className={optBtn(regexp)} title="使用正则" aria-label="使用正则">
+        <button onClick={() => setRegexp(v => !v)} className={optBtn(regexp)} title={t('find.useRegex')} aria-label={t('find.useRegex')}>
           <Regex size={15} />
         </button>
         <div className={cn('w-px h-5 shrink-0', isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')} />
-        <button onClick={goPrev} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title="上一个 (Shift+Enter)" aria-label="上一个匹配">
+        <button onClick={goPrev} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
           <ArrowUp size={14} />
         </button>
-        <button onClick={goNext} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title="下一个 (Enter)" aria-label="下一个匹配">
+        <button onClick={goNext} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.nextTip')} aria-label={t('find.nextMatch')}>
           <ArrowDown size={14} />
         </button>
-        <button onClick={close} className={navBtn} title="关闭 (Esc)" aria-label="关闭查找">
+        <button onClick={close} className={navBtn} title={t('find.closeTip')} aria-label={t('find.closeFind')}>
           <X size={14} />
         </button>
       </div>
@@ -331,14 +333,14 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
             value={replaceText}
             onChange={(e) => setReplaceText(e.target.value)}
             onKeyDown={(e) => onKeyDown(e, 'replace')}
-            placeholder="替换为（正则可用 $1 引用）"
+            placeholder={t('find.placeholderReplace')}
             className={inputCls}
           />
           <div className={cn('w-px h-5 shrink-0', isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')} />
-          <button onClick={replaceCurrent} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title="替换 (Enter)" aria-label="替换当前">
+          <button onClick={replaceCurrent} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.replaceTip')} aria-label={t('find.replaceCurrent')}>
             <Replace size={15} />
           </button>
-          <button onClick={replaceAll} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title="全部替换" aria-label="全部替换">
+          <button onClick={replaceAll} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.replaceAll')} aria-label={t('find.replaceAll')}>
             <ReplaceAll size={15} />
           </button>
           <div className="w-14 shrink-0" />
@@ -356,11 +358,11 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
             value={gotoLineText}
             onChange={(e) => setGotoLineText(e.target.value.replace(/[^\d]/g, ''))}
             onKeyDown={(e) => onKeyDown(e, 'goto')}
-            placeholder="行号，回车跳转"
+            placeholder={t('find.placeholderGoto')}
             className={inputCls}
             inputMode="numeric"
           />
-          <button onClick={jumpToLine} disabled={!gotoLineText} className={cn(navBtn, 'disabled:opacity-40')} title="跳转 (Enter)" aria-label="跳转到行">
+          <button onClick={jumpToLine} disabled={!gotoLineText} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.gotoTip')} aria-label={t('find.gotoLine')}>
             <ArrowDown size={14} />
           </button>
           <div className="w-[86px] shrink-0" />

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Minus, Square, Copy, X } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { cn } from '../lib/utils';
+import { useT } from '../lib/i18nContext';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -10,6 +11,7 @@ interface WindowControlsProps {
 }
 
 export function WindowControls({ isDarkMode }: WindowControlsProps) {
+  const t = useT();
   const [maximized, setMaximized] = useState(false);
 
   /* 跟踪最大化状态，切换最大化/还原图标 */
@@ -49,7 +51,7 @@ export function WindowControls({ isDarkMode }: WindowControlsProps) {
         className={cn(baseBtn,
           isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200'
         )}
-        title="最小化"
+        title={t('win.minimize')}
       >
         <Minus size={15} strokeWidth={1.8} />
       </button>
@@ -58,7 +60,7 @@ export function WindowControls({ isDarkMode }: WindowControlsProps) {
         className={cn(baseBtn,
           isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200'
         )}
-        title={maximized ? '向下还原' : '最大化'}
+        title={maximized ? t('win.restore') : t('win.maximize')}
       >
         {maximized ? <Copy size={12} strokeWidth={1.8} /> : <Square size={12} strokeWidth={1.8} />}
       </button>
@@ -69,7 +71,7 @@ export function WindowControls({ isDarkMode }: WindowControlsProps) {
           isDarkMode ? 'text-zinc-400' : 'text-zinc-500',
           'hover:bg-red-600 hover:text-white'
         )}
-        title="关闭"
+        title={t('common.close')}
       >
         <X size={16} strokeWidth={1.8} />
       </button>

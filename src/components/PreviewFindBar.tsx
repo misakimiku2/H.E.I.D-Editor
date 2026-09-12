@@ -7,6 +7,7 @@ import { cn } from '../lib/utils';
 import { clampBarPosition } from '../lib/position';
 import { findMatches, type MatchRange, type SearchOptions } from '../lib/searchCore';
 import type { PointerPos } from '../hooks/useLastPointer';
+import { useT } from '../lib/i18nContext';
 
 export interface PreviewFindBarProps {
   /** 取预览渲染容器（搜索范围 = 容器内渲染后的文本） */
@@ -106,6 +107,7 @@ function rangeForMatch(spans: TextSpan[], m: MatchRange): Range | null {
  * 不提供替换/跳行（渲染文本无法可靠映射回源码偏移）。
  */
 export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, onClose }: PreviewFindBarProps) {
+  const t = useT();
   const [query, setQuery] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [regexp, setRegexp] = useState(false);
@@ -244,7 +246,7 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
   );
 
   const countLabel = count.total === 0
-    ? (query ? '无结果' : '')
+    ? (query ? t('find.noResults') : '')
     : current < 0 ? `${count.total}${count.capped ? '+' : ''}` : `${current + 1}/${count.total}${count.capped ? '+' : ''}`;
 
   return createPortal(
@@ -263,7 +265,7 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="在预览中查找"
+          placeholder={t('find.placeholderPreview')}
           className={cn(inputCls, 'pr-16')}
         />
         <span
@@ -275,23 +277,23 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
           {countLabel}
         </span>
       </div>
-      <button onClick={() => setCaseSensitive(v => !v)} className={optBtn(caseSensitive)} title="区分大小写" aria-label="区分大小写">
+      <button onClick={() => setCaseSensitive(v => !v)} className={optBtn(caseSensitive)} title={t('find.caseSensitive')} aria-label={t('find.caseSensitive')}>
         <CaseSensitive size={15} />
       </button>
-      <button onClick={() => setWholeWord(v => !v)} className={optBtn(wholeWord)} title="全词匹配" aria-label="全词匹配">
+      <button onClick={() => setWholeWord(v => !v)} className={optBtn(wholeWord)} title={t('find.wholeWord')} aria-label={t('find.wholeWord')}>
         <WholeWord size={15} />
       </button>
-      <button onClick={() => setRegexp(v => !v)} className={optBtn(regexp)} title="使用正则" aria-label="使用正则">
+      <button onClick={() => setRegexp(v => !v)} className={optBtn(regexp)} title={t('find.useRegex')} aria-label={t('find.useRegex')}>
         <Regex size={15} />
       </button>
       <div className={cn('w-px h-5 shrink-0', isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')} />
-      <button onClick={() => step(-1)} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title="上一个 (Shift+Enter)" aria-label="上一个匹配">
+      <button onClick={() => step(-1)} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
         <ArrowUp size={14} />
       </button>
-      <button onClick={() => step(1)} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title="下一个 (Enter)" aria-label="下一个匹配">
+      <button onClick={() => step(1)} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.nextTip')} aria-label={t('find.nextMatch')}>
         <ArrowDown size={14} />
       </button>
-      <button onClick={onClose} className={navBtn} title="关闭 (Esc)" aria-label="关闭查找">
+      <button onClick={onClose} className={navBtn} title={t('find.closeTip')} aria-label={t('find.closeFind')}>
         <X size={14} />
       </button>
     </div>,

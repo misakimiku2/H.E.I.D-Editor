@@ -1,6 +1,7 @@
 import { FileText, Plus, X } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Sheet } from './Sheet';
+import { useT } from '../../lib/i18nContext';
 
 interface TabSheetProps {
   open: boolean;
@@ -17,8 +18,9 @@ interface TabSheetProps {
 export function TabSheet({
   open, isDarkMode, onClose, tabs, activeTabId, onSelect, onCloseTab, onNew,
 }: TabSheetProps) {
+  const t = useT();
   return (
-    <Sheet open={open} isDarkMode={isDarkMode} onClose={onClose} title={`标签页（${tabs.length}）`}>
+    <Sheet open={open} isDarkMode={isDarkMode} onClose={onClose} title={t('mobile.tabsTitle', { n: tabs.length })}>
       <div className="px-2 pb-3">
         <button
           onClick={() => { onClose(); onNew(); }}
@@ -28,7 +30,7 @@ export function TabSheet({
           )}
         >
           <Plus size={16} className="shrink-0" />
-          新建文件
+          {t('menu.newFile')}
         </button>
         {tabs.map((tab) => {
           const active = tab.id === activeTabId;
@@ -61,7 +63,7 @@ export function TabSheet({
                   'p-1.5 -m-1 rounded-md shrink-0 transition-colors',
                   isDarkMode ? 'hover:bg-zinc-600 text-zinc-400' : 'hover:bg-zinc-300/70 text-zinc-500'
                 )}
-                aria-label={`关闭 ${tab.title}`}
+                aria-label={t('mobile.closeTabNamed', { name: tab.title })}
               >
                 <X size={14} />
               </button>

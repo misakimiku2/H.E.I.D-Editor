@@ -3,8 +3,9 @@ import { X, RotateCcw } from 'lucide-react';
 import { cn } from '../lib/utils';
 import {
   DEFAULT_SETTINGS, FONT_OPTIONS,
-  type EditorSettings, type LineWrapMode,
+  type EditorSettings, type LineWrapMode, type LanguagePref,
 } from '../lib/settings';
+import { useT, type MessageKey } from '../lib/i18nContext';
 
 interface SettingsDialogProps {
   isDarkMode: boolean;
@@ -14,9 +15,19 @@ interface SettingsDialogProps {
 }
 
 /**
- * 设置弹窗：编辑器（字体/字号/行高/缩进/换行/空白符）、界面辅助（小地图/粘性滚动）、
- * 自动保存（开关 + 间隔）。修改即时生效并持久化（App 层负责写 localStorage）。
+ * 设置弹窗：界面（语言）、编辑器（字体/字号/行高/缩进/换行/空白符）、
+ * 界面辅助（小地图/粘性滚动）、自动保存（开关 + 间隔）。
+ * 修改即时生效并持久化（App 层负责写 localStorage）。
  */
+
+const FONT_LABEL_KEYS: Record<string, MessageKey> = {
+  default: 'font.default',
+  consolas: 'font.consolas',
+  jetbrains: 'font.jetbrains',
+  fira: 'font.fira',
+  cascadia: 'font.cascadia',
+  'system-mono': 'font.system-mono',
+};
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -41,6 +52,8 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 }
 
 export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: SettingsDialogProps) {
+  const t = useT();
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -65,54 +78,69 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
     isDarkMode ? "border-zinc-600 bg-zinc-900 text-zinc-200" : "border-zinc-300 bg-white text-zinc-800"
   );
 
+  const languageRow = (
+    <div className={rowCls}>
+      <span className={labelCls}>{t('settings.language')}</span>
+      <select
+        value={settings.language}
+        onChange={(e) => set('language', e.target.value as LanguagePref)}
+        className={selectCls}
+      >
+        <option value="system">{t('settings.langSystem')}</option>
+        <option value="zh">简体中文</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+  );
+
   const rows: Array<{ key: keyof EditorSettings; label: string; node: React.ReactNode }> = [
-    { key: 'fontFamily', label: '字体', node: (
+    { key: 'fontFamily', label: t('settings.font'), node: (
       <select value={settings.fontFamily} onChange={(e) => set('fontFamily', e.target.value)} className={selectCls}>
-        {FONT_OPTIONS.map(f => <option key={f.id} value={f.stack}>{f.label}</option>)}
+        {FONT_OPTIONS.map(f => <option key={f.id} value={f.stack}>{t(FONT_LABEL_KEYS[f.id] ?? 'font.default')}</option>)}
       </select>
     ) },
-    { key: 'fontSize', label: '字号', node: (
+    { key: 'fontSize', label: t('settings.fontSize'), node: (
       <select value={settings.fontSize} onChange={(e) => set('fontSize', Number(e.target.value))} className={selectCls}>
         {[12, 13, 14, 15, 16, 18, 20, 24].map(n => <option key={n} value={n}>{n} px</option>)}
       </select>
     ) },
-    { key: 'lineHeight', label: '行高', node: (
+    { key: 'lineHeight', label: t('settings.lineHeight'), node: (
       <select value={settings.lineHeight} onChange={(e) => set('lineHeight', Number(e.target.value))} className={selectCls}>
         {[1.3, 1.4, 1.55, 1.7, 1.9, 2.2].map(n => <option key={n} value={n}>{n}</option>)}
       </select>
     ) },
-    { key: 'tabSize', label: 'Tab 宽度', node: (
+    { key: 'tabSize', label: t('settings.tabWidth'), node: (
       <select value={settings.tabSize} onChange={(e) => set('tabSize', Number(e.target.value))} className={selectCls}>
-        {[2, 4, 8].map(n => <option key={n} value={n}>{n} 字符</option>)}
+        {[2, 4, 8].map(n => <option key={n} value={n}>{t('settings.tabSizeChars', { n })}</option>)}
       </select>
     ) },
-    { key: 'insertSpaces', label: '缩进用', node: (
+    { key: 'insertSpaces', label: t('settings.indentWith'), node: (
       <select
         value={settings.insertSpaces ? 'space' : 'tab'}
         onChange={(e) => set('insertSpaces', e.target.value === 'space')}
         className={selectCls}
       >
-        <option value="space">空格</option>
-        <option value="tab">Tab 制表符</option>
+        <option value="space">{t('settings.indentSpaces')}</option>
+        <option value="tab">{t('settings.indentTabs')}</option>
       </select>
     ) },
-    { key: 'lineWrapMode', label: '自动换行', node: (
+    { key: 'lineWrapMode', label: t('settings.lineWrap'), node: (
       <select
         value={settings.lineWrapMode}
         onChange={(e) => set('lineWrapMode', e.target.value as LineWrapMode)}
         className={selectCls}
       >
-        <option value="markdown">仅 Markdown</option>
-        <option value="always">总是换行</option>
-        <option value="never">从不换行</option>
+        <option value="markdown">{t('settings.wrapMarkdownOnly')}</option>
+        <option value="always">{t('settings.wrapAlways')}</option>
+        <option value="never">{t('settings.wrapNever')}</option>
       </select>
     ) },
   ];
 
   const toggles: Array<{ key: keyof EditorSettings; label: string; hint?: string }> = [
-    { key: 'showWhitespace', label: '显示空白符' },
-    { key: 'minimap', label: '迷你地图', hint: '手机与降级模式下不可用' },
-    { key: 'stickyScroll', label: '粘性滚动', hint: '手机与降级模式下不可用' },
+    { key: 'showWhitespace', label: t('settings.showWhitespace') },
+    { key: 'minimap', label: t('settings.minimap'), hint: t('settings.hintUnavailable') },
+    { key: 'stickyScroll', label: t('settings.stickyScroll'), hint: t('settings.hintUnavailable') },
   ];
 
   return (
@@ -125,13 +153,16 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
             "absolute top-3 right-3 p-1 rounded-md transition-colors z-10",
             isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
           )}
-          title="关闭"
+          title={t('common.close')}
         >
           <X size={14} />
         </button>
-        <h2 className="px-5 pt-5 pb-1 text-base font-bold">设置</h2>
+        <h2 className="px-5 pt-5 pb-1 text-base font-bold">{t('settings.title')}</h2>
 
-        <div className={sectionCls}>编辑器</div>
+        <div className={sectionCls}>{t('settings.section.interface')}</div>
+        {languageRow}
+
+        <div className={sectionCls}>{t('settings.section.editor')}</div>
         {rows.map(({ key, label, node }) => (
           <div key={key} className={rowCls}>
             <span className={labelCls}>{label}</span>
@@ -139,7 +170,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
           </div>
         ))}
 
-        <div className={sectionCls}>界面辅助</div>
+        <div className={sectionCls}>{t('settings.section.uiAids')}</div>
         {toggles.map(({ key, label, hint }) => (
           <div key={key} className={rowCls}>
             <span className={labelCls}>
@@ -154,29 +185,33 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
           </div>
         ))}
 
-        <div className={sectionCls}>自动保存</div>
+        <div className={sectionCls}>{t('settings.section.autosave')}</div>
         <div className={rowCls}>
-          <span className={labelCls}>定时保存已打开的文件</span>
+          <span className={labelCls}>{t('settings.autosaveToggle')}</span>
           <Toggle
             checked={settings.autosaveEnabled}
             onChange={(v) => set('autosaveEnabled', v)}
-            label="自动保存"
+            label={t('settings.autosave')}
           />
         </div>
         {settings.autosaveEnabled && (
           <div className={rowCls}>
-            <span className={labelCls}>保存间隔</span>
+            <span className={labelCls}>{t('settings.autosaveInterval')}</span>
             <select
               value={settings.autosaveIntervalSec}
               onChange={(e) => set('autosaveIntervalSec', Number(e.target.value))}
               className={selectCls}
             >
-              {[10, 30, 60, 120, 300].map(n => <option key={n} value={n}>{n >= 60 ? `${n / 60} 分钟` : `${n} 秒`}</option>)}
+              {[10, 30, 60, 120, 300].map(n => (
+                <option key={n} value={n}>
+                  {n >= 60 ? t('settings.autosaveMinutes', { n: n / 60 }) : t('settings.autosaveSeconds', { n })}
+                </option>
+              ))}
             </select>
           </div>
         )}
         <p className={cn("px-5 pb-2 text-[10px] leading-relaxed", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-          未保存到磁盘的内容始终会写入本地草稿，异常退出后可在下次启动时恢复。
+          {t('settings.draftNote')}
         </p>
 
         <div className={cn("flex items-center justify-between px-5 py-3 border-t", isDarkMode ? "border-zinc-700" : "border-zinc-200")}>
@@ -187,13 +222,13 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
               isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-100 text-zinc-500"
             )}
           >
-            <RotateCcw size={12} /> 恢复默认
+            <RotateCcw size={12} /> {t('common.resetDefault')}
           </button>
           <button
             onClick={onClose}
             className="px-4 py-1.5 rounded-md text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
           >
-            完成
+            {t('common.done')}
           </button>
         </div>
       </div>

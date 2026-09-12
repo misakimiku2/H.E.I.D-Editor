@@ -17,6 +17,9 @@ export const FONT_OPTIONS: Array<{ id: string; label: string; stack: string }> =
 /** 自动换行模式：仅 Markdown（默认）/ 总是 / 从不 */
 export type LineWrapMode = 'markdown' | 'always' | 'never';
 
+/** 界面语言：跟随系统 / 简体中文 / 英文 */
+export type LanguagePref = 'system' | 'zh' | 'en';
+
 export interface EditorSettings {
   fontFamily: string;
   fontSize: number;
@@ -31,6 +34,8 @@ export interface EditorSettings {
   /** 定时把脏文件落盘（无路径标签走草稿，不受此项控制） */
   autosaveEnabled: boolean;
   autosaveIntervalSec: number;
+  /** 'system' 按 navigator.language 解析（zh* → 中文，其余英文） */
+  language: LanguagePref;
 }
 
 export const DEFAULT_SETTINGS: EditorSettings = {
@@ -45,6 +50,7 @@ export const DEFAULT_SETTINGS: EditorSettings = {
   stickyScroll: true,
   autosaveEnabled: false,
   autosaveIntervalSec: 30,
+  language: 'system',
 };
 
 const STORAGE_KEY = 'heid-settings';
@@ -87,6 +93,7 @@ export function normalizeSettings(input: unknown): EditorSettings {
     stickyScroll: typeof rec.stickyScroll === 'boolean' ? rec.stickyScroll : DEFAULT_SETTINGS.stickyScroll,
     autosaveEnabled: typeof rec.autosaveEnabled === 'boolean' ? rec.autosaveEnabled : DEFAULT_SETTINGS.autosaveEnabled,
     autosaveIntervalSec: clampInt(rec.autosaveIntervalSec, 5, 300, DEFAULT_SETTINGS.autosaveIntervalSec),
+    language: pickEnum(rec.language, ['system', 'zh', 'en'] as const, DEFAULT_SETTINGS.language),
   };
 }
 

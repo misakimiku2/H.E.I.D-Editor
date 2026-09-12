@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { cn } from '../lib/utils';
+import { useT } from '../lib/i18nContext';
 
 export interface ConfirmDialogProps {
   title: string;
@@ -25,13 +26,17 @@ export function ConfirmDialog({
   title,
   message,
   isDarkMode,
-  confirmText = '确认',
-  cancelText = '取消',
+  confirmText,
+  cancelText,
   danger = false,
   extraAction,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const t = useT();
+  const confirmTextResolved = confirmText ?? t('common.confirm');
+  const cancelTextResolved = cancelText ?? t('common.cancel');
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel();
@@ -59,7 +64,7 @@ export function ConfirmDialog({
               isDarkMode ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-300" : "bg-zinc-100 hover:bg-zinc-200 text-zinc-600"
             )}
           >
-            {cancelText}
+            {cancelTextResolved}
           </button>
           {extraAction && (
             <button
@@ -76,7 +81,7 @@ export function ConfirmDialog({
               danger ? "bg-red-600 hover:bg-red-500" : "bg-blue-600 hover:bg-blue-500"
             )}
           >
-            {confirmText}
+            {confirmTextResolved}
           </button>
         </div>
       </div>

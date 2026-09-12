@@ -36,6 +36,8 @@ import {
   loadSettings, saveSettings, DEFAULT_SETTINGS, type EditorSettings,
 } from './lib/settings';
 import { deleteDraft, draftKeyForTab, getDraft, saveDraft } from './lib/drafts';
+import { translate, resolveSystemLang, type Lang, type MessageKey } from './lib/i18n';
+import { I18nProvider, rt, setRuntimeLang } from './lib/i18nContext';
 import { SettingsDialog } from './components/SettingsDialog';
 import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
@@ -217,7 +219,7 @@ async function pickAndReadFile(): Promise<OpenedFile | null> {
     const selected = await open({
       multiple: false,
       directory: false,
-      filters: [{ name: '文本文件', extensions: READ_EXTENSIONS.map(e => e.slice(1)) }],
+      filters: [{ name: rt('file.filterName'), extensions: READ_EXTENSIONS.map(e => e.slice(1)) }],
     });
     if (typeof selected !== 'string') return null;
     return await readLocalPath(selected);
@@ -281,7 +283,7 @@ async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = false, s
     }
     const ok = await androidWriteUri(target, content, tab.encoding, tab.bom);
     if (!ok) {
-      if (!silent) alert('保存失败：无法写入所选文档');
+      if (!silent) alert(rt('save.errAndroidWrite'));
       return { ok: false, savedPath: null };
     }
     return { ok: true, savedPath: target };
@@ -293,7 +295,7 @@ async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = false, s
         return { ok: true, savedPath: tab.path };
       } catch (e) {
         console.error('Save failed:', e);
-        if (!silent) alert(`保存失败：${String(e)}`);
+        if (!silent) alert(rt('save.errGeneric', { msg: String(e) }));
         return { ok: false, savedPath: null };
       }
     }
@@ -306,7 +308,7 @@ async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = false, s
         return { ok: true, savedPath: target };
       } catch (e) {
         console.error('Save failed:', e);
-        if (!silent) alert(`保存失败：${String(e)}`);
+        if (!silent) alert(rt('save.errGeneric', { msg: String(e) }));
         return { ok: false, savedPath: null };
       }
     }
@@ -370,7 +372,7 @@ interface EditorOptions {
 function createEditor(target: HTMLElement, options: EditorOptions): EditorView {
   const view = new EditorView({
     parent: target,
-    doc: '// 在这里开始输入...',
+    doc: rt('editor.placeholder'),
     extensions: [
       options.lineNumbers ? lineNumbers() : [],
       EditorView.theme({ '&': { backgroundColor: options.theme === 'dark' ? '#1e1e1e' : '#ffffff' } }),
@@ -826,7 +828,7 @@ export default function App() {
       setRecentFiles(listRecentFiles());
     } catch (e) {
       console.error('Failed to open file:', path, e);
-      alert(`无法打开文件：${path}`);
+      alert(t('open.errPath', { path }));
     }
   }, []);
 
@@ -1059,7 +1061,7 @@ export default function App() {
       result = await pickAndReadFile();
     } catch (e: any) {
       console.error('打开文件失败:', e);
-      alert(`无法打开文件：${e?.message ?? e}`);
+      alert(t('open.errGeneric', { msg: e?.message ?? e }));
       return;
     }
     if (!result) return;
@@ -1139,9 +1141,9 @@ export default function App() {
      保存被取消/失败则不关闭，与退出确认的「退出并保存」语义一致 */
   const confirmDiscardTab = useCallback(async (tab: FileTab): Promise<boolean> => {
     const decision = await askDiscardConfirm(
-      `"${tab.title}" 有未保存的更改，关闭后将丢失这些修改。`,
-      '关闭不保存',
-      '关闭并保存',
+      t('confirm.closeDirtyTitle', { name: tab.title }),
+      t('confirm.closeNoSave'),
+      t('confirm.closeAndSave'),
     );
     if (decision === 'cancel') return false;
     if (decision === 'discard') {
@@ -1208,6 +1210,13 @@ export default function App() {
     saveSettings(settings);
   }, [settings]);
 
+  /* ---- 界面语言：settings.language 解析为具体语言；rt/setRuntimeLang 供模块级文案使用 ---- */
+  const lang: Lang = settings.language === 'system'
+    ? resolveSystemLang(typeof navigator !== 'undefined' ? navigator.language : undefined)
+    : settings.language;
+  const t = useCallback((key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars), [lang]);
+  useEffect(() => { setRuntimeLang(lang); }, [lang]);
+
   /* ---- 状态栏弹出菜单（编码 / 换行符）---- */
   type StatusMenu = null | 'encoding-root' | 'encoding-reopen' | 'encoding-save' | 'eol';
   const [statusMenu, setStatusMenu] = useState<StatusMenu>(null);
@@ -1227,8 +1236,8 @@ export default function App() {
     }
     if (tab.isDirty) {
       const decision = await askDiscardConfirm(
-        `"${tab.title}" 有未保存的更改，以其他编码重新打开将丢失这些修改。`,
-        '不保存重新打开',
+        t('confirm.reopenDirtyTitle', { name: tab.title }),
+        t('confirm.reopenNoSave'),
       );
       if (decision !== 'discard') return;
     }
@@ -1253,7 +1262,7 @@ export default function App() {
       }
     } catch (e) {
       console.error('以指定编码重新打开失败:', e);
-      alert(`无法以 ${encodingLabel(encoding)} 重新打开该文件`);
+      alert(t('open.errReopen', { enc: encodingLabel(encoding) }));
     }
   }, [askDiscardConfirm]);
 
@@ -1264,7 +1273,7 @@ export default function App() {
       return;
     }
     const ok = await persistTab({ ...tab, encoding }, false);
-    if (!ok) alert('编码转换保存失败，文件未改动');
+    if (!ok) alert(t('save.errConvert'));
   }, [persistTab]);
 
   /** 切换换行符（保存时生效；与磁盘原值不同即标记未保存） */
@@ -1353,9 +1362,9 @@ export default function App() {
     const dirtyCount = tabsRef.current.filter(t => t.isDirty).length;
     if (dirtyCount === 0) return true;
     const decision = await askDiscardConfirm(
-      `${dirtyCount} 个标签页有未保存的更改，退出后将丢失这些修改。`,
-      '退出不保存',
-      '退出并保存',
+      t('confirm.exitDirtyTitle', { n: dirtyCount }),
+      t('confirm.exitNoSave'),
+      t('confirm.exitAndSave'),
     );
     if (decision === 'cancel') return false;
     if (decision === 'discard') {
@@ -1578,6 +1587,7 @@ export default function App() {
   };
 
   return (
+    <I18nProvider lang={lang}>
     <div className={cn(
       "h-dvh flex flex-col overflow-hidden relative",
       isDarkMode ? "bg-zinc-900 text-zinc-200" : "bg-zinc-50 text-zinc-800"
@@ -1648,7 +1658,7 @@ export default function App() {
               )}
             >
               <span
-                title={conflicted ? '文件已被外部修改，点击菜单栏 Diff 按钮处理' : undefined}
+                title={conflicted ? t('tab.conflictedTitle') : undefined}
                 className={cn(
                 "w-1.5 h-1.5 rounded-full shrink-0",
                 conflicted
@@ -1677,7 +1687,7 @@ export default function App() {
             "p-1.5 rounded-md transition-colors shrink-0",
             isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
           )}
-          title="新建文件 (Ctrl+N)"
+          title={`${t('menu.newFile')} (Ctrl+N)`}
         >
           <Plus size={15} />
         </button>
@@ -1705,7 +1715,7 @@ export default function App() {
               ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
               : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
           )}
-          title="菜单"
+          title={t('menu.menuLabel')}
         >
           <Menu size={15} />
         </button>
@@ -1721,7 +1731,7 @@ export default function App() {
               "relative mr-2 p-1.5 rounded-md transition-colors shrink-0",
               isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
             )}
-            title={activeTab ? `外部修改 diff（${activeTab.title}）` : '外部修改 diff'}
+            title={activeTab ? t('diff.entryTitle', { name: activeTab.title }) : t('diff.menuTitle')}
           >
             <GitCompare size={15} />
             <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-orange-500 text-white text-[9px] font-bold flex items-center justify-center leading-none">
@@ -1734,16 +1744,16 @@ export default function App() {
         {isMarkdown && activeTab && (
           <div
             role="group"
-            aria-label="Markdown 视图"
+            aria-label={t('view.mdViewAria')}
             className={cn(
               "flex items-center rounded-full p-0.5 mr-2 shrink-0",
               isDarkMode ? "bg-zinc-700/60" : "bg-zinc-200/80"
             )}
           >
             {([
-              { mode: 'edit', icon: Pencil, title: '编辑' },
-              { mode: 'split', icon: Columns2, title: '分屏（左预览右源码）' },
-              { mode: 'preview', icon: Eye, title: '预览' },
+              { mode: 'edit', icon: Pencil, title: t('common.edit') },
+              { mode: 'split', icon: Columns2, title: t('view.split') },
+              { mode: 'preview', icon: Eye, title: t('common.preview') },
             ] as const).map(({ mode: m, icon: Icon, title }) => {
               const active = activeTab.mdView === m;
               return (
@@ -1768,16 +1778,16 @@ export default function App() {
         {/* 主题三档切换：浅色 | 跟随系统 | 深色 */}
         <div
           role="group"
-          aria-label="主题模式"
+          aria-label={t('theme.modeAria')}
           className={cn(
             "flex items-center rounded-full p-0.5 shrink-0",
             isDarkMode ? "bg-zinc-700/60" : "bg-zinc-200/80"
           )}
         >
           {([
-            { mode: 'light', icon: Sun, title: '主题：浅色', activeColor: 'text-amber-500' },
-            { mode: 'system', icon: SunMoon, title: '主题：跟随系统', activeColor: isDarkMode ? 'text-zinc-100' : 'text-zinc-700' },
-            { mode: 'dark', icon: Moon, title: '主题：深色', activeColor: 'text-indigo-400' },
+            { mode: 'light', icon: Sun, title: t('theme.tipLight'), activeColor: 'text-amber-500' },
+            { mode: 'system', icon: SunMoon, title: t('theme.tipSystem'), activeColor: isDarkMode ? 'text-zinc-100' : 'text-zinc-700' },
+            { mode: 'dark', icon: Moon, title: t('theme.tipDark'), activeColor: 'text-indigo-400' },
           ] as const).map(({ mode: m, icon: Icon, title, activeColor }) => {
             const active = themeMode === m;
             return (
@@ -1811,7 +1821,7 @@ export default function App() {
               )}
             >
               <FolderOpen size={14} />
-              打开文件
+              {t('menu.openFile')}
               <span className="ml-auto text-[10px] opacity-50">Ctrl+O</span>
             </button>
             {/* 最近打开（二级菜单，悬停/点击展开；portal 渲染到 body——
@@ -1830,7 +1840,7 @@ export default function App() {
                 )}
               >
                 <History size={14} />
-                最近打开
+                {t('menu.recent')}
                 <ChevronRight size={12} className="ml-auto opacity-50" />
               </button>
               {recentSubOpen && recentFiles.length > 0 && recentSubPos && createPortal(
@@ -1867,7 +1877,7 @@ export default function App() {
                       )}
                     >
                       <Trash2 size={13} />
-                      清空最近打开
+                      {t('menu.clearRecent')}
                     </button>
                 </div>,
                 document.body
@@ -1883,7 +1893,7 @@ export default function App() {
               )}
             >
               <Save size={14} />
-              保存
+              {t('menu.save')}
               <span className="ml-auto text-[10px] opacity-50">Ctrl+S</span>
             </button>
             <button
@@ -1895,7 +1905,7 @@ export default function App() {
               )}
             >
               <SaveAll size={14} />
-              另存为
+              {t('menu.saveAs')}
               <span className="ml-auto text-[10px] opacity-50">Ctrl+Shift+S</span>
             </button>
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
@@ -1908,7 +1918,7 @@ export default function App() {
               )}
             >
               <Undo2 size={14} />
-              撤销
+              {t('menu.undo')}
               <span className="ml-auto text-[10px] opacity-50">Ctrl+Z</span>
             </button>
             <button
@@ -1920,7 +1930,7 @@ export default function App() {
               )}
             >
               <Redo2 size={14} />
-              重做
+              {t('menu.redo')}
               <span className="ml-auto text-[10px] opacity-50">Ctrl+Y</span>
             </button>
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
@@ -1932,7 +1942,7 @@ export default function App() {
               )}
             >
               <Settings size={14} />
-              设置
+              {t('menu.settings')}
             </button>
             <button
               onClick={() => { setMenuOpen(false); setShortcutsOpen(true); }}
@@ -1942,7 +1952,7 @@ export default function App() {
               )}
             >
               <Keyboard size={14} />
-              键盘快捷键
+              {t('menu.shortcuts')}
             </button>
             <button
               onClick={() => { setMenuOpen(false); setAboutOpen(true); }}
@@ -1952,7 +1962,7 @@ export default function App() {
               )}
             >
               <Info size={14} />
-              关于 H.E.I.D
+              {t('menu.about')}
             </button>
           </div>
         )}
@@ -1989,30 +1999,30 @@ export default function App() {
               "h-6 border-t flex items-center px-4 gap-2 text-[11px] shrink-0 relative",
               isDarkMode ? "border-zinc-700 bg-zinc-800 text-zinc-500" : "border-zinc-200 bg-zinc-100 text-zinc-500"
             )}>
-              <span className="truncate" title={activeTab.path || '未保存'}>{activeTab.path || '未保存'}</span>
+              <span className="truncate" title={activeTab.path || t('status.unsavedPath')}>{activeTab.path || t('status.unsavedPath')}</span>
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{LANGUAGE_LABELS[activeTab.language] || activeTab.language}</span>
               {activeTab.binary && (
-                <span className="shrink-0 text-orange-400 font-medium" title="疑似二进制文件，以只读方式预览">二进制 · 只读</span>
+                <span className="shrink-0 text-orange-400 font-medium" title={t('status.binaryTip')}>{t('status.binary')}</span>
               )}
               {!activeTab.binary && activeTab.large && (
-                <span className="shrink-0" title="文件较大，已关闭语法高亮/小地图/补全以保证流畅">大文件</span>
+                <span className="shrink-0" title={t('status.largeTip')}>{t('status.large')}</span>
               )}
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{formatFileSize(activeTab.content)}</span>
               <span className="shrink-0 opacity-50">|</span>
-              <span className="shrink-0">{activeTab.content.split('\n').length} 行</span>
+              <span className="shrink-0">{t('status.lines', { n: activeTab.content.split('\n').length })}</span>
               {/* 行列位置：仅编辑器可见时显示（预览态无光标概念） */}
               {editorVisible && (
                 <>
                   <span className="shrink-0 opacity-50">|</span>
-                  <span className="shrink-0 tabular-nums" title="光标位置（行, 列）">
-                    行 {cursorInfo.line}, 列 {cursorInfo.col}
-                    {cursorInfo.selChars > 0 && `（选中 ${cursorInfo.selChars}）`}
+                  <span className="shrink-0 tabular-nums" title={t('status.cursorTip')}>
+                    {t('status.cursor', { line: cursorInfo.line, col: cursorInfo.col })}
+                    {cursorInfo.selChars > 0 && t('status.selected', { n: cursorInfo.selChars })}
                   </span>
                 </>
               )}
-              {activeTab.isDirty && <span className="shrink-0 text-amber-500 font-medium">未保存</span>}
+              {activeTab.isDirty && <span className="shrink-0 text-amber-500 font-medium">{t('status.unsavedPath')}</span>}
               <div className="flex-1" />
 
               {/* 换行符菜单 */}
@@ -2022,7 +2032,7 @@ export default function App() {
                   "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 shrink-0",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
                 )}
-                title="换行符"
+                title={t('status.eol')}
               >
                 {EOL_LABELS[activeTab.eol]}
               </button>
@@ -2033,7 +2043,7 @@ export default function App() {
                   "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 shrink-0",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
                 )}
-                title="文件编码"
+                title={t('status.encoding')}
               >
                 {encodingLabel(activeTab.encoding)}
                 {activeTab.bom && ' BOM'}
@@ -2046,9 +2056,9 @@ export default function App() {
                     "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0",
                     isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                   )}
-                  title="还原到上次保存的内容"
+                  title={t('status.revertTip')}
                 >
-                  <RotateCcw size={10} /> 还原
+                  <RotateCcw size={10} /> {t('status.revert')}
                 </button>
               )}
 
@@ -2061,13 +2071,13 @@ export default function App() {
                     isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
                   )}>
                     {statusMenu === 'encoding-root' && (<>
-                      <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>文件编码</div>
+                      <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>{t('status.encoding')}</div>
                       <button
                         onClick={() => setStatusMenu('encoding-reopen')}
                         className={statusItemCls}
                       >
                         <RotateCcw size={12} className="shrink-0" />
-                        以编码重新打开…
+                        {t('status.reopenAsMenu')}
                       </button>
                       <button
                         onClick={() => setStatusMenu('encoding-save')}
@@ -2075,18 +2085,18 @@ export default function App() {
                         className={cn(statusItemCls, "disabled:opacity-40")}
                       >
                         <Save size={12} className="shrink-0" />
-                        转换编码并保存…
+                        {t('status.convertSaveMenu')}
                       </button>
                       {!activeTab.path && (
                         <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-                          未保存文件：编码将在另存时生效
+                          {t('status.noPathEncoding')}
                         </div>
                       )}
                     </>)}
                     {(statusMenu === 'encoding-reopen' || statusMenu === 'encoding-save') && (
                       <>
                         <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-                          {statusMenu === 'encoding-reopen' ? '以编码重新打开' : '转换编码并保存'}
+                          {statusMenu === 'encoding-reopen' ? t('status.reopenAsTitle') : t('status.convertSaveTitle')}
                         </div>
                         {ENCODING_OPTIONS.map(opt => (
                           <button
@@ -2107,14 +2117,14 @@ export default function App() {
                       </>
                     )}
                     {statusMenu === 'eol' && (<>
-                      <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>换行符</div>
+                      <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>{t('status.eol')}</div>
                       {(['lf', 'crlf', 'cr'] as LineEnding[]).map(e => (
                         <button
                           key={e}
                           onClick={() => { setStatusMenu(null); setTabEol(activeTab, e); }}
                           className={cn(statusItemCls, "justify-between")}
                         >
-                          <span>{EOL_LABELS[e]}{e === 'lf' ? '（Unix/macOS）' : e === 'crlf' ? '（Windows）' : '（经典 Mac）'}</span>
+                          <span>{EOL_LABELS[e]}{e === 'lf' ? t('status.eolLfNote') : e === 'crlf' ? t('status.eolCrLfNote') : t('status.eolCrNote')}</span>
                           {activeTab.eol === e && <span className="text-emerald-500">✓</span>}
                         </button>
                       ))}
@@ -2133,7 +2143,7 @@ export default function App() {
             />
             <h3 className="text-lg font-medium mb-1">H.E.I.D</h3>
             <p className="text-sm text-zinc-500 max-w-sm text-center mb-4">
-              打开一个文件开始编辑，或新建一个空白文件
+              {t('empty.hint')}
             </p>
             <div className="flex items-center gap-2">
               <button
@@ -2143,7 +2153,7 @@ export default function App() {
                   isDarkMode ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-200" : "bg-zinc-200 hover:bg-zinc-300 text-zinc-700"
                 )}
               >
-                <FolderOpen size={16} /> 打开文件
+                <FolderOpen size={16} /> {t('menu.openFile')}
               </button>
               <button
                 onClick={handleNewFile}
@@ -2152,7 +2162,7 @@ export default function App() {
                   isDarkMode ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-300" : "bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200"
                 )}
               >
-                <Plus size={16} /> 新建文件
+                <Plus size={16} /> {t('menu.newFile')}
               </button>
             </div>
 
@@ -2163,7 +2173,7 @@ export default function App() {
                   "text-[10px] font-semibold tracking-wider uppercase mb-2",
                   isDarkMode ? "text-zinc-500" : "text-zinc-400"
                 )}>
-                  最近打开
+                  {t('menu.recent')}
                 </span>
                 <div className="w-full flex flex-col gap-0.5">
                   {recentFiles.slice(0, 5).map(f => (
@@ -2241,7 +2251,7 @@ export default function App() {
                   "absolute top-3 right-3 p-1 rounded-md transition-colors",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
                 )}
-                title="关闭"
+                title={t('common.close')}
               >
                 <X size={14} />
               </button>
@@ -2258,15 +2268,13 @@ export default function App() {
                 "mt-3 px-2.5 py-0.5 rounded-full text-[10px] font-medium border",
                 isDarkMode ? "border-zinc-600 text-zinc-400" : "border-zinc-300 text-zinc-500"
               )}>
-                版本 0.4.0
+                {t('about.version', { v: '0.4.0' })}
               </div>
               <p className={cn(
                 "mt-4 text-xs leading-relaxed",
                 isDarkMode ? "text-zinc-400" : "text-zinc-500"
               )}>
-                一款以语法高亮为核心的轻量级智能文档编辑器，
-                基于 Tauri 2 与 CodeMirror 6 构建，
-                支持多语言高亮、迷你地图、粘性滚动与代码折叠。
+                {t('about.desc')}
               </p>
               <div className={cn(
                 "mt-4 pt-3 w-full text-[10px] border-t",
@@ -2293,9 +2301,9 @@ export default function App() {
           }}
         >
           {([
-            { icon: <Plus size={13} />, label: '新建标签页', action: () => handleNewFile(), disabled: false },
-            { icon: <X size={13} />, label: '关闭其他标签页', action: () => void closeOtherTabs(tabMenu.tabId!), disabled: !tabMenu.tabId || tabs.length <= 1 },
-            { icon: <Trash2 size={13} />, label: '关闭所有标签页', action: () => void closeAllTabs(), disabled: tabs.length === 0 },
+            { icon: <Plus size={13} />, label: t('tabs.new'), action: () => handleNewFile(), disabled: false },
+            { icon: <X size={13} />, label: t('tabs.closeOthers'), action: () => void closeOtherTabs(tabMenu.tabId!), disabled: !tabMenu.tabId || tabs.length <= 1 },
+            { icon: <Trash2 size={13} />, label: t('tabs.closeAll'), action: () => void closeAllTabs(), disabled: tabs.length === 0 },
           ] as const).map(({ icon, label, action, disabled }) => (
             <button
               key={label}
@@ -2347,7 +2355,7 @@ export default function App() {
       {/* 丢弃确认弹窗（退出应用 / 关闭脏标签共用，自绘以统一三端视觉） */}
       {pendingDiscard && (
         <ConfirmDialog
-          title="未保存的更改"
+          title={t('confirm.unsavedTitle')}
           message={pendingDiscard.message}
           isDarkMode={isDarkMode}
           confirmText={pendingDiscard.confirmText}
@@ -2360,5 +2368,6 @@ export default function App() {
         />
       )}
     </div>
+    </I18nProvider>
   );
 }

@@ -10,6 +10,7 @@ import { FormatMenu, transformSlice, type MdOp, type MenuState } from './Markdow
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { PreviewFindBar } from './PreviewFindBar';
 import type { PointerPos } from '../hooks/useLastPointer';
+import { useT } from '../lib/i18nContext';
 
 /* ---- 本地图片：相对/绝对路径通过 Tauri fs 读取为 blob URL，带缓存 ---- */
 
@@ -20,6 +21,7 @@ const MarkdownImage = React.memo<{
   alt: string;
   isDarkMode: boolean;
 }>(({ src, alt, isDarkMode }) => {
+  const t = useT();
   const [imgSrc, setImgSrc] = useState<string>('');
   const [loadError, setLoadError] = useState<string>('');
 
@@ -57,14 +59,14 @@ const MarkdownImage = React.memo<{
           setImgSrc(url);
         } catch (err: any) {
           const errMsg = err?.message || String(err);
-          if (errMsg.includes('forbidden')) { setLoadError('权限不足，无法读取该路径的文件'); return; }
+          if (errMsg.includes('forbidden')) { setLoadError(t('image.errForbidden')); return; }
           try {
             const { convertFileSrc } = await import('@tauri-apps/api/core');
             let p = /^[A-Za-z]:/.test(filePath) ? '/' + filePath.replace(/\\/g, '/') : filePath;
             const result = convertFileSrc(p);
             if (result && result.length > 0) { setImgSrc(result); }
-            else { setLoadError('图片加载失败'); }
-          } catch { setLoadError('图片加载失败'); }
+            else { setLoadError(t('image.errLoad')); }
+          } catch { setLoadError(t('image.errLoad')); }
         }
       })();
     } else if (src && !src.startsWith('https://local-image.placeholder')) {
@@ -84,7 +86,7 @@ const MarkdownImage = React.memo<{
         color: isDarkMode ? '#a1a1aa' : '#71717a', fontSize: '0.875rem'
       }}>
         <span style={{ fontSize: '1.5rem', marginBottom: '0.5rem', display: 'block' }}>🖼️</span>
-        <span style={{ display: 'block' }}>{(alt || '').split('|||LOCAL-FILE:')[0] || '图片'}</span>
+        <span style={{ display: 'block' }}>{(alt || '').split('|||LOCAL-FILE:')[0] || t('image.defaultName')}</span>
         <span style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7, display: 'block' }}>{loadError}</span>
       </span>
     );
@@ -94,7 +96,7 @@ const MarkdownImage = React.memo<{
     <img
       src={imgSrc} alt={(alt || '').split('|||LOCAL-FILE:')[0] || ''}
       loading="lazy"
-      onError={() => setLoadError('图片加载失败')}
+      onError={() => setLoadError(t('image.errLoad'))}
       style={{ maxWidth: '100%', height: 'auto', borderRadius: '0.5rem', display: 'block', marginLeft: 'auto', marginRight: 'auto', margin: '1.5rem 0' }}
     />
   );
@@ -220,6 +222,7 @@ const InsertMenu = React.memo<{
   onImage: () => void;
   onClose: () => void;
 }>(({ x, y, isDarkMode, onTable, onImage, onClose }) => {
+  const t = useT();
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -258,7 +261,7 @@ const InsertMenu = React.memo<{
       onContextMenu={(e) => e.preventDefault()}
     >
       <div className={cn("text-[9px] font-semibold tracking-wider px-2 pt-1 pb-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-        插入
+        {t('md.sectionInsert')}
       </div>
       <button
         onClick={onTable}
@@ -268,7 +271,7 @@ const InsertMenu = React.memo<{
         )}
       >
         <Table size={13} />
-        表格
+        {t('image.menuTable')}
         <span className="ml-auto text-[9px] opacity-50">3×3</span>
       </button>
       <button
@@ -279,7 +282,7 @@ const InsertMenu = React.memo<{
         )}
       >
         <ImageIcon size={13} />
-        图片
+        {t('image.menuImage')}
       </button>
     </div>
   );
@@ -349,6 +352,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   content, isDarkMode, onChange, canUndo, canRedo, onUndo, onRedo, onScroller,
   findOpen, onFindClose, getPointer,
 }, ref) => {
+  const t = useT();
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<PreviewMenuState | null>(null);
   const [blankMenu, setBlankMenu] = useState<{ x: number; y: number; insertAt: number } | null>(null);
@@ -642,7 +646,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     let next = content;
     for (const b of [...targets].sort((x, y) => y.start - x.start)) {
       const slice = content.slice(b.start, b.end);
-      next = next.slice(0, b.start) + transformSlice(op, slice, menu.text) + next.slice(b.end);
+      next = next.slice(0, b.start) + transformSlice(op, slice, menu.text, t('md.tableTemplate')) + next.slice(b.end);
     }
     setMenu(null);
     onChange(next);
@@ -899,8 +903,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       {tableAction && onChange && (() => {
         const isInsert = tableAction.button.kind === 'insert';
         const title = tableAction.button.kind === 'delete'
-          ? (tableAction.button.target === 'row' ? '删除该行' : '删除该列')
-          : (tableAction.button.target === 'row' ? '在此处插入一行' : '在此处插入一列');
+          ? (tableAction.button.target === 'row' ? t('md.delRowTitle') : t('md.delColTitle'))
+          : (tableAction.button.target === 'row' ? t('md.insertRowHere') : t('md.insertColHere'));
         const left = Math.max(4, Math.min(tableAction.x - 11, window.innerWidth - 26));
         const top = Math.max(4, Math.min(tableAction.y - 11, window.innerHeight - 26));
         return (
@@ -922,8 +926,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       {/* 触屏表格结构工具条：点选单元格时浮出（取代悬停边线的 +/− 按钮） */}
       {cellEdit && onChange && IS_ANDROID_APP && (() => {
         const actions = [
-          { label: '行+', kind: 'addRow' }, { label: '行−', kind: 'delRow' },
-          { label: '列+', kind: 'addCol' }, { label: '列−', kind: 'delCol' },
+          { label: t('md.rowAdd'), kind: 'addRow' }, { label: t('md.rowDel'), kind: 'delRow' },
+          { label: t('md.colAdd'), kind: 'addCol' }, { label: t('md.colDel'), kind: 'delCol' },
         ] as const;
         return (
           <div

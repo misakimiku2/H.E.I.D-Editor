@@ -10,6 +10,7 @@ import {
   type ExternalDiffEntry,
 } from '../lib/diffTimeline';
 import { ConfirmDialog } from './ConfirmDialog';
+import { useLang, useT } from '../lib/i18nContext';
 
 /* ---------- entry 级结果缓存：条目对象不可变且跨渲染稳定，避免大文件重复计算 ---------- */
 
@@ -37,8 +38,8 @@ function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false });
+function formatTime(ts: number, locale: string): string {
+  return new Date(ts).toLocaleTimeString(locale, { hour12: false });
 }
 
 interface Selection {
@@ -77,6 +78,8 @@ export function DiffModal({
   onAccept,
   onRevert,
 }: DiffModalProps) {
+  const t = useT();
+  const lang = useLang();
   const [selected, setSelected] = useState<Selection | null>(null);
   const [confirming, setConfirming] = useState<PendingConfirm | null>(null);
 
@@ -139,12 +142,12 @@ export function DiffModal({
   const confirmMeta = confirming
     ? confirming.kind === 'accept'
       ? {
-          title: '接受外部修改',
-          message: '确认接受这次外部修改？该 diff 条目将从时间线移除。',
+          title: t('diff.acceptTitle'),
+          message: t('diff.acceptMessage'),
         }
       : {
-          title: '撤销外部修改',
-          message: '确认撤销这次外部修改？磁盘文件将被恢复到此修改之前的内容。',
+          title: t('diff.revertTitle'),
+          message: t('diff.revertMessage'),
         }
     : null;
 
@@ -161,12 +164,12 @@ export function DiffModal({
         {/* header */}
         <div className={cn("h-11 border-b flex items-center px-4 gap-2 shrink-0", softBorder)}>
           <GitCompare size={15} className="shrink-0 opacity-70" />
-          <span className="text-sm font-semibold">外部修改 Diff</span>
+          <span className="text-sm font-semibold">{t('diff.title')}</span>
           <span className={cn(
             "px-2 py-0.5 rounded-full text-[10px] font-medium border",
             isDarkMode ? "border-zinc-600 text-zinc-400" : "border-zinc-300 text-zinc-500"
           )}>
-            {totalPending} 条未处理
+            {t('diff.pendingCount', { n: totalPending })}
           </span>
           <div className="flex-1" />
           <button
@@ -175,7 +178,7 @@ export function DiffModal({
               "p-1.5 rounded-md transition-colors",
               isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-100 text-zinc-500"
             )}
-            title="关闭"
+            title={t('common.close')}
           >
             <X size={14} />
           </button>
@@ -187,7 +190,7 @@ export function DiffModal({
           <div className={cn("w-60 border-r overflow-y-auto shrink-0 py-2", softBorder)}>
             {groups.length === 0 ? (
               <div className={cn("px-4 py-8 text-center text-xs", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-                暂无未处理的外部修改
+                {t('diff.empty')}
               </div>
             ) : groups.map(group => (
               <div key={group.path} className="mb-2">
@@ -214,7 +217,7 @@ export function DiffModal({
                       )}
                     >
                       <span className={cn("shrink-0 tabular-nums", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-                        {formatTime(entry.detectedAt)}
+                        {formatTime(entry.detectedAt, lang === 'zh' ? 'zh-CN' : 'en-US')}
                       </span>
                       <span className="ml-auto shrink-0 font-medium tabular-nums">
                         <span className="text-emerald-500">+{stats.added}</span>{' '}
@@ -233,10 +236,10 @@ export function DiffModal({
               {/* 栏头：与下方两半列宽对齐 */}
               <div className={cn("h-9 border-b flex items-center shrink-0 text-[11px] font-medium", softBorder)}>
                 <div className={cn("w-1/2 px-3 truncate", isDarkMode ? "text-zinc-400" : "text-zinc-500")} title={selectedEntry.before}>
-                  修改前
+                  {t('diff.before')}
                 </div>
                 <div className={cn("w-1/2 px-3 truncate border-l", softBorder, isDarkMode ? "text-zinc-400" : "text-zinc-500")} title={selectedEntry.after}>
-                  修改后
+                  {t('diff.after')}
                 </div>
               </div>
               <div className="flex-1 overflow-auto font-mono text-[11px] leading-5">
@@ -252,7 +255,7 @@ export function DiffModal({
             <div className="flex-1 flex flex-col items-center justify-center gap-2">
               <GitCompare size={28} className={isDarkMode ? "text-zinc-600" : "text-zinc-300"} />
               <p className={cn("text-xs", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-                选择左侧时间线条目查看对比
+                {t('diff.pickEntry')}
               </p>
             </div>
           )}
@@ -262,7 +265,7 @@ export function DiffModal({
         <div className={cn("h-12 border-t flex items-center justify-end px-4 gap-2 shrink-0", softBorder)}>
           {/* 时间线保留条数设置：每文件保留的最大条数，超出丢弃最旧 */}
           <div className="mr-auto flex items-center gap-2 text-[11px]">
-            <span className={isDarkMode ? "text-zinc-500" : "text-zinc-400"}>保留条数</span>
+            <span className={isDarkMode ? "text-zinc-500" : "text-zinc-400"}>{t('diff.keepCount')}</span>
             <div className={cn(
               "flex items-center rounded-md border overflow-hidden shrink-0",
               isDarkMode ? "border-zinc-700" : "border-zinc-200"
@@ -270,7 +273,7 @@ export function DiffModal({
               <button
                 onClick={() => onChangeMaxEntries(maxEntries - 1)}
                 disabled={maxEntries <= MIN_DIFF_ENTRIES}
-                title={`减少保留条数（最小 ${MIN_DIFF_ENTRIES}）`}
+                title={t('diff.decreaseTip', { min: MIN_DIFF_ENTRIES })}
                 className={cn(
                   "w-6 h-6 flex items-center justify-center transition-colors disabled:opacity-30",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
@@ -280,14 +283,14 @@ export function DiffModal({
               </button>
               <span
                 className="w-8 text-center tabular-nums font-medium"
-                title={`时间线每文件保留的最大条数，超出丢弃最旧（${MIN_DIFF_ENTRIES} ~ ${MAX_DIFF_ENTRIES}）`}
+                title={t('diff.keepTip', { min: MIN_DIFF_ENTRIES, max: MAX_DIFF_ENTRIES })}
               >
                 {maxEntries}
               </span>
               <button
                 onClick={() => onChangeMaxEntries(maxEntries + 1)}
                 disabled={maxEntries >= MAX_DIFF_ENTRIES}
-                title={`增加保留条数（最大 ${MAX_DIFF_ENTRIES}）`}
+                title={t('diff.increaseTip', { max: MAX_DIFF_ENTRIES })}
                 className={cn(
                   "w-6 h-6 flex items-center justify-center transition-colors disabled:opacity-30",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
@@ -306,9 +309,9 @@ export function DiffModal({
                 ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-200"
                 : "bg-zinc-200 hover:bg-zinc-300 text-zinc-700"
             )}
-            title="接受该修改：仅移除此条目，磁盘与编辑器均不动"
+            title={t('diff.acceptTip')}
           >
-            <Check size={13} /> 接受
+            <Check size={13} /> {t('diff.accept')}
           </button>
           <button
             onClick={() => effectiveSelection && setConfirming({ kind: 'revert', ...effectiveSelection })}
@@ -317,9 +320,9 @@ export function DiffModal({
               "px-3 h-7 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40 text-white",
               "bg-red-600 hover:bg-red-500"
             )}
-            title="撤销该修改：把此条目的修改前内容写回磁盘，并移除该条及其后所有条目"
+            title={t('diff.revertTip')}
           >
-            <RotateCcw size={13} /> 撤销修改
+            <RotateCcw size={13} /> {t('diff.revert')}
           </button>
         </div>
 

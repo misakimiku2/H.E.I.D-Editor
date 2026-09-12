@@ -6,6 +6,7 @@ import {
   Minus, Undo2, Redo2,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { useT, type MessageKey } from '../lib/i18nContext';
 
 /* ---- markdown 快捷格式化：预览选区与源码编辑器选区共用的转换与菜单 ---- */
 
@@ -56,10 +57,10 @@ function prefixLines(slice: string, toggleTest: RegExp, make: (lineIndex: number
   }).join('\n');
 }
 
-const TABLE_TEMPLATE = '| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n|  |  |  |';
+const TABLE_TEMPLATE_ZH = '| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n|  |  |  |';
 
-/* 对单个源码片段套用操作，返回替换后的文本 */
-export function transformSlice(op: MdOp, slice: string, selectedText: string): string {
+/* 对单个源码片段套用操作，返回替换后的文本；tableTemplate 供 i18n 覆盖（缺省中文表头） */
+export function transformSlice(op: MdOp, slice: string, selectedText: string, tableTemplate = TABLE_TEMPLATE_ZH): string {
   switch (op.kind) {
     case 'heading':
       return prefixLines(slice, new RegExp(`^${'#'.repeat(op.level)} `), () => `${'#'.repeat(op.level)} `);
@@ -83,7 +84,7 @@ export function transformSlice(op: MdOp, slice: string, selectedText: string): s
       return '```\n' + slice.replace(/^\n+|\n+$/g, '') + '\n```';
     }
     case 'table':
-      return slice.trimEnd() + '\n\n' + TABLE_TEMPLATE;
+      return slice.trimEnd() + '\n\n' + tableTemplate;
     case 'hr':
       return slice.trimEnd() + '\n\n---';
     case 'link':
@@ -116,43 +117,54 @@ export function transformSlice(op: MdOp, slice: string, selectedText: string): s
 
 /* ---- 右键格式菜单 ---- */
 
-export const MENU_SECTIONS: Array<{ label: string; ops: Array<{ op: MdOp; icon: React.ElementType; title: string; text: string }> }> = [
+export interface MdMenuOp {
+  op: MdOp;
+  icon: React.ElementType;
+  /** 按钮小字标签 */
+  textKey: MessageKey;
+  /** 悬停完整名称 */
+  nameKey: MessageKey;
+  /** 悬停标题附带的语法提示（如 ** / >） */
+  syntax?: string;
+}
+
+export const MENU_SECTIONS: Array<{ labelKey: MessageKey; ops: MdMenuOp[] }> = [
   {
-    label: '标题',
+    labelKey: 'md.sectionHeading',
     ops: [
-      { op: { kind: 'heading', level: 1 }, icon: Heading1, title: '一级标题', text: 'H1' },
-      { op: { kind: 'heading', level: 2 }, icon: Heading2, title: '二级标题', text: 'H2' },
-      { op: { kind: 'heading', level: 3 }, icon: Heading3, title: '三级标题', text: 'H3' },
-      { op: { kind: 'heading', level: 4 }, icon: Heading4, title: '四级标题', text: 'H4' },
-      { op: { kind: 'heading', level: 5 }, icon: Heading5, title: '五级标题', text: 'H5' },
-      { op: { kind: 'heading', level: 6 }, icon: Heading6, title: '六级标题', text: 'H6' },
-      { op: { kind: 'paragraph' }, icon: Pilcrow, title: '正文段落', text: '正文' },
+      { op: { kind: 'heading', level: 1 }, icon: Heading1, textKey: 'md.h1', nameKey: 'md.heading1' },
+      { op: { kind: 'heading', level: 2 }, icon: Heading2, textKey: 'md.h2', nameKey: 'md.heading2' },
+      { op: { kind: 'heading', level: 3 }, icon: Heading3, textKey: 'md.h3', nameKey: 'md.heading3' },
+      { op: { kind: 'heading', level: 4 }, icon: Heading4, textKey: 'md.h4', nameKey: 'md.heading4' },
+      { op: { kind: 'heading', level: 5 }, icon: Heading5, textKey: 'md.h5', nameKey: 'md.heading5' },
+      { op: { kind: 'heading', level: 6 }, icon: Heading6, textKey: 'md.h6', nameKey: 'md.heading6' },
+      { op: { kind: 'paragraph' }, icon: Pilcrow, textKey: 'md.bodyText', nameKey: 'md.paragraph' },
     ],
   },
   {
-    label: '行内格式',
+    labelKey: 'md.sectionInline',
     ops: [
-      { op: { kind: 'bold' }, icon: Bold, title: '粗体 **', text: '粗体' },
-      { op: { kind: 'italic' }, icon: Italic, title: '斜体 *', text: '斜体' },
-      { op: { kind: 'strike' }, icon: Strikethrough, title: '删除线 ~~', text: '删除线' },
-      { op: { kind: 'inlineCode' }, icon: Code, title: '行内代码 `', text: '行内码' },
+      { op: { kind: 'bold' }, icon: Bold, textKey: 'md.bold', nameKey: 'md.bold', syntax: '**' },
+      { op: { kind: 'italic' }, icon: Italic, textKey: 'md.italic', nameKey: 'md.italic', syntax: '*' },
+      { op: { kind: 'strike' }, icon: Strikethrough, textKey: 'md.strike', nameKey: 'md.strike', syntax: '~~' },
+      { op: { kind: 'inlineCode' }, icon: Code, textKey: 'md.inlineCode', nameKey: 'md.inlineCode', syntax: '`' },
     ],
   },
   {
-    label: '块级格式',
+    labelKey: 'md.sectionBlock',
     ops: [
-      { op: { kind: 'quote' }, icon: TextQuote, title: '引用 >', text: '引用' },
-      { op: { kind: 'ul' }, icon: List, title: '无序列表 -', text: '无序' },
-      { op: { kind: 'ol' }, icon: ListOrdered, title: '有序列表 1.', text: '有序' },
-      { op: { kind: 'task' }, icon: ListTodo, title: '任务列表 - [ ]', text: '任务' },
-      { op: { kind: 'codeBlock' }, icon: Braces, title: '代码块 ```', text: '代码块' },
+      { op: { kind: 'quote' }, icon: TextQuote, textKey: 'md.quote', nameKey: 'md.quote', syntax: '>' },
+      { op: { kind: 'ul' }, icon: List, textKey: 'md.ul', nameKey: 'md.ul', syntax: '-' },
+      { op: { kind: 'ol' }, icon: ListOrdered, textKey: 'md.ol', nameKey: 'md.ol', syntax: '1.' },
+      { op: { kind: 'task' }, icon: ListTodo, textKey: 'md.task', nameKey: 'md.task', syntax: '- [ ]' },
+      { op: { kind: 'codeBlock' }, icon: Braces, textKey: 'md.codeBlock', nameKey: 'md.codeBlock', syntax: '```' },
     ],
   },
   {
-    label: '插入',
+    labelKey: 'md.sectionInsert',
     ops: [
-      { op: { kind: 'link' }, icon: Link2, title: '链接 []()', text: '链接' },
-      { op: { kind: 'hr' }, icon: Minus, title: '分割线 ---', text: '分割线' },
+      { op: { kind: 'link' }, icon: Link2, textKey: 'md.link', nameKey: 'md.link', syntax: '[]()' },
+      { op: { kind: 'hr' }, icon: Minus, textKey: 'md.hr', nameKey: 'md.hr', syntax: '---' },
     ],
   },
 ];
@@ -173,6 +185,7 @@ export const FormatMenu = React.memo<{
   onApply: (op: MdOp) => void;
   onClose: () => void;
 }>(({ menu, isDarkMode, canUndo, canRedo, onUndo, onRedo, onApply, onClose }) => {
+  const t = useT();
   const ref = useRef<HTMLDivElement | null>(null);
 
   /* 点击外部（pointerdown 覆盖触屏）/ Esc / 滚动 / 调整窗口时关闭 */
@@ -220,50 +233,50 @@ export const FormatMenu = React.memo<{
       {(onUndo || onRedo) && (
         <>
           <div className={cn("text-[9px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-            编辑
+            {t('md.sectionEdit')}
           </div>
           <div className="grid grid-cols-7 gap-0.5">
             <button
               onClick={onUndo}
               disabled={!canUndo}
-              title="撤销 (Ctrl+Z)"
+              title={`${t('menu.undo')} (Ctrl+Z)`}
               className={cn(itemBase, itemTone, !canUndo && "opacity-40 pointer-events-none")}
             >
               <Undo2 size={14} />
-              <span className="text-[9px] leading-none whitespace-nowrap">撤销</span>
+              <span className="text-[9px] leading-none whitespace-nowrap">{t('menu.undo')}</span>
             </button>
             <button
               onClick={onRedo}
               disabled={!canRedo}
-              title="重做 (Ctrl+Y)"
+              title={`${t('menu.redo')} (Ctrl+Y)`}
               className={cn(itemBase, itemTone, !canRedo && "opacity-40 pointer-events-none")}
             >
               <Redo2 size={14} />
-              <span className="text-[9px] leading-none whitespace-nowrap">重做</span>
+              <span className="text-[9px] leading-none whitespace-nowrap">{t('menu.redo')}</span>
             </button>
           </div>
           <div className={cn("h-px mx-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
         </>
       )}
       {MENU_SECTIONS.map((section, si) => (
-        <React.Fragment key={section.label}>
+        <React.Fragment key={section.labelKey}>
           {si > 0 && <div className={cn("h-px mx-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />}
           <div className={cn("text-[9px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-            {section.label}
+            {t(section.labelKey)}
           </div>
           <div className="grid grid-cols-7 gap-0.5">
-            {section.ops.map(({ op, icon: Icon, title, text }) => (
+            {section.ops.map(({ op, icon: Icon, textKey, nameKey, syntax }) => (
               <button
-                key={title}
+                key={nameKey}
                 onClick={() => onApply(op)}
-                title={title}
+                title={`${t(nameKey)}${syntax ? ` ${syntax}` : ''}`}
                 className={cn(
                   itemBase,
                   itemTone
                 )}
               >
                 <Icon size={14} />
-                <span className="text-[9px] leading-none whitespace-nowrap">{text}</span>
+                <span className="text-[9px] leading-none whitespace-nowrap">{t(textKey)}</span>
               </button>
             ))}
           </div>

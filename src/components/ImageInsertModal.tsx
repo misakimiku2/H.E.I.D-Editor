@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { X, ImagePlus, Trash2 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { useT } from '../lib/i18nContext';
 import type { SourceSnippet } from './MarkdownPreview';
 
 /* ---- 插入图片弹窗：本地（可多选）/ 网络链接（可多条），带缩略图预览 ----
@@ -99,6 +100,7 @@ export const ImageInsertModal = React.memo<{
   onConfirm: (images: InsertImage[], absolutePos: number) => void;
   onClose: () => void;
 }>(({ isDarkMode, snippet, onConfirm, onClose }) => {
+  const t = useT();
   const [tab, setTab] = useState<'local' | 'url'>('local');
   const [images, setImages] = useState<InsertImage[]>([]);
   const [urlInput, setUrlInput] = useState('');
@@ -141,16 +143,16 @@ export const ImageInsertModal = React.memo<{
       const picked = await open({
         multiple: true,
         directory: false,
-        filters: [{ name: '图片', extensions: IMAGE_EXTENSIONS }],
+        filters: [{ name: t('image.filterName'), extensions: IMAGE_EXTENSIONS }],
       });
       if (!picked) return;
       const paths = Array.isArray(picked) ? picked : [picked];
       paths.forEach(p => {
-        const name = p.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '图片';
+        const name = p.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || t('image.defaultName');
         addImage({ name, src: p });
       });
     } catch {
-      setError('无法打开文件选择器');
+      setError(t('image.errPicker'));
     }
   };
 
@@ -169,13 +171,13 @@ export const ImageInsertModal = React.memo<{
   const addUrl = () => {
     const u = urlInput.trim();
     if (!/^https?:\/\/\S+$/.test(u)) {
-      setError('请输入有效的 http(s) 图片链接');
+      setError(t('image.errUrl'));
       return;
     }
-    let name = '图片';
+    let name = t('image.defaultName');
     try {
       const seg = new URL(u).pathname.split('/').filter(Boolean).pop();
-      if (seg) name = decodeURIComponent(seg).replace(/\.[^.]+$/, '') || '图片';
+      if (seg) name = decodeURIComponent(seg).replace(/\.[^.]+$/, '') || t('image.defaultName');
     } catch { /* 保持默认名 */ }
     addImage({ name, src: u });
     setUrlInput('');
@@ -212,16 +214,16 @@ export const ImageInsertModal = React.memo<{
             "absolute top-3 right-3 p-1 rounded-md transition-colors",
             isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
           )}
-          title="关闭"
+          title={t('common.close')}
         >
           <X size={14} />
         </button>
-        <div className="text-sm font-semibold shrink-0">插入图片</div>
+        <div className="text-sm font-semibold shrink-0">{t('image.title')}</div>
 
         {/* 源码上下文：光标位置 = 插入点 */}
         <div className="flex flex-col gap-1 shrink-0">
           <div className={cn("text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-            源码（移动光标选择精确插入点）
+            {t('image.snippetLabel')}
           </div>
           <textarea
             ref={snippetRef}
@@ -244,15 +246,15 @@ export const ImageInsertModal = React.memo<{
         {/* 来源切换：本地 | 网络 */}
         <div
           role="group"
-          aria-label="图片来源"
+          aria-label={t('image.sourceGroup')}
           className={cn(
             "flex items-center rounded-full p-0.5 w-fit shrink-0",
             isDarkMode ? "bg-zinc-700/60" : "bg-zinc-200/80"
           )}
         >
           {([
-            { key: 'local', label: '本地图片' },
-            { key: 'url', label: '网络图片' },
+            { key: 'local', label: t('image.tabLocal') },
+            { key: 'url', label: t('image.tabUrl') },
           ] as const).map(({ key, label }) => (
             <button
               key={key}
@@ -285,7 +287,7 @@ export const ImageInsertModal = React.memo<{
               )}
             >
               <ImagePlus size={14} />
-              选择本地图片（可多选）
+              {t('image.pickLocal')}
             </button>
             {!isTauri && (
               <input
@@ -298,7 +300,7 @@ export const ImageInsertModal = React.memo<{
               />
             )}
             {!isTauri && (
-              <p className="text-[10px] opacity-50">浏览器模式下图片将以 base64 数据嵌入文档，体积较大；桌面端仅记录本地路径。</p>
+              <p className="text-[10px] opacity-50">{t('image.webEmbedNote')}</p>
             )}
           </div>
         )}
@@ -326,10 +328,10 @@ export const ImageInsertModal = React.memo<{
                   "bg-indigo-600 hover:bg-indigo-500 text-white"
                 )}
               >
-                添加
+                {t('image.add')}
               </button>
             </div>
-            <p className="text-[10px] opacity-50">可连续添加多条链接，插入后逐行排列。</p>
+            <p className="text-[10px] opacity-50">{t('image.urlNote')}</p>
           </div>
         )}
 
@@ -348,7 +350,7 @@ export const ImageInsertModal = React.memo<{
                       "absolute -top-1.5 -right-1.5 w-[18px] h-[18px] p-1 rounded-full shadow transition-colors flex items-center justify-center",
                       isDarkMode ? "bg-zinc-700 hover:bg-red-500 text-zinc-300" : "bg-white hover:bg-red-500 hover:text-white text-zinc-500 border"
                     )}
-                    title="移除"
+                    title={t('image.remove')}
                   >
                     <Trash2 size={9} />
                   </button>
@@ -362,7 +364,7 @@ export const ImageInsertModal = React.memo<{
             "h-16 rounded-lg flex items-center justify-center text-[11px] border border-dashed shrink-0",
             isDarkMode ? "border-zinc-600 text-zinc-500" : "border-zinc-300 text-zinc-400"
           )}>
-            尚未选择图片
+            {t('image.none')}
           </div>
         )}
 
@@ -375,7 +377,7 @@ export const ImageInsertModal = React.memo<{
               isDarkMode ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-300" : "bg-zinc-200 hover:bg-zinc-300 text-zinc-600"
             )}
           >
-            取消
+            {t('common.cancel')}
           </button>
           <button
             onClick={confirm}
@@ -384,7 +386,7 @@ export const ImageInsertModal = React.memo<{
               "px-4 py-1.5 text-xs rounded-lg font-medium transition-colors bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
             )}
           >
-            插入{images.length > 0 ? `（${images.length} 张）` : ''}
+            {images.length > 0 ? t('image.insertCount', { n: images.length }) : t('image.insert')}
           </button>
         </div>
       </div>
