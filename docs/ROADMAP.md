@@ -1,7 +1,7 @@
 # H.E.I.D 后续开发规划
 
 > 定位：**轻量文本编辑器**。每项功能都要过"轻量"这道门槛：不显著增加包体积、不引入常驻后台、不让界面复杂化。
-> 当前版本：v0.4.0（2026-09，未发布）
+> 当前版本：v0.5.0（2026-09，未发布）
 
 ## 版本策略
 
@@ -53,17 +53,24 @@ v1.1 时核实的缺口已全部补齐（见 v0.3 一节的勾选）。
 > 待定：小地图的大文件适配（固定画布高度 + 超阈值停用语法着色，解除约 1.3 万行的画布上限）——
 > 待有真实 MB 级文档再验证实施。
 
-## v0.5 —— 小而美的差异化（P2）
+## v0.5 —— 小而美的差异化（P2）✅ 已完成（2026-09）
 
-10. **可选文件树侧栏**：默认关闭的抽屉式目录浏览（桌面 + 平板），点击打开、显示未保存标记；不做嵌套复杂操作（重命名/拖拽移入后续再议）
-11. **Markdown 导出 HTML**：纯前端拼接 + 内联样式，零新增重量级依赖
-12. **网址导入 Markdown**（导出 HTML 的逆操作）：粘贴 URL → 抓取网页 → 提取正文 → 转成 Markdown 插入新标签页
-    - Rust 侧仅做 HTTP GET（原生无 CORS，桌面/安卓通用；超时 + 大小上限 + 仅 http/https）
-    - 前端转换库（正文提取 + GFM 转换，如 defuddle + turndown）**按需动态 import**，不进主包
-    - 结果以 `<站名/标题>.md` 新标签页打开，头部写 title/来源 URL/抓取时间；图片默认保留远程 URL，可选下载到本地
-    - 明确不支持：JS 动态渲染的 SPA、需登录的页面（无头浏览器超出轻量定位）；非 UTF-8 页面复用已有编码检测
-13. **界面中英双语**：文案字典 + `localStorage` 偏好，成本极低
-14. **字数统计**：状态栏字符/字数，Markdown 模式按 CJK 感知计数
+10. ✅ **可选文件树侧栏**（`FileTreeSidebar.tsx` + 纯状态库 `src/lib/fileTree.ts` + `DirLister` 双提供者）
+    - 默认关闭的抽屉式目录浏览（桌面 + 安卓平板宽屏）：标题栏 PanelLeft 开关 + 菜单「打开/关闭文件夹」
+    - 懒加载（展开才列子项）、目录优先排序、活动标签高亮、脏状态橙点、记住根目录（启动零 I/O）、手动刷新
+    - 桌面 = dialog + plugin-fs readDir；安卓 = SAF 桥 openTree + listTree（DocumentsContract），文件经 document URI 走既有打开通道；不做嵌套复杂操作（重命名/拖拽移入后续再议）
+11. ✅ **Markdown 导出 HTML**（`src/lib/markdownHtml.ts`）：复用 react-markdown + remark-gfm 经 renderToStaticMarkup，
+    单文件内联 `<style>`（深/浅一套），零新增依赖；桌面另存 / 安卓 SAF 新建文档 / 浏览器 Blob 下载
+12. ✅ **网址导入 Markdown**（导出 HTML 的逆操作）：粘贴 URL → 抓取网页 → 提取正文 → 转成 Markdown 插入新标签页
+    - Rust `http_get` 命令（ureq/rustls）：超时 + 5MB 上限 + 仅 http/https + NUL 判二进制；非 UTF-8 页面复用既有编码检测
+    - defuddle + turndown(GFM) 动态 import（懒加载 chunk，不进主包）；结果以 `<站名/标题>.md` 分屏新标签页打开，头部写 title/来源 URL/抓取时间
+    - 明确不支持：JS 动态渲染的 SPA、需登录的页面；图片保留远程 URL（相对地址按最终 URL 补全；「下载到本地」后续再议——新标签页未落盘无目标目录）
+13. ✅ **界面中英双语**（`src/lib/i18n.ts` + `i18nContext.tsx`）：中文表 `as const` 为 key 源、英文表同构（编译期对齐）；
+    偏好并入 settings（`language: system|zh|en`，system 按 navigator.language 解析）；300+ 条文案全量迁移
+14. ✅ **字数统计**（`src/lib/wordCount.ts`）：状态栏「X 字 · Y 词」，Markdown 按 CJK 感知计数（Word/WPS 口径），字符按码点计
+
+> v0.5 后续细化：文件树实时 watch（fs 插件 watch 已授权）、文件树重命名/删除、
+> 网址导入的图片下载到本地、导出 HTML 的代码高亮、欢迎页文档内容按语言切换、en 词典懒加载（当前主包 +23KB）。
 
 ## v1.0.0 —— 正式发布（发布与工程化）
 

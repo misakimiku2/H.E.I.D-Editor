@@ -1,6 +1,6 @@
 [package]
 name = "nexus-editor"
-version = "0.4.0"
+version = "0.5.0"
 description = "Nexus Editor - a standalone code editor extracted from nexus-ai-assistant"
 edition = "2021"
 rust-version = "1.77.2"

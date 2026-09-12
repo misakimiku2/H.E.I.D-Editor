@@ -2443,7 +2443,7 @@ export default function App() {
                 "mt-3 px-2.5 py-0.5 rounded-full text-[10px] font-medium border",
                 isDarkMode ? "border-zinc-600 text-zinc-400" : "border-zinc-300 text-zinc-500"
               )}>
-                {t('about.version', { v: '0.4.0' })}
+                {t('about.version', { v: '0.5.0' })}
               </div>
               <p className={cn(
                 "mt-4 text-xs leading-relaxed",
