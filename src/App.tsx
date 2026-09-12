@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
-  GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard,
+  GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard, FileDown,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -1218,6 +1218,43 @@ export default function App() {
   const t = useCallback((key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars), [lang]);
   useEffect(() => { setRuntimeLang(lang); }, [lang]);
 
+  /* ---- Markdown 导出为单文件 HTML（桌面另存对话框 / 安卓 SAF 新建文档 / 浏览器 Blob 下载） ---- */
+  const handleExportHtml = useCallback(async () => {
+    const tab = activeTab;
+    if (!tab || tab.language !== 'markdown' || tab.binary) return;
+    try {
+      const { renderMarkdownToHtml } = await import('./lib/markdownHtml');
+      const baseName = tab.title.replace(/\.md$/i, '') || 'export';
+      const html = await renderMarkdownToHtml(tab.content, { title: baseName, dark: isDarkMode });
+      if (IS_ANDROID_APP) {
+        const created = await androidCreateDoc(baseName, 'text/html');
+        if (!created) return;
+        const ok = await androidWriteUri(created.uri, html, 'utf-8', false);
+        if (!ok) alert(rt('save.errAndroidWrite'));
+        return;
+      }
+      if (isTauri) {
+        const { save } = await import('@tauri-apps/plugin-dialog');
+        const path = await save({
+          defaultPath: baseName + '.html',
+          filters: [{ name: t('export.htmlFilterName'), extensions: ['html'] }],
+        });
+        if (!path) return;
+        await writeLocalPath(path, html, 'utf-8', false);
+        return;
+      }
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = baseName + '.html';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert(t('export.errGeneric', { msg: e?.message ?? String(e) }));
+    }
+  }, [activeTab, isDarkMode, t]);
+
   /* ---- 状态栏弹出菜单（编码 / 换行符）---- */
   type StatusMenu = null | 'encoding-root' | 'encoding-reopen' | 'encoding-save' | 'eol';
   const [statusMenu, setStatusMenu] = useState<StatusMenu>(null);
@@ -1915,6 +1952,17 @@ export default function App() {
               <SaveAll size={14} />
               {t('menu.saveAs')}
               <span className="ml-auto text-[10px] opacity-50">Ctrl+Shift+S</span>
+            </button>
+            <button
+              onClick={() => { setMenuOpen(false); void handleExportHtml(); }}
+              disabled={!isMarkdown || !!activeTab?.binary}
+              className={cn(
+                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+              )}
+            >
+              <FileDown size={14} />
+              {t('export.htmlMenu')}
             </button>
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
             <button
