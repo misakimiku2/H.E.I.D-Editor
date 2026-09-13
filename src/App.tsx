@@ -520,6 +520,12 @@ export default function App() {
 
   const isDarkMode = themeMode === 'dark' || (themeMode === 'system' && systemDark);
 
+  /* 安卓：系统状态栏/导航栏图标外观跟随应用主题（浅色主题=深色图标，反之亦然） */
+  useEffect(() => {
+    if (!IS_ANDROID_APP) return;
+    try { (window as any).HeidBridge?.setDarkTheme?.(isDarkMode); } catch { /* 桥不可用时忽略 */ }
+  }, [isDarkMode]);
+
   /* 原生滚动条与表单控件跟随主题：Chromium 依据根元素的 color-scheme 渲染深色滚动条 */
   useEffect(() => {
     document.documentElement.style.colorScheme = isDarkMode ? 'dark' : 'light';

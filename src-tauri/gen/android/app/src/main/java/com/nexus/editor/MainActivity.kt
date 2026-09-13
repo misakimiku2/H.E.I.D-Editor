@@ -13,6 +13,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import org.json.JSONArray
 import java.nio.charset.Charset
@@ -143,6 +144,17 @@ class MainActivity : TauriActivity() {
       "shift_jis" -> Charset.forName("Shift_JIS")
       "windows-1252" -> Charset.forName("windows-1252")
       else -> Charsets.UTF_8
+    }
+
+    /** 状态栏/导航栏图标外观跟随应用主题（应用内切换深浅色时由 JS 调用；
+        键盘自身主题无公开 API 可控，跟随系统设置） */
+    @JavascriptInterface
+    fun setDarkTheme(dark: Boolean) {
+      runOnUiThread {
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.isAppearanceLightStatusBars = !dark
+        controller.isAppearanceLightNavigationBars = !dark
+      }
     }
 
     /** 退出应用（window.destroy 在 Android 上不可用） */
