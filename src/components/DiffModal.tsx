@@ -8,9 +8,13 @@ import {
   MIN_DIFF_ENTRIES,
   type DiffRow,
   type ExternalDiffEntry,
+  type InternalDiffEntry,
 } from '../lib/diffTimeline';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useLang, useT } from '../lib/i18nContext';
+
+/** 时间线类别：外部修改（磁盘监听）/ 软件内编辑（编辑爆发记录） */
+export type DiffKind = 'external' | 'internal';
 
 /* ---------- entry 级结果缓存：条目对象不可变且跨渲染稳定，避免大文件重复计算 ---------- */
 
@@ -48,28 +52,33 @@ interface Selection {
 }
 
 interface PendingConfirm {
-  kind: 'accept' | 'revert';
+  kind: DiffKind;
+  action: 'accept' | 'revert';
   path: string;
   id: string;
 }
 
 export interface DiffModalProps {
-  /** 文件路径 → 该文件的未处理时间线（空时间线的文件不展示） */
-  timelines: Record<string, ExternalDiffEntry[]>;
+  /** 外部修改：文件路径 → 该文件的未处理时间线（空时间线的文件不展示） */
+  externalTimelines: Record<string, ExternalDiffEntry[]>;
+  /** 软件内编辑：文件路径 → 时间线（未命名标签不记录），与外部时间线相互独立 */
+  internalTimelines: Record<string, InternalDiffEntry[]>;
   isDarkMode: boolean;
   /** 打开弹窗时优先展示该文件（当前激活标签页）的最新条目 */
   focusPath?: string | null;
-  /** 时间线每文件保留条数（5~50），页脚可调 */
+  /** 时间线每文件保留条数（5~50），页脚可调，两类共用 */
   maxEntries: number;
   onChangeMaxEntries: (n: number) => void;
   onClose: () => void;
-  onAccept: (path: string, entryId: string) => void;
-  onRevert: (path: string, entryId: string) => void;
+  onAccept: (kind: DiffKind, path: string, entryId: string) => void;
+  onRevert: (kind: DiffKind, path: string, entryId: string) => void;
 }
 
-/** 外部修改 Diff 弹窗：左侧按文件分组的时间线 + 右侧选中条目的左右双栏对比 */
+/** Diff 时间线弹窗：外部修改 / 软件内编辑两套独立时间线，
+ *  左侧按文件分组的时间线 + 右侧选中条目的左右双栏对比，顶部标签切换类别 */
 export function DiffModal({
-  timelines,
+  externalTimelines,
+  internalTimelines,
   isDarkMode,
   focusPath,
   maxEntries,
@@ -83,7 +92,20 @@ export function DiffModal({
   const [selected, setSelected] = useState<Selection | null>(null);
   const [confirming, setConfirming] = useState<PendingConfirm | null>(null);
 
-  /* 按文件分组（含未处理条目的文件才出现），组内时间倒序 */
+  /* 类别：默认外部（有未处理外部条目时），否则若内部有记录则落在内部 */
+  const hasExternal = useMemo(() => Object.values(externalTimelines).some(e => e.length > 0), [externalTimelines]);
+  const hasInternal = useMemo(() => Object.values(internalTimelines).some(e => e.length > 0), [internalTimelines]);
+  const [kind, setKind] = useState<DiffKind>(() => (hasExternal || !hasInternal ? 'external' : 'internal'));
+
+  const timelines = kind === 'external' ? externalTimelines : internalTimelines;
+
+  const switchKind = (next: DiffKind) => {
+    if (next === kind) return;
+    setKind(next);
+    setSelected(null);
+  };
+
+  /* 按文件分组（该类别下含条目的文件才出现），组内时间倒序 */
   const groups = useMemo(() => {
     return Object.entries(timelines)
       .filter(([, entries]) => entries.length > 0)
@@ -116,6 +138,16 @@ export function DiffModal({
     [groups]
   );
 
+  /* 两类各自的未处理总数（顶部切换标签上的角标） */
+  const externalCount = useMemo(
+    () => Object.values(externalTimelines).reduce((sum, e) => sum + e.length, 0),
+    [externalTimelines]
+  );
+  const internalCount = useMemo(
+    () => Object.values(internalTimelines).reduce((sum, e) => sum + e.length, 0),
+    [internalTimelines]
+  );
+
   /* Esc 关闭（确认弹窗打开时交给它处理） */
   useEffect(() => {
     if (confirming) return;
@@ -135,20 +167,30 @@ export function DiffModal({
     if (!confirming) return;
     const c = confirming;
     setConfirming(null);
-    if (c.kind === 'accept') onAccept(c.path, c.id);
-    else onRevert(c.path, c.id);
+    if (c.action === 'accept') onAccept(c.kind, c.path, c.id);
+    else onRevert(c.kind, c.path, c.id);
   };
 
   const confirmMeta = confirming
-    ? confirming.kind === 'accept'
-      ? {
-          title: t('diff.acceptTitle'),
-          message: t('diff.acceptMessage'),
-        }
-      : {
-          title: t('diff.revertTitle'),
-          message: t('diff.revertMessage'),
-        }
+    ? confirming.action === 'accept'
+      ? confirming.kind === 'external'
+        ? {
+            title: t('diff.acceptTitle'),
+            message: t('diff.acceptMessage'),
+          }
+        : {
+            title: t('diff.acceptTitleInternal'),
+            message: t('diff.acceptMessageInternal'),
+          }
+      : confirming.kind === 'external'
+        ? {
+            title: t('diff.revertTitle'),
+            message: t('diff.revertMessage'),
+          }
+        : {
+            title: t('diff.revertTitleInternal'),
+            message: t('diff.revertMessageInternal'),
+          }
     : null;
 
   return (
@@ -161,12 +203,42 @@ export function DiffModal({
         "relative w-[min(960px,92vw)] h-[min(620px,88vh)] rounded-xl border shadow-2xl flex flex-col overflow-hidden",
         panel
       )}>
-        {/* header */}
+        {/* header：标题 + 类别切换（外部修改 / 软件内编辑，各带未处理角标）+ 关闭 */}
         <div className={cn("h-11 border-b flex items-center px-4 gap-2 shrink-0", softBorder)}>
           <GitCompare size={15} className="shrink-0 opacity-70" />
-          <span className="text-sm font-semibold">{t('diff.title')}</span>
+          <span className="text-sm font-semibold shrink-0">{t('diff.title')}</span>
+          <div className={cn(
+            "flex items-center rounded-md border overflow-hidden shrink-0 ml-1",
+            softBorder
+          )}>
+            {([
+              ['external', externalCount],
+              ['internal', internalCount],
+            ] as const).map(([k, count]) => (
+              <button
+                key={k}
+                onClick={() => switchKind(k)}
+                className={cn(
+                  "px-2.5 h-6 text-[11px] font-medium flex items-center gap-1.5 transition-colors",
+                  kind === k
+                    ? (isDarkMode ? "bg-zinc-600/70 text-zinc-100" : "bg-zinc-200 text-zinc-800")
+                    : (isDarkMode ? "text-zinc-400 hover:bg-zinc-700/50" : "text-zinc-500 hover:bg-zinc-100")
+                )}
+              >
+                {t(k === 'external' ? 'diff.tabExternal' : 'diff.tabInternal')}
+                {count > 0 && (
+                  <span className={cn(
+                    "min-w-[14px] h-[14px] px-1 rounded-full text-[9px] font-bold flex items-center justify-center leading-none",
+                    k === 'external' ? "bg-orange-500 text-white" : (isDarkMode ? "bg-zinc-700 text-zinc-300" : "bg-zinc-300 text-zinc-700")
+                  )}>
+                    {count > 99 ? '99+' : count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
           <span className={cn(
-            "px-2 py-0.5 rounded-full text-[10px] font-medium border",
+            "px-2 py-0.5 rounded-full text-[10px] font-medium border shrink-0",
             isDarkMode ? "border-zinc-600 text-zinc-400" : "border-zinc-300 text-zinc-500"
           )}>
             {t('diff.pendingCount', { n: totalPending })}
@@ -190,7 +262,7 @@ export function DiffModal({
           <div className={cn("w-60 border-r overflow-y-auto shrink-0 py-2", softBorder)}>
             {groups.length === 0 ? (
               <div className={cn("px-4 py-8 text-center text-xs", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-                {t('diff.empty')}
+                {t(kind === 'external' ? 'diff.empty' : 'diff.emptyInternal')}
               </div>
             ) : groups.map(group => (
               <div key={group.path} className="mb-2">
@@ -301,7 +373,7 @@ export function DiffModal({
             </div>
           </div>
           <button
-            onClick={() => effectiveSelection && setConfirming({ kind: 'accept', ...effectiveSelection })}
+            onClick={() => effectiveSelection && setConfirming({ kind, action: 'accept', ...effectiveSelection })}
             disabled={!effectiveSelection}
             className={cn(
               "px-3 h-7 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40",
@@ -309,18 +381,18 @@ export function DiffModal({
                 ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-200"
                 : "bg-zinc-200 hover:bg-zinc-300 text-zinc-700"
             )}
-            title={t('diff.acceptTip')}
+            title={t(kind === 'external' ? 'diff.acceptTip' : 'diff.acceptTipInternal')}
           >
             <Check size={13} /> {t('diff.accept')}
           </button>
           <button
-            onClick={() => effectiveSelection && setConfirming({ kind: 'revert', ...effectiveSelection })}
+            onClick={() => effectiveSelection && setConfirming({ kind, action: 'revert', ...effectiveSelection })}
             disabled={!effectiveSelection}
             className={cn(
               "px-3 h-7 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40 text-white",
               "bg-red-600 hover:bg-red-500"
             )}
-            title={t('diff.revertTip')}
+            title={t(kind === 'external' ? 'diff.revertTip' : 'diff.revertTipInternal')}
           >
             <RotateCcw size={13} /> {t('diff.revert')}
           </button>
@@ -332,7 +404,7 @@ export function DiffModal({
             title={confirmMeta.title}
             message={confirmMeta.message}
             isDarkMode={isDarkMode}
-            danger={confirming.kind === 'revert'}
+            danger={confirming.action === 'revert'}
             onConfirm={runConfirm}
             onCancel={() => setConfirming(null)}
           />

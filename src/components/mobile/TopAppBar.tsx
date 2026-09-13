@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   FileText, FolderOpen, Save, SaveAll, Plus, MoreVertical,
-  Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2,
+  Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2, GitCompare,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useT } from '../../lib/i18nContext';
@@ -22,6 +22,8 @@ interface TopAppBarProps {
   onInsertImage: () => void;
   /** 从网址导入（仅原生环境提供；浏览器无原生 HTTP 入口） */
   onImportUrl?: () => void;
+  /** Diff 时间线（外部修改 / 软件内编辑） */
+  onOpenDiff?: () => void;
   onCloseTab: () => void;
   onSettings: () => void;
   onShortcuts: () => void;
@@ -35,7 +37,7 @@ interface TopAppBarProps {
  */
 export function TopAppBar({
   isDarkMode, title, isDirty, isMarkdown, saving, tabCount,
-  onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage, onImportUrl,
+  onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
   onCloseTab, onSettings, onShortcuts, onAbout,
 }: TopAppBarProps) {
   const t = useT();
@@ -146,6 +148,7 @@ export function TopAppBar({
             {menuItem(<Save size={16} className="shrink-0" />, t('menu.save'), onSave, { disabled: saving })}
             {menuItem(<SaveAll size={16} className="shrink-0" />, t('menu.saveAs'), onSaveAs, { disabled: saving })}
             {menuItem(<Plus size={16} className="shrink-0" />, t('menu.newFile'), onNew)}
+            {onOpenDiff && menuItem(<GitCompare size={16} className="shrink-0" />, t('diff.menuTitle'), onOpenDiff)}
             {onImportUrl && menuItem(<Link2 size={16} className="shrink-0" />, t('import.menu'), onImportUrl)}
             {isMarkdown && (
               <>

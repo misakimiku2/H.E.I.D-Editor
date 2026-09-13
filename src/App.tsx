@@ -15,7 +15,8 @@ import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import {
   appendEntry, removeEntry, revertEntry, trimTimeline, clampDiffEntries,
-  DEFAULT_DIFF_ENTRIES, type ExternalDiffEntry,
+  applyInternalEdit, DEFAULT_DIFF_ENTRIES,
+  type ExternalDiffEntry, type InternalDiffEntry,
 } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { loadSessionState, saveSessionState, type SessionMdView, type SessionTab } from './lib/session';
@@ -96,7 +97,7 @@ const READ_EXTENSIONS = [
   '.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java',
   '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.cs', '.rb', '.php',
   '.html', '.htm', '.css', '.scss', '.less', '.json', '.yaml', '.yml',
-  '.xml', '.md', '.sh', '.bash', '.sql', '.toml', '.ini', '.txt',
+  '.xml', '.svg', '.md', '.sh', '.bash', '.sql', '.toml', '.ini', '.txt',
   '.swift', '.kt', '.kts', '.scala', '.vue', '.svelte',
 ];
 
@@ -233,7 +234,13 @@ async function pickAndReadFile(): Promise<OpenedFile | null> {
     try {
       const [handle] = await (window as any).showOpenFilePicker({
         multiple: false,
-        types: [{ description: 'Text files', accept: { 'text/*': READ_EXTENSIONS } }],
+        types: [{
+          description: 'Text files',
+          accept: {
+            'text/*': READ_EXTENSIONS.filter(e => e !== '.svg'),
+            'image/svg+xml': ['.svg'],
+          },
+        }],
       });
       const file = await handle.getFile();
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -597,8 +604,9 @@ export default function App() {
   const [tabSheetOpen, setTabSheetOpen] = useState(false);
   /* 丢弃确认弹窗（退出应用 / 关闭脏标签共用），null 表示无待确认项 */
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscardConfirm | null>(null);
-  /* ---- 外部 Diff：每文件时间线（内存态，关闭最后一个引用该文件的标签页即丢弃） ---- */
+  /* ---- Diff 时间线：外部修改（监听磁盘）与软件内编辑（记录编辑爆发）两套相互独立 ---- */
   const [diffTimelines, setDiffTimelines] = useState<Record<string, ExternalDiffEntry[]>>({});
+  const [internalDiffTimelines, setInternalDiffTimelines] = useState<Record<string, InternalDiffEntry[]>>({});
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   /* 时间线每文件保留条数（5~50，默认 30；localStorage 持久化，仅影响后续追加与即时裁剪） */
   const [maxDiffEntries, setMaxDiffEntries] = useState<number>(() => {
@@ -623,13 +631,19 @@ export default function App() {
     return h;
   }, []);
 
-  /* 记录一次内容变化；major（如右键格式化）强制独立成条，否则按时间间隔合并连击 */
-  const recordContentChange = useCallback((tabId: string, prevContent: string, nextContent: string, major?: boolean) => {
+  /** 内容变化来源：edit=软件内编辑（同步记内部 diff 时间线）；external=磁盘外部修改；revert=时间线撤销回写 */
+  type ContentChangeSource = 'edit' | 'external' | 'revert';
+
+  /* 记录一次内容变化；major（如右键格式化）强制独立成条，否则按时间间隔合并连击。
+     source 为 edit 且标签页有路径时，按同样的合并判定把变化推进内部 diff 时间线
+     （未命名标签无路径不记录；外部修改/时间线撤销不属于自己的时间线，跳过） */
+  const recordContentChange = useCallback((tabId: string, prevContent: string, nextContent: string, major?: boolean, source: ContentChangeSource = 'external') => {
     if (prevContent === nextContent) return;
     const h = ensureHistory(tabId, prevContent);
     if (nextContent === h.stack[h.index]) return;
     const now = Date.now();
-    if (major || now - h.lastAt > HISTORY_COALESCE_MS) {
+    const newStep = major || now - h.lastAt > HISTORY_COALESCE_MS;
+    if (newStep) {
       h.stack = h.stack.slice(0, h.index + 1);
       h.stack.push(nextContent);
       if (h.stack.length > MAX_HISTORY) h.stack.shift();
@@ -638,7 +652,16 @@ export default function App() {
       h.stack[h.index] = nextContent;
     }
     h.lastAt = now;
-  }, [ensureHistory]);
+    if (source === 'edit') {
+      const path = tabsRef.current.find(tb => tb.id === tabId)?.path;
+      if (path) {
+        setInternalDiffTimelines(prev => ({
+          ...prev,
+          [path]: applyInternalEdit(prev[path] ?? [], prevContent, nextContent, newStep, maxDiffEntries, now),
+        }));
+      }
+    }
+  }, [ensureHistory, maxDiffEntries]);
 
   /* 关于弹窗：Esc 关闭 */
   useEffect(() => {
@@ -711,10 +734,15 @@ export default function App() {
 
   /* ---- 外部 Diff：监听管理 + 变更应用 ---- */
 
-  /* 当前被标签页引用的真实文件路径（去重）；浏览器模式与安卓（fs watch 不支持且 SAF 无真实路径）不监听 */
-  const watchedPaths = useMemo(
-    () => (isTauri && !IS_ANDROID_APP ? Array.from(new Set(tabs.flatMap(t => (t.path ? [t.path] : [])))) : []),
+  /* 当前被标签页引用的真实文件路径（去重）——两条时间线的存活域（关最后一个标签页即丢弃）；
+     浏览器模式与安卓（fs watch 不支持且 SAF 无真实路径）不监听外部，但内部时间线照常记录 */
+  const referencedPaths = useMemo(
+    () => Array.from(new Set(tabs.flatMap(t => (t.path ? [t.path] : [])))),
     [tabs]
+  );
+  const watchedPaths = useMemo(
+    () => (isTauri && !IS_ANDROID_APP ? referencedPaths : []),
+    [referencedPaths]
   );
 
   /* 检测到真实外部修改：追加时间线条目（按用户设置的保留条数裁剪），并按标签页脏状态分流处理 */
@@ -722,7 +750,7 @@ export default function App() {
     setDiffTimelines(prev => ({ ...prev, [path]: appendEntry(prev[path] ?? [], before, after, Date.now(), maxDiffEntries) }));
     // 先为干净标签页以 major 方式记撤销历史（Ctrl+Z 可回退这次外部替换），再统一更新状态
     for (const t of tabsRef.current) {
-      if (t.path === path && !t.isDirty) recordContentChange(t.id, t.content, after, true);
+      if (t.path === path && !t.isDirty) recordContentChange(t.id, t.content, after, true, 'external');
     }
     setTabs(prev => prev.map(t => {
       if (t.path !== path) return t;
@@ -743,21 +771,25 @@ export default function App() {
 
   const diffTimelinesRef = useRef(diffTimelines);
   diffTimelinesRef.current = diffTimelines;
+  const internalDiffTimelinesRef = useRef(internalDiffTimelines);
+  internalDiffTimelinesRef.current = internalDiffTimelines;
 
   /* 提醒与当前标签页联动：只统计激活文件自己的未处理条数（每标签独立，切换标签页即切换提醒） */
   const activePendingDiffs = activeTab?.path ? (diffTimelines[activeTab.path]?.length ?? 0) : 0;
 
-  /* 路径不再被任何标签页引用：丢弃其时间线（监听由 hook 自行拆除清理） */
+  /* 路径不再被任何标签页引用：丢弃其两条时间线（外部监听由 hook 自行拆除清理） */
   useEffect(() => {
-    const live = new Set(watchedPaths);
-    setDiffTimelines(prev => {
+    const live = new Set(referencedPaths);
+    const dropStale = <T,>(prev: Record<string, T[]>): Record<string, T[]> => {
       const stale = Object.keys(prev).filter(p => !live.has(p));
       if (stale.length === 0) return prev;
       const next = { ...prev };
       stale.forEach(p => delete next[p]);
       return next;
-    });
-  }, [watchedPaths]);
+    };
+    setDiffTimelines(dropStale);
+    setInternalDiffTimelines(dropStale);
+  }, [referencedPaths]);
 
   /* 保留条数设置持久化 */
   useEffect(() => {
@@ -769,6 +801,16 @@ export default function App() {
     setDiffTimelines(prev => {
       let changed = false;
       const next: Record<string, ExternalDiffEntry[]> = {};
+      for (const [p, entries] of Object.entries(prev)) {
+        const trimmed = trimTimeline(entries, maxDiffEntries);
+        if (trimmed !== entries) changed = true;
+        next[p] = trimmed;
+      }
+      return changed ? next : prev;
+    });
+    setInternalDiffTimelines(prev => {
+      let changed = false;
+      const next: Record<string, InternalDiffEntry[]> = {};
       for (const [p, entries] of Object.entries(prev)) {
         const trimmed = trimTimeline(entries, maxDiffEntries);
         if (trimmed !== entries) changed = true;
@@ -811,7 +853,7 @@ export default function App() {
     });
     // 该路径所有标签页的 originalContent 同步为写回内容（它始终跟踪磁盘最后已知状态）
     for (const t of tabsRef.current) {
-      if (t.path === path && !t.isDirty) recordContentChange(t.id, t.content, entry.before, true);
+      if (t.path === path && !t.isDirty) recordContentChange(t.id, t.content, entry.before, true, 'revert');
     }
     setTabs(prev => prev.map(t => {
       if (t.path !== path) return t;
@@ -823,6 +865,36 @@ export default function App() {
       return { ...t, originalContent: entry.before, isDirty: t.content !== entry.before || t.eol !== t.originalEol };
     }));
   }, [recordContentChange, updateKnownDiskContent]);
+
+  /* 接受（内部）：仅移除该条目，编辑器内容不动 */
+  const handleAcceptInternalDiff = useCallback((path: string, entryId: string) => {
+    setInternalDiffTimelines(prev => {
+      const next = { ...prev, [path]: removeEntry(prev[path] ?? [], entryId) };
+      if (next[path].length === 0) delete next[path];
+      return next;
+    });
+  }, []);
+
+  /* 撤销（内部）：把编辑器内容恢复到该条 before（磁盘不动），该条及其后所有条目移除。
+     回退本身以 major 记入撤销历史（Ctrl+Z 可恢复），source=revert 不再进时间线 */
+  const handleRevertInternalDiff = useCallback((path: string, entryId: string) => {
+    const entry = (internalDiffTimelinesRef.current[path] ?? []).find(e => e.id === entryId);
+    if (!entry) return;
+    setInternalDiffTimelines(prev => {
+      const kept = revertEntry(prev[path] ?? [], entryId);
+      const next = { ...prev };
+      if (kept.length > 0) next[path] = kept;
+      else delete next[path];
+      return next;
+    });
+    for (const t of tabsRef.current) {
+      if (t.path === path) recordContentChange(t.id, t.content, entry.before, true, 'revert');
+    }
+    setTabs(prev => prev.map(t => {
+      if (t.path !== path) return t;
+      return { ...t, content: entry.before, isDirty: entry.before !== t.originalContent || t.eol !== t.originalEol };
+    }));
+  }, [recordContentChange]);
 
 
   const openPathIntoTab = useCallback(async (path: string) => {
@@ -1051,7 +1123,7 @@ export default function App() {
 
   const updateTabContent = useCallback((tabId: string, content: string, opts?: { major?: boolean }) => {
     const tab = tabsRef.current.find(t => t.id === tabId);
-    if (tab) recordContentChange(tabId, tab.content, content, opts?.major);
+    if (tab) recordContentChange(tabId, tab.content, content, opts?.major, 'edit');
     setTabs(prev => prev.map(t => {
       if (t.id !== tabId) return t;
       /* eol 与磁盘原值不同同样构成未保存状态（保存时才真正换行符转换） */
@@ -1225,7 +1297,8 @@ export default function App() {
 
   const handleRevert = useCallback(() => {
     if (!activeTab) return;
-    updateTabContent(activeTab.id, activeTab.originalContent);
+    /* major：恢复到磁盘版本是离散动作，独立成撤销步骤与内部 diff 条目 */
+    updateTabContent(activeTab.id, activeTab.originalContent, { major: true });
   }, [activeTab, updateTabContent]);
 
   /* ---- 查找 / 替换 / 跳转到行（编辑器内浮层 + 预览查找，弹出在指针位置）---- */
@@ -1742,6 +1815,7 @@ export default function App() {
           onSave={handleSave}
           onSaveAs={handleSaveAs}
           onImportUrl={isTauri ? () => setUrlImportOpen(true) : undefined}
+          onOpenDiff={() => setDiffModalOpen(true)}
           onInsertTable={() => previewRef.current?.insertTable()}
           onInsertImage={() => previewRef.current?.openImageModal()}
           onCloseTab={() => activeTab && void closeTab(activeTab.id)}
@@ -1881,23 +1955,24 @@ export default function App() {
 
         <div className="flex-1" />
 
-        {/* 外部修改 Diff 入口：提醒跟随当前标签页——仅显示激活文件自己的未处理条数，
-            切换到其他标签页则换成该文件的提醒（无则隐藏）；其他文件的冲突仍以标签页橙点提示 */}
-        {activePendingDiffs > 0 && (
-          <button
-            onClick={() => setDiffModalOpen(true)}
-            className={cn(
-              "relative mr-2 p-1.5 rounded-md transition-colors shrink-0",
-              isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
-            )}
-            title={activeTab ? t('diff.entryTitle', { name: activeTab.title }) : t('diff.menuTitle')}
-          >
-            <GitCompare size={15} />
+        {/* Diff 时间线入口（外部修改 + 软件内编辑）：按钮常驻；
+            角标只统计外部修改——激活文件自己的未处理条数，切换标签页即切换提醒，
+            其他文件的冲突仍以标签页橙点提示。软件内记录不提醒，按需打开查看 */}
+        <button
+          onClick={() => setDiffModalOpen(true)}
+          className={cn(
+            "relative mr-2 p-1.5 rounded-md transition-colors shrink-0",
+            isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
+          )}
+          title={activeTab ? t('diff.entryTitle', { name: activeTab.title }) : t('diff.menuTitle')}
+        >
+          <GitCompare size={15} />
+          {activePendingDiffs > 0 && (
             <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-orange-500 text-white text-[9px] font-bold flex items-center justify-center leading-none">
               {activePendingDiffs > 99 ? '99+' : activePendingDiffs}
             </span>
-          </button>
-        )}
+          )}
+        </button>
 
         {/* Markdown 视图三档切换：编辑 | 分屏 | 预览（仅 markdown 文件显示） */}
         {isMarkdown && activeTab && (
@@ -2432,17 +2507,18 @@ export default function App() {
           </div>
         )}
 
-        {/* 外部修改 Diff 弹窗 */}
+        {/* Diff 时间线弹窗（外部修改 / 软件内编辑） */}
         {diffModalOpen && (
           <DiffModal
-            timelines={diffTimelines}
+            externalTimelines={diffTimelines}
+            internalTimelines={internalDiffTimelines}
             isDarkMode={isDarkMode}
             focusPath={activeTab?.path ?? null}
             maxEntries={maxDiffEntries}
             onChangeMaxEntries={(n) => setMaxDiffEntries(clampDiffEntries(n))}
             onClose={() => setDiffModalOpen(false)}
-            onAccept={handleAcceptDiff}
-            onRevert={handleRevertDiff}
+            onAccept={(kind, path, id) => (kind === 'external' ? handleAcceptDiff(path, id) : handleAcceptInternalDiff(path, id))}
+            onRevert={(kind, path, id) => (kind === 'external' ? void handleRevertDiff(path, id) : handleRevertInternalDiff(path, id))}
           />
         )}
 

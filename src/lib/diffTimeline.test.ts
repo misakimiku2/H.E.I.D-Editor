@@ -7,11 +7,13 @@ import {
   removeEntry,
   revertEntry,
   trimTimeline,
+  applyInternalEdit,
   clampDiffEntries,
   detectExternalChange,
   diffStats,
   buildDiffRows,
   type ExternalDiffEntry,
+  type InternalDiffEntry,
 } from './diffTimeline';
 
 /**
@@ -164,6 +166,60 @@ describe('revertEntry（撤销级联移除）', () => {
   it('id 不存在时原样返回', () => {
     const timeline = simulateChanges(['v0', 'v1']);
     expect(revertEntry(timeline, 'nope')).toEqual(timeline);
+  });
+});
+
+describe('applyInternalEdit（软件内编辑记录）', () => {
+  const T0 = 1_000;
+  const MAX = 5;
+
+  it('新步骤：追加条目，before 为变化前内容', () => {
+    let timeline = applyInternalEdit([], 'v0', 'v1', true, MAX, T0);
+    timeline = applyInternalEdit(timeline, 'v1', 'v2', true, MAX, T0 + 1);
+    expect(timeline).toHaveLength(2);
+    expect(timeline[0]).toMatchObject({ before: 'v0', after: 'v1', detectedAt: T0 });
+    expect(timeline[1]).toMatchObject({ before: 'v1', after: 'v2', detectedAt: T0 + 1 });
+  });
+
+  it('连击（非新步骤）：合并进最后一条的 after，before 不变', () => {
+    let timeline = applyInternalEdit([], 'v0', 'v1', true, MAX, T0);
+    timeline = applyInternalEdit(timeline, 'v1', 'v12', false, MAX, T0 + 1);
+    timeline = applyInternalEdit(timeline, 'v12', 'v123', false, MAX, T0 + 2);
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]).toMatchObject({ before: 'v0', after: 'v123' });
+  });
+
+  it('连击但最后一条 after 与基准衔接不上（外源跳变）→ 退化为追加', () => {
+    let timeline = applyInternalEdit([], 'v0', 'v1', true, MAX, T0);
+    // 期间内容被外部改写为 X，编辑器从 X 出发连击输入
+    timeline = applyInternalEdit(timeline, 'X', 'Xa', false, MAX, T0 + 1);
+    expect(timeline).toHaveLength(2);
+    expect(timeline[1]).toMatchObject({ before: 'X', after: 'Xa' });
+  });
+
+  it('连击但时间线为空（条目已被接受/撤销）→ 退化为追加，不丢变化', () => {
+    const timeline = applyInternalEdit([], 'v0', 'v1', false, MAX, T0);
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]).toMatchObject({ before: 'v0', after: 'v1' });
+  });
+
+  it('Ctrl+Z 回退后分支重输入：基准对不上，追加新条目保留旧历史', () => {
+    let timeline = applyInternalEdit([], 'A', 'B', true, MAX, T0);
+    // 回退到 A 后重输入为 C：before 应取实际内容 A，旧条目 A→B 保留
+    timeline = applyInternalEdit(timeline, 'A', 'C', false, MAX, T0 + 1);
+    expect(timeline).toHaveLength(2);
+    expect(timeline[0]).toMatchObject({ before: 'A', after: 'B' });
+    expect(timeline[1]).toMatchObject({ before: 'A', after: 'C' });
+  });
+
+  it('超出 maxEntries 时同样裁剪最旧', () => {
+    let timeline: InternalDiffEntry[] = [];
+    for (let i = 0; i < 8; i++) {
+      timeline = applyInternalEdit(timeline, `v${i}`, `v${i + 1}`, true, 3, T0 + i);
+    }
+    expect(timeline).toHaveLength(3);
+    expect(timeline[0]).toMatchObject({ before: 'v5', after: 'v6' });
+    expect(timeline[2]).toMatchObject({ before: 'v7', after: 'v8' });
   });
 });
 

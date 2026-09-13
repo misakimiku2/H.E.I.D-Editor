@@ -1,9 +1,11 @@
 import { diffLines } from 'diff';
 
 /**
- * 外部 Diff 时间线纯函数模块：
- * 追加、上限裁剪、接受移除、撤销级联移除、变更判定、增删统计与双栏对比行模型。
- * 时间线为链式结构：第 N 条的 before 等于第 N-1 条的 after。
+ * Diff 时间线纯函数模块（外部修改与软件内编辑两套时间线共用）：
+ * 追加、上限裁剪、接受移除、撤销级联移除、软件内编辑记录、
+ * 变更判定、增删统计与双栏对比行模型。
+ * 每条时间线为链式结构：第 N 条的 before 等于第 N-1 条的 after；
+ * 期间发生外源内容跳变（外部修改覆盖、撤销回退）时允许链断裂，条目自含快照不依赖链条。
  */
 
 /** 单文件外部修改时间线条目 */
@@ -16,6 +18,12 @@ export interface ExternalDiffEntry {
   /** 检测到的时间戳 */
   detectedAt: number;
 }
+
+/**
+ * 软件内编辑时间线条目：结构与外部条目一致（before/after 为编辑器内容快照），
+ * 但时间线独立存储、动作语义不同（撤销只回退编辑器内容，不写磁盘）。
+ */
+export type InternalDiffEntry = ExternalDiffEntry;
 
 /** 时间线保留条数的可调范围与默认值（用户可在 Diff 弹窗中设置） */
 export const MIN_DIFF_ENTRIES = 5;
@@ -54,6 +62,29 @@ export function appendEntry(
 /** 裁剪到 maxEntries 条（保留最新）；未超限时返回原数组引用 */
 export function trimTimeline(timeline: ExternalDiffEntry[], maxEntries: number): ExternalDiffEntry[] {
   return timeline.length > maxEntries ? timeline.slice(timeline.length - maxEntries) : timeline;
+}
+
+/**
+ * 记录一次软件内编辑。newStep 由调用方的撤销历史合并判定给出
+ * （major 动作或超出连击间隔），条目边界与 Ctrl+Z 步骤同拍推进：
+ * 新步骤追加条目；连击合并进最后一条的 after（条目代表一段连续输入）。
+ * 连击但最后一条的 after 与当前步骤基准（before）衔接不上时——
+ * 期间发生过外部修改覆盖、Ctrl+Z 回退分支或最后一条已被清理——退化为追加，
+ * 避免把外源跳变混进旧条目的对比里。
+ */
+export function applyInternalEdit(
+  timeline: InternalDiffEntry[],
+  before: string,
+  after: string,
+  newStep: boolean,
+  maxEntries: number = DEFAULT_DIFF_ENTRIES,
+  now: number = Date.now(),
+): InternalDiffEntry[] {
+  const last = timeline[timeline.length - 1];
+  if (!newStep && last && last.after === before) {
+    return [...timeline.slice(0, -1), { ...last, after, detectedAt: now }];
+  }
+  return appendEntry(timeline, before, after, now, maxEntries);
 }
 
 /** 接受：仅移除该条目，其余不动 */

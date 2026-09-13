@@ -303,6 +303,7 @@ const LANGUAGE_LOADERS: Record<string, LanguageLoader> = {
   sql: async () => (await import('@codemirror/lang-sql')).sql(),
   yaml: async () => (await import('@codemirror/lang-yaml')).yaml(),
   xml: async () => (await import('@codemirror/lang-xml')).xml(),
+  svg: async () => (await import('@codemirror/lang-xml')).xml(),
   php: async () => (await import('@codemirror/lang-php')).php(),
   markdown: async () => {
     const m = await import('@codemirror/lang-markdown');
@@ -333,7 +334,7 @@ export const LANGUAGE_LABELS: Record<string, string> = {
   typescript: 'TypeScript', javascript: 'JavaScript', python: 'Python',
   rust: 'Rust', go: 'Go', java: 'Java', c: 'C', cpp: 'C++',
   csharp: 'C#', ruby: 'Ruby', html: 'HTML', css: 'CSS',
-  json: 'JSON', yaml: 'YAML', xml: 'XML', markdown: 'Markdown',
+  json: 'JSON', yaml: 'YAML', xml: 'XML', svg: 'SVG', markdown: 'Markdown',
   bash: 'Shell', sql: 'SQL', plaintext: 'Text', toml: 'TOML',
   ini: 'INI', dockerfile: 'Dockerfile', makefile: 'Makefile',
   php: 'PHP', swift: 'Swift', kotlin: 'Kotlin', scala: 'Scala',
@@ -349,7 +350,7 @@ export function detectLanguageFromPath(path: string): string {
     c: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', h: 'c', hpp: 'cpp',
     cs: 'csharp', rb: 'ruby', html: 'html', htm: 'html',
     css: 'css', scss: 'scss', less: 'less', json: 'json',
-    yaml: 'yaml', yml: 'yaml', xml: 'xml', md: 'markdown',
+    yaml: 'yaml', yml: 'yaml', xml: 'xml', svg: 'svg', md: 'markdown',
     sh: 'bash', bash: 'bash', sql: 'sql', toml: 'toml',
     ini: 'ini', dockerfile: 'dockerfile', makefile: 'makefile',
     php: 'php', swift: 'swift', kt: 'kotlin', kts: 'kotlin',
