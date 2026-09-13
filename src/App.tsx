@@ -2547,7 +2547,7 @@ export default function App() {
           ] as const).map(({ icon, label, action, disabled }) => (
             <button
               key={label}
-              onClick={action}
+              onClick={() => { setTabMenu(null); action(); }}
               disabled={disabled}
               className={cn(
                 "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40 disabled:pointer-events-none",
