@@ -499,6 +499,7 @@ interface PendingDiscardConfirm {
 
 export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (IS_ANDROID_APP) return 'system'; /* 安卓无应用内主题：始终跟随系统（键盘等系统界面不可控） */
     const saved = localStorage.getItem('heid-theme-mode');
     return saved === 'light' || saved === 'dark' ? saved : 'system';
   });
@@ -1723,8 +1724,6 @@ export default function App() {
           isMarkdown={!!isMarkdown}
           saving={saving}
           tabCount={tabs.length}
-          themeMode={themeMode}
-          onThemeMode={setThemeMode}
           onOpenTabs={() => setTabSheetOpen(true)}
           onNew={handleNewFile}
           onOpen={handleOpenFile}
@@ -1923,7 +1922,8 @@ export default function App() {
           </div>
         )}
 
-        {/* 主题三档切换：浅色 | 跟随系统 | 深色 */}
+        {/* 主题三档切换：浅色 | 跟随系统 | 深色（安卓始终跟随系统，无此入口） */}
+        {!IS_ANDROID_APP && (
         <div
           role="group"
           aria-label={t('theme.modeAria')}
@@ -1955,6 +1955,7 @@ export default function App() {
             );
           })}
         </div>
+        )}
 
         {menuOpen && (
           <div className={cn(

@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   FileText, FolderOpen, Save, SaveAll, Plus, MoreVertical,
-  Sun, SunMoon, Moon, Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2,
+  Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useT } from '../../lib/i18nContext';
-
-type ThemeMode = 'light' | 'dark' | 'system';
 
 interface TopAppBarProps {
   isDarkMode: boolean;
@@ -15,8 +13,6 @@ interface TopAppBarProps {
   isMarkdown: boolean;
   saving: boolean;
   tabCount: number;
-  themeMode: ThemeMode;
-  onThemeMode: (mode: ThemeMode) => void;
   onOpenTabs: () => void;
   onNew: () => void;
   onOpen: () => void;
@@ -38,8 +34,8 @@ interface TopAppBarProps {
  * P2 计划：溢出菜单按 isMarkdown 增加「插入图片/插入表格」入口。
  */
 export function TopAppBar({
-  isDarkMode, title, isDirty, isMarkdown, saving, tabCount, themeMode,
-  onThemeMode, onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage, onImportUrl,
+  isDarkMode, title, isDirty, isMarkdown, saving, tabCount,
+  onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage, onImportUrl,
   onCloseTab, onSettings, onShortcuts, onAbout,
 }: TopAppBarProps) {
   const t = useT();
@@ -157,35 +153,6 @@ export function TopAppBar({
                 {menuItem(<ImageIcon size={16} className="shrink-0" />, t('tools.insertImage'), onInsertImage)}
               </>
             )}
-            <div className={cn('h-px mx-3 my-1', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
-            {/* 主题三档 */}
-            <div className={cn('px-4 py-1 text-[11px]', isDarkMode ? 'text-zinc-500' : 'text-zinc-400')}>
-              {t('theme.label')}
-            </div>
-            <div className="px-3 pb-1.5 flex items-center gap-2">
-              {([
-                { mode: 'light', icon: Sun, label: t('theme.light') },
-                { mode: 'system', icon: SunMoon, label: t('theme.system') },
-                { mode: 'dark', icon: Moon, label: t('theme.dark') },
-              ] as const).map(({ mode: m, icon: Icon, label }) => {
-                const active = themeMode === m;
-                return (
-                  <button
-                    key={m}
-                    onClick={() => onThemeMode(m)}
-                    className={cn(
-                      'flex-1 min-h-[40px] rounded-md text-[11px] font-medium flex flex-col items-center justify-center gap-0.5 transition-colors',
-                      active
-                        ? (isDarkMode ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-200 text-zinc-700')
-                        : (isDarkMode ? 'bg-zinc-700/50 text-zinc-400' : 'bg-zinc-100 text-zinc-500')
-                    )}
-                  >
-                    <Icon size={15} />
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
             <div className={cn('h-px mx-3 my-1', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
             {menuItem(<X size={16} className="shrink-0" />, t('menu.closeCurrentTab'), onCloseTab)}
             {menuItem(<Settings size={16} className="shrink-0" />, t('menu.settings'), onSettings)}
