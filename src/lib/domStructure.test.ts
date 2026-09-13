@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import TurndownService from 'turndown';
 import * as turndownPluginGfm from 'turndown-plugin-gfm';
 import { structuralizeDoc, normalizeTables, extractMainContent, collectTabGroups } from './domStructure';
-import { importFromHtml, importFromFetched, markdownCoverage, type UrlImportResult } from './urlImport';
+import { importFromHtml, importFromFetched, insertTabMarkers, markdownCoverage, type UrlImportResult } from './urlImport';
 
 function parse(html: string): Document {
   return new DOMParser().parseFromString(html, 'text/html');
@@ -210,14 +210,53 @@ describe('structuralizeDoc：标签组 + 图片面板 → tab 标记（R8）', (
   /* 真实形态取自库街区角色页：.role-tag 标签组 + .role-images 单图面板组 */
   const TABS_FIXTURE = `<div id="root-frag"><div class="component-content-inner"><div class="role-tag"><div class="role-tag-item role-tag-active">基础信息</div><div class="role-tag-item">编队立绘</div><div class="role-tag-item">海报立绘</div></div><div class="role-images"><div class="figure figure-visible"><img src="a.png"></div><div class="figure"><img src="b.png"></div><div class="figure"><img src="c.png"></div></div></div></div>`;
 
+  /* 库街区线上实际 DOM：标签子项内层还有文本叶 + 空装饰叶两层结构 */
+  const TABS_FIXTURE_NESTED = `<div id="root-frag"><div class="component-content-inner"><div class="role-images"><div class="figure figure-visible first-figure"><img src="a.png"></div><div class="figure"><img src="b.png"></div><div class="figure"><img src="c.png"></div></div><div class="role-profile"><div>洛瑟菈</div></div><div class="role-tag"><div class="mb-12 role-tag-item role-tag-active"><div class="role-tag-item-inner text-ellipsis">基础信息</div><div class="role-tag-item-extra"></div></div><div class="mb-12 role-tag-item"><div class="role-tag-item-inner text-ellipsis">编队立绘</div><div class="role-tag-item-extra"></div></div><div class="mb-12 role-tag-item"><div class="role-tag-item-inner text-ellipsis">海报立绘</div><div class="role-tag-item-extra"></div></div></div></div></div>`;
+
   it('同子树内等量的标签组与单图面板组，收集（标签, 图片src）配对', () => {
     const doc = parse(TABS_FIXTURE);
     structuralizeDoc(doc);
     expect(collectTabGroups(doc)).toEqual([[
-      { label: '基础信息', imgSrc: 'a.png' },
-      { label: '编队立绘', imgSrc: 'b.png' },
-      { label: '海报立绘', imgSrc: 'c.png' },
+      { label: '基础信息', imgSrc: 'a.png', textAnchor: '' },
+      { label: '编队立绘', imgSrc: 'b.png', textAnchor: '' },
+      { label: '海报立绘', imgSrc: 'c.png', textAnchor: '' },
     ]]);
+  });
+
+  it('标签子项含内层装饰结构（库街区线上形态）同样识别', () => {
+    const doc = parse(TABS_FIXTURE_NESTED);
+    structuralizeDoc(doc);
+    expect(collectTabGroups(doc)).toEqual([[
+      { label: '基础信息', imgSrc: 'a.png', textAnchor: '' },
+      { label: '编队立绘', imgSrc: 'b.png', textAnchor: '' },
+      { label: '海报立绘', imgSrc: 'c.png', textAnchor: '' },
+    ]]);
+  });
+
+  it('R9 内容面板盒：恰好一个可见、其余内联隐藏，配对收集面板首文本锚', () => {
+    /* 真实形态取自库街区「技能介绍」：.tabs 标签盒 + tabs-component 面板容器
+       （单子链下钻到 inner，7 个 component-content-text，仅第一个可见） */
+    const html = `<div id="root-frag"><div class="component-wrapper"><div class="component-title">技能介绍</div><div class="tab-wrapper"><div class="tabs"><div class="tab tab-active">常态攻击</div><div class="tab">共鸣技能</div></div></div><div class="component-content component-content-tabs-component"><div class="component-content-inner"><div class="component-content-text"><p><img src="icon-a.png">抓拍</p><p>进行最多3段的连续攻击，造成冷凝伤害。</p></div><div class="component-content-text" style="display: none;"><p><img src="icon-b.png">幻象定帧</p><p>牵引周围的目标，造成冷凝伤害。</p></div></div></div></div></div>`;
+    const doc = parse(html);
+    structuralizeDoc(doc);
+    expect(collectTabGroups(doc)).toEqual([[
+      { label: '常态攻击', imgSrc: 'icon-a.png', textAnchor: '抓拍' },
+      { label: '共鸣技能', imgSrc: 'icon-b.png', textAnchor: '幻象定帧' },
+    ]]);
+  });
+
+  it('R9 多个子元素都可见的容器不是内容面板盒', () => {
+    const html = `<div id="root-frag"><div class="wrap"><div class="tabs"><div class="tab">甲</div><div class="tab">乙</div></div><div class="panels"><div><p>第一段可见内容，足够长。</p></div><div><p>第二段可见内容，足够长。</p></div></div></div></div>`;
+    const doc = parse(html);
+    structuralizeDoc(doc);
+    expect(collectTabGroups(doc)).toEqual([]);
+  });
+
+  it('标签子项夹带链接/按钮/图片时不收集', () => {
+    const html = `<div id="root-frag"><div class="wrap"><div class="tags"><a href="#1">甲</a><span>乙</span></div><div class="panels"><div><img src="a.png"></div><div><img src="b.png"></div></div></div></div>`;
+    const doc = parse(html);
+    structuralizeDoc(doc);
+    expect(collectTabGroups(doc)).toEqual([]);
   });
 
   it('数量不等的标签组与图片面板不收集', () => {
@@ -227,13 +266,63 @@ describe('structuralizeDoc：标签组 + 图片面板 → tab 标记（R8）', (
     expect(collectTabGroups(doc)).toEqual([]);
   });
 
-  it('整链贯通：配对在 markdown 转换后按图片 src 回插 tab 注释', async () => {
+  it('整链贯通：配对在 markdown 转换后按图片 src 回插 tab 注释，组尾带结束标记', async () => {
     const page = `<!DOCTYPE html><html><head><title>干员</title></head><body>${TABS_FIXTURE}</body></html>`;
     const result = await importFromHtml(page, URL);
     expect(result.markdown).toContain('<!-- tab:基础信息 -->');
     expect(result.markdown).toContain('<!-- tab:编队立绘 -->');
     expect(result.markdown).toContain('<!-- tab:海报立绘 -->');
     expect(result.markdown).toContain('a.png');
+    /* 页签区块只包住图片组，结束标记后不再有页签内容 */
+    const endIdx = result.markdown.indexOf('<!-- /tab -->');
+    expect(endIdx).toBeGreaterThan(0);
+    expect(result.markdown.slice(endIdx)).not.toContain('<!-- tab:');
+  });
+});
+
+describe('insertTabMarkers：页签标记回插', () => {
+  it('每组标记包住图片组，组尾回插结束标记；其后正文不受影响', () => {
+    const md = '前言\n\n![](https://x/a.png)\n\n![](https://x/b.png)\n\n正文开始';
+    const out = insertTabMarkers(md, [[
+      { label: '甲', imgSrc: 'https://x/a.png', textAnchor: '' },
+      { label: '乙', imgSrc: 'https://x/b.png', textAnchor: '' },
+    ]]);
+    expect(out).toBe(
+      '前言\n\n<!-- tab:甲 -->\n\n![](https://x/a.png)\n\n<!-- tab:乙 -->\n\n![](https://x/b.png)\n\n<!-- /tab -->\n\n正文开始',
+    );
+  });
+
+  it('图片不在 markdown 中（被提取丢弃）时跳过，不产生孤立标记', () => {
+    const md = '正文，没有图片';
+    const out = insertTabMarkers(md, [[
+      { label: '甲', imgSrc: 'https://x/missing.png', textAnchor: '' },
+    ]]);
+    expect(out).toBe(md);
+  });
+
+  it('文本面板组按面板首文本锚回插；任一锚点缺失则整组放弃', () => {
+    const md = '常态攻击\n共鸣技能\n\n抓拍\n普攻描述\n\n幻象定帧\n牵引描述';
+    const out = insertTabMarkers(md, [[
+      { label: '常态攻击', imgSrc: '', textAnchor: '抓拍' },
+      { label: '共鸣技能', imgSrc: '', textAnchor: '幻象定帧' },
+    ]]);
+    expect(out).toContain('<!-- tab:常态攻击 -->');
+    expect(out).toContain('<!-- tab:共鸣技能 -->');
+    expect(out).toContain('<!-- /tab -->');
+    const noMatch = insertTabMarkers('只有一段', [[
+      { label: '常态攻击', imgSrc: '', textAnchor: '抓拍' },
+      { label: '共鸣技能', imgSrc: '', textAnchor: '幻象定帧' },
+    ]]);
+    expect(noMatch).toBe('只有一段');
+  });
+
+  it('标签与图片在 md 中顺序相反时，整组放弃（不产生半残页签）', () => {
+    const md = '![](https://x/b.png)\n\n![](https://x/a.png)';
+    const out = insertTabMarkers(md, [[
+      { label: '甲', imgSrc: 'https://x/a.png', textAnchor: '' },
+      { label: '乙', imgSrc: 'https://x/b.png', textAnchor: '' },
+    ]]);
+    expect(out).toBe(md);
   });
 });
 

@@ -16,16 +16,68 @@ use tauri::Manager;
 
 /// 隐藏渲染窗口的固定标签（capability 仅对此标签授权）
 const SCRAPER_LABEL: &str = "heid-scraper";
-/// 渲染等待总超时：初始稳定 ~12s + 点击遍历 8s + 二次稳定 4s + 网络余量
-const RENDER_TIMEOUT: Duration = Duration::from_secs(42);
+/// 渲染等待总超时：初始稳定 ~12s + 点击遍历 10s + 二次稳定 4s
+/// + 播放遍历 ≤60s（逐条等文本，连续 8 条失败即早退）+ 三次稳定 ~3s + 余量
+const RENDER_TIMEOUT: Duration = Duration::from_secs(100);
 /// 回传 HTML 大小上限（16MB）
 const MAX_HTML_BYTES: usize = 16 * 1024 * 1024;
+
+/// 文档启动时注入的响应录制 + 全程静音脚本：包一层 fetch/XHR，把 JSON 响应
+/// 暂存到 window.__HEID_NET__（ trackers 除外），供 SETTLE_JS 提取「点击播放
+/// 才注入」的站点数据（如库街区语音台词）；同时以捕获阶段的 play 监听把
+/// 所有媒体静音——抓取是无人值守的，不该出声。
+const INIT_JS: &str = r#"(function () {
+  if (window.__HEID_NET_INIT__) return;
+  window.__HEID_NET_INIT__ = true;
+  window.__HEID_NET__ = [];
+  /* 静音一切媒体（播放事件不冒泡，但捕获阶段监听可命中） */
+  var mute = function (e) { try { if (e && e.target && 'muted' in e.target) e.target.muted = true; } catch (err) {} };
+  document.addEventListener('play', mute, true);
+  document.addEventListener('playing', mute, true);
+  var DENY = /datareceiver|sdklog|sentry|beacon|track|analytics|\/ip\b/i;
+  var push = function (url, body) {
+    try {
+      url = String(url || '');
+      if (!url || !body || body.length < 64 || DENY.test(url)) return;
+      if (window.__HEID_NET__.length >= 24) return;
+      window.__HEID_NET__.push({ url: url.slice(0, 300), body: String(body).slice(0, 12582912) });
+    } catch (e) {}
+  };
+  var origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = function () {
+      var p = origFetch.apply(this, arguments);
+      try {
+        p.then(function (res) {
+          try { res.clone().text().then(function (t) { push(res.url, t); }).catch(function () {}); } catch (e) {}
+        }).catch(function () {});
+      } catch (e) {}
+      return p;
+    };
+  }
+  var XO = window.XMLHttpRequest;
+  if (XO && XO.prototype) {
+    var oOpen = XO.prototype.open, oSend = XO.prototype.send;
+    XO.prototype.open = function (m, u) { this.__heidUrl = u; return oOpen.apply(this, arguments); };
+    XO.prototype.send = function () {
+      var xhr = this;
+      xhr.addEventListener('load', function () {
+        try {
+          if (xhr.responseType === '' || xhr.responseType === 'text') push(xhr.__heidUrl, xhr.responseText);
+        } catch (e) {}
+      });
+      return oSend.apply(this, arguments);
+    };
+  }
+})()"#;
 
 /// 页面内注入的稳定检测 + 懒加载展开脚本：
 /// 1) DOM 长度连续 5×500ms 不变即视为初始渲染完成（24 次轮询硬上限）；
 /// 2) 点击遍历短文本叶子元素，展开游戏 wiki 常见的「点击后才加载」的面板
 ///    （语音/技能/天赋等）。关键词命中者优先；误触 SPA 路由时用 history.back()
-///    恢复后继续；每次点击后快照，最终取可见文本最长的一份回传。
+///    恢复后继续；每次点击后快照，最终取可见文本最长的一份回传；
+/// 3) 录制响应中按「DOM 条目标题 → 同对象长文本」配对注入语音台词，命中则
+///    跳过播放遍历；否则点击播放控件逐条收集。
 const SETTLE_JS: &str = r#"(function () {
   if (window.__HEID_SETTLE__) return;
   window.__HEID_SETTLE__ = true;
@@ -105,42 +157,199 @@ const SETTLE_JS: &str = r#"(function () {
   var send = function (html, text) {
     try { window.__TAURI_INTERNALS__.invoke('render_result', { html: html, text: text }); } catch (e) {}
   };
-  /* 播放类站点（如库街区语音）的文案在点击播放后才注入且逐条替换，
-     每次点击后把出现的文案克隆保存进所属条目，最终 DOM 即含全部文本 */
+  /* 播放类站点（如库街区语音）的台词在点击播放控件后才注入到
+     .voice-item-content（class 含 item-content），并按条目常驻。实测（库街区）：
+     1) 只有叶子图标按钮是真正的播放控件，容器/整行点击无效；
+     2) 往条目里克隆的副本会被前端框架下一次渲染清掉——无需克隆，文本自己会留。
+     策略：优先走 injectFromNet 接口注入（命中即跳过本遍历）；点击遍历全程静音
+     （初始化脚本已在 play 事件层静音），逐条点击→轮询等新文案入账（≤1.2s），
+     连续 8 条失败早退；结束后把被站点收起的文案补回原条目，立即快照。 */
+  var muteAll = function () {
+    try {
+      var au = document.querySelectorAll('audio, video');
+      for (var m = 0; m < au.length; m++) { au[m].muted = true; au[m].volume = 0; }
+    } catch (e) {}
+  };
+  var savedTexts = {};
+  var savedEntries = [];
   var saveInjections = function () {
-    var nodes = document.querySelectorAll('[class*="item-content"]');
-    for (var k = 0; k < nodes.length; k++) {
-      var c = nodes[k];
-      if (c.getAttribute('data-heid-saved')) continue;
-      var host = c.parentElement;
-      if (!host) continue;
-      c.setAttribute('data-heid-saved', '1');
-      var clone = c.cloneNode(true);
-      clone.setAttribute('data-heid-saved', '1');
-      host.appendChild(clone);
+    try {
+      var nodes = document.querySelectorAll('[class*="item-content"]');
+      for (var k = 0; k < nodes.length; k++) {
+        var c = nodes[k];
+        var text = (c.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text.length < 2 || savedTexts[text]) continue;
+        savedTexts[text] = 1;
+        savedEntries.push({ host: c.parentElement, html: c.outerHTML });
+      }
+    } catch (e) {}
+  };
+  var restoreInjections = function () {
+    for (var k = 0; k < savedEntries.length; k++) {
+      var e = savedEntries[k];
+      try {
+        if (!e.host || !e.host.isConnected) continue;
+        if (e.host.querySelector('[class*="item-content"]')) continue;
+        var wrap = document.createElement('div');
+        wrap.innerHTML = e.html;
+        e.host.appendChild(wrap.firstChild);
+      } catch (err) {}
     }
   };
   var clickPlayers = function () {
     return new Promise(function (done) {
-      var deadline = Date.now() + 10000;
+      var deadline = Date.now() + 60000;
       var players = [];
       try {
-        var all = document.body ? document.body.querySelectorAll('[class*="player"], [class*="audio"]') : [];
+        var all = document.body
+          ? document.body.querySelectorAll('[class*="player"], [class*="audio"], [class*="voice"], [class*="play"]')
+          : [];
         for (var k = 0; k < all.length; k++) {
-          if (!all[k].offsetParent) continue;
-          players.push(all[k]);
+          var el = all[k];
+          if (el.childElementCount !== 0) continue;
+          if (/^(img|svg)$/i.test(el.tagName)) continue;
+          /* 容器词类名的空叶子（如 voice-item-input-container）不是播放控件 */
+          if (/(input|container|content|wrapper|panel)/i.test(el.className || '')) continue;
+          var t3 = (el.textContent || '').trim();
+          if (t3.length > 4) continue;
+          if (!el.getClientRects || !el.getClientRects().length) continue;
+          /* 语音/音频祖先内的叶子优先（库街区真正的按钮是 .ico-voice-btn，
+             整行/容器点击无效），其余媒体叶子兜底 */
+          var inMedia = el.closest('[class*="voice"], [class*="audio"], [class*="player"], [class*="play"]');
+          players.push({ el: el, pri: (inMedia ? 0 : 2) + (t3.length === 0 ? 0 : 1) });
         }
       } catch (e) {}
-      players = players.slice(0, 20);
-      var idx = 0;
+      players.sort(function (a, b) { return a.pri - b.pri; });
+      players = players.slice(0, 80);
+      var idx = 0, misses = 0;
       var step = function () {
-        if (idx >= players.length || Date.now() > deadline) { saveInjections(); done(); return; }
-        try { players[idx].click(); } catch (e) {}
+        if (idx >= players.length || Date.now() > deadline || misses >= 8) {
+          saveInjections();
+          restoreInjections();
+          snapshot();
+          done(); return;
+        }
+        var before = savedEntries.length;
+        try { players[idx].el.click(); } catch (e) {}
         idx++;
-        setTimeout(function () { try { saveInjections(); } catch (e) {} step(); }, 500);
+        var waited = 0;
+        var poll = function () {
+          saveInjections();
+          if (savedEntries.length > before) {
+            /* 文本已出现：静掉这条的余音，稍候点下一条 */
+            misses = 0;
+            muteAll();
+            setTimeout(step, 500);
+            return;
+          }
+          waited += 100;
+          if (waited < 1200 && Date.now() <= deadline) { setTimeout(poll, 100); return; }
+          misses++;
+          muteAll();
+          setTimeout(step, 400);
+        };
+        poll();
       };
       step();
     });
+  };
+  /* 第三层兜底：读取初始化脚本录制的接口响应（window.__HEID_NET__），
+     在 JSON（含嵌套 JSON 字符串）里按「字符串值恰好等于 DOM 条目标题 →
+     同对象内最长的其他字符串作为内容」配对，把台词直接注入条目 DOM。
+     标题采集限定在类名含 voice/audio 的子树内，避免误配正文短语。
+     返回成功注入的条数。 */
+  var injectFromNet = function () {
+    var stash = window.__HEID_NET__;
+    if (!stash || !stash.length) return 0;
+    var titles = {};
+    var norm = function (s) { return String(s).replace(/\s+/g, ''); };
+    try {
+      var scope = document.body.querySelectorAll('[class*="voice"] *, [class*="audio"] *');
+      for (var k = 0; k < scope.length; k++) {
+        var el = scope[k];
+        if (el.childElementCount !== 0) continue;
+        var t = (el.textContent || '').trim();
+        if (t.length < 2 || t.length > 20) continue;
+        var nt = norm(t);
+        if (!titles[nt]) titles[nt] = { el: el, text: t };
+      }
+    } catch (e) { return 0; }
+    var titleKeys = Object.keys(titles);
+    if (!titleKeys.length) return 0;
+    var found = {};
+    var seen = 0;
+    var walk = function (node, depth) {
+      if (seen > 2000000 || depth > 24) return;
+      if (typeof node === 'string') {
+        if (node.length > 2 && node.length < 12582912 && (node.charAt(0) === '{' || node.charAt(0) === '[')) {
+          try { walk(JSON.parse(node), depth + 1); } catch (e) {}
+        }
+        return;
+      }
+      if (!node || typeof node !== 'object') return;
+      seen++;
+      var strs = [];
+      for (var key in node) {
+        if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+        var v = node[key];
+        if (typeof v === 'string') strs.push(v);
+        else if (v && typeof v === 'object') walk(v, depth + 1);
+      }
+      for (var i = 0; i < strs.length; i++) {
+        var s = strs[i];
+        /* 字段值本身可能是嵌套 JSON 字符串（如库街区 data.content 组件树） */
+        if (s.length > 2 && s.length < 12582912 && (s.charAt(0) === '{' || s.charAt(0) === '[')) {
+          try { walk(JSON.parse(s), depth + 1); } catch (e) {}
+        }
+        var bucket = titles[norm(s)];
+        if (!bucket || found[bucket.text]) continue;
+        var best = '';
+        for (var j = 0; j < strs.length; j++) {
+          if (j !== i && strs[j].length > best.length && strs[j].length >= 8 && strs[j].length <= 2000) best = strs[j];
+        }
+        if (best) found[bucket.text] = best;
+      }
+    };
+    for (var n = 0; n < stash.length; n++) {
+      try { walk(JSON.parse(stash[n].body), 0); } catch (e) {}
+    }
+    /* 原文兜底：JSON 解析失败（如响应被截断）时，直接在原文里找标题，
+       其后取最长 CJK 连续段作为台词（转义包裹的值也能命中） */
+    for (var tk = 0; tk < titleKeys.length; tk++) {
+      var text = titles[titleKeys[tk]].text;
+      if (found[text]) continue;
+      var hit = null;
+      for (var n2 = 0; n2 < stash.length && !hit; n2++) {
+        var at = stash[n2].body.indexOf(text);
+        if (at >= 0) hit = { body: stash[n2].body, at: at };
+      }
+      if (!hit) continue;
+      var seg = hit.body.substr(hit.at + text.length, 900);
+      var cjk = seg.match(/[\u3400-\u9fff][\u3400-\u9fff\u3040-\u30ff\uf900-\ufaff\uff00-\uffef，。！？…、：；""''（）\sA-Za-z0-9%~％+*/·—-]{7,}/);
+      if (cjk && cjk[0].length >= 8) {
+        found[text] = cjk[0].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\s+$/, '');
+      }
+    }
+    var injected = 0;
+    for (var title in found) {
+      try {
+        if (!Object.prototype.hasOwnProperty.call(found, title)) continue;
+        var el2 = titles[norm(title)].el;
+        var root = el2;
+        for (var u = 0; u < 5 && root; u++) {
+          if (/(item|row|list|card)/i.test(String(root.className || ''))) break;
+          root = root.parentElement;
+        }
+        var target = root || el2.parentElement;
+        if (!target || target.querySelector('[class*="item-content"]')) continue;
+        var div = document.createElement('div');
+        div.className = 'voice-item-content';
+        div.textContent = found[title];
+        target.appendChild(div);
+        injected++;
+      } catch (e) {}
+    }
+    return injected;
   };
   var run = async function () {
     await stable(5, 24, 500);
@@ -148,7 +357,11 @@ const SETTLE_JS: &str = r#"(function () {
     await clickThrough();
     await stable(3, 10, 400);
     snapshot();
-    await clickPlayers();
+    var injected = 0;
+    try { injected = injectFromNet(); } catch (e) {}
+    if (injected === 0) {
+      await clickPlayers();
+    }
     await stable(2, 8, 400);
     snapshot();
     send(best ? best.html : '', best ? best.text : '');
@@ -202,6 +415,7 @@ pub async fn render_page(app: tauri::AppHandle, url: String) -> Result<(String, 
                 .visible(false)
                 .skip_taskbar(true)
                 .focused(false)
+                .initialization_script(INIT_JS)
                 .on_navigation(move |u| {
                     if let Ok(mut f) = final_url_cb.lock() {
                         *f = u.clone();
@@ -275,5 +489,25 @@ mod tests {
         assert!(super::SETTLE_JS.contains("__HEID_SETTLE__"));
         assert!(super::SETTLE_JS.contains("render_result"));
         assert!(super::SETTLE_JS.contains("outerHTML"));
+        // 播放遍历必须只点叶子控件（容器点击无效）并在收尾补回被收起的文案
+        assert!(super::SETTLE_JS.contains("childElementCount"));
+        assert!(super::SETTLE_JS.contains("restoreInjections"));
+        // 接口录制兜底：读到录制响应即可注入台词并跳过播放遍历；
+        // 原文兜底负责 JSON 解析失败（截断响应）时的台词配对
+        assert!(super::SETTLE_JS.contains("__HEID_NET__"));
+        assert!(super::SETTLE_JS.contains("injectFromNet"));
+        assert!(super::SETTLE_JS.contains("body.indexOf(text)"));
+    }
+
+    #[test]
+    fn init_js_records_responses() {
+        // 初始化脚本必须在文档启动前包好 fetch/XHR，且自带重入保护；
+        // 并在播放事件层全程静音（抓取不该出声）
+        assert!(super::INIT_JS.contains("__HEID_NET_INIT__"));
+        assert!(super::INIT_JS.contains("origFetch.apply"));
+        assert!(super::INIT_JS.contains("XMLHttpRequest"));
+        assert!(super::INIT_JS.contains("responseText"));
+        assert!(super::INIT_JS.contains("addEventListener('play'"));
+        assert!(super::INIT_JS.contains("muted = true"));
     }
 }

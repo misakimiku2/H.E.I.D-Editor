@@ -259,15 +259,21 @@ export function extractMainContent(doc: Document): string {
 
 export interface TabGroupEntry {
   label: string;
+  /** 图片面板锚：面板首图的 src（图片组） */
   imgSrc: string;
+  /** 文本面板锚：面板首个短文本叶（技能/材料等内容组），用于在 markdown 中定位 */
+  textAnchor: string;
 }
 
 /**
- * R8：页签图组识别（库街区等站点用「标签组 + 等量单图面板」做立绘/资料切换，
- * 平铺提取后图片与标签的关系丢失）。同子树内找到「全部子元素为短文本叶」的
- * 标签容器，且 4 层祖先内存在「全部子元素为单图无文本面板」的等量容器时，
- * 收集（标签, 图片src）配对；调用方在 markdown 转换后按图片 src 回插
- * `<!-- tab:标签 -->` 标记，预览端还原为切换页签。
+ * R8/R9：页签组识别（库街区等站点用「标签组 + 等量内容面板」做立绘/资料/技能
+ * 切换，平铺提取后图片、文本与标签的对应关系丢失）。两种面板形态：
+ *   R8 图片面板盒——全部子元素恰为「单图无文本」；
+ *   R9 内容面板盒——2~8 个子元素都有实际内容，且恰好一个可见、
+ *      其余为内联 display:none（Vue v-show 式隐藏，序列化 HTML 可读）。
+ * 面板盒允许沿单子链下钻找到（库街区面板外包一层 component-content-inner）。
+ * 同子树内标签盒子项数与面板盒子元素数一致时，收集（标签, 锚点）配对；
+ * 调用方在 markdown 转换后按锚点回插 `<!-- tab:标签 -->` 标记。
  * 注意：只读不改 DOM——defuddle 会剥掉注释与自定义属性，标记必须在
  * markdown 层回插（见 urlImport.insertTabMarkers）。
  */
@@ -276,9 +282,15 @@ export function collectTabGroups(doc: Document): TabGroupEntry[][] {
   const isLabelBox = (el: Element): boolean => {
     const n = el.childElementCount;
     if (n < 2 || n > 8) return false;
-    return Array.from(el.children).every(c =>
-      c.childElementCount === 0 && normText(c).length >= 1 && normText(c).length <= 20,
-    );
+    /* 标签子项允许少量结构性子元素（库街区 .role-tag-item = 文本叶 + 空装饰叶），
+       但子项自身及其后代不得夹带图片/链接/按钮，且合并文本须短——否则视为正文 */
+    return Array.from(el.children).every(c => {
+      if (/^(img|svg|a|button)$/i.test(c.tagName)) return false;
+      if (c.querySelector('img, svg, a, button')) return false;
+      if (c.childElementCount > 4) return false;
+      const t = normText(c);
+      return t.length >= 1 && t.length <= 20;
+    });
   };
   const isImagePanelBox = (el: Element): boolean => {
     const n = el.childElementCount;
@@ -288,6 +300,46 @@ export function collectTabGroups(doc: Document): TabGroupEntry[][] {
       return imgs.length === 1 && normText(c).length === 0;
     });
   };
+  const isInlineHidden = (el: Element): boolean =>
+    /(^|;)\s*display\s*:\s*none/i.test(el.getAttribute('style') ?? '');
+  const hasRealContent = (el: Element): boolean =>
+    normText(el).length >= 6 || el.querySelector('img, table') !== null;
+  const isContentPanelBox = (el: Element): boolean => {
+    const n = el.childElementCount;
+    if (n < 2 || n > 8) return false;
+    let visible = 0;
+    for (const c of Array.from(el.children)) {
+      if (!hasRealContent(c)) return false;
+      if (isInlineHidden(c)) continue;
+      visible++;
+    }
+    /* 页签切换态：恰好一个面板可见，其余内联隐藏——普通版式不会这样堆叠 */
+    return visible === 1;
+  };
+  /* 面板盒可能外包多层单子容器（库街区 component-content > inner） */
+  const unwrapSingle = (el: Element): Element => {
+    let cur = el;
+    while (cur.childElementCount === 1) cur = cur.firstElementChild!;
+    return cur;
+  };
+  const firstTextLeaf = (el: Element): string => {
+    /* 优先取混合内容元素里的直接短文本（如 <p><img>抓拍</p> 的“抓拍”），
+       而非更长的段落叶——短文本在 markdown 中更可能原样保留 */
+    const scan = (node: Element): string => {
+      for (const n of Array.from(node.childNodes)) {
+        if (n.nodeType === Node.TEXT_NODE) {
+          const t = (n.textContent ?? '').trim();
+          if (t.length >= 2 && t.length <= 24 && !EMOJI_ONLY.test(t)) return t;
+        }
+      }
+      for (const c of Array.from(node.children)) {
+        const r = scan(c);
+        if (r) return r;
+      }
+      return '';
+    };
+    return scan(el);
+  };
   for (const lab of Array.from(doc.querySelectorAll('body *'))) {
     if (!isLabelBox(lab)) continue;
     let anc: Element | null = lab.parentElement;
@@ -296,8 +348,10 @@ export function collectTabGroups(doc: Document): TabGroupEntry[][] {
     while (anc && hops < 4 && !found) {
       for (const cand of Array.from(anc.children)) {
         if (cand === lab || cand.contains(lab) || lab.contains(cand)) continue;
-        if (isImagePanelBox(cand)) {
-          found = cand;
+        const box = cand.childElementCount === 1 ? unwrapSingle(cand) : cand;
+        if (box === lab || box.contains(lab) || lab.contains(box)) continue;
+        if (isImagePanelBox(box) || isContentPanelBox(box)) {
+          found = box;
           break;
         }
       }
@@ -305,13 +359,25 @@ export function collectTabGroups(doc: Document): TabGroupEntry[][] {
       hops++;
     }
     if (!found) continue;
-    const labels = Array.from(lab.children).map(c => normText(c));
+    /* 标签文本：末尾的独立 “x/×” 是站点自带的关闭钮文案（GF2 等），剥掉 */
+    const labels = Array.from(lab.children).map(c =>
+      normText(c).replace(/\s*[×xX]\s*$/, '').trim(),
+    );
     const panels = Array.from(found.children);
     if (labels.length !== panels.length) continue;
-    groups.push(panels.map((p, i) => ({
-      label: labels[i],
-      imgSrc: p.querySelector('img')?.getAttribute('src') ?? '',
-    })));
+    const entries = panels.map((p, i) => {
+      const img = p.querySelector('img');
+      return {
+        label: labels[i],
+        imgSrc: img?.getAttribute('src') ?? '',
+        textAnchor: firstTextLeaf(p),
+      };
+    });
+    /* 空标签（剥 x 后）无法构成页签，整组放弃 */
+    if (entries.some(e => !e.label)) continue;
+    /* 图片组与内容组都要求锚点可用，否则 markdown 层无法回插 */
+    if (entries.some(e => !e.imgSrc && !e.textAnchor)) continue;
+    groups.push(entries);
   }
   return groups;
 }

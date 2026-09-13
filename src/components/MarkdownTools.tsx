@@ -4,6 +4,7 @@ import {
   Bold, Italic, Strikethrough, Code, TextQuote,
   List, ListOrdered, ListTodo, Braces, Link2,
   Minus, Undo2, Redo2,
+  Layers, PanelTop, PanelBottom, Eraser,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT, type MessageKey } from '../lib/i18nContext';
@@ -16,7 +17,14 @@ export type MdOp =
   | { kind: 'bold' } | { kind: 'italic' } | { kind: 'strike' } | { kind: 'inlineCode' }
   | { kind: 'link' } | { kind: 'image' }
   | { kind: 'quote' } | { kind: 'ul' } | { kind: 'ol' } | { kind: 'task' }
-  | { kind: 'codeBlock' } | { kind: 'table' } | { kind: 'hr' };
+  | { kind: 'codeBlock' } | { kind: 'table' } | { kind: 'hr' }
+  | { kind: 'tabGroup' } | { kind: 'tabStart' } | { kind: 'tabEnd' } | { kind: 'tabClear' };
+
+/** tabGroup 逐段应用时携带段位：最后一段补页签结束标记 */
+export interface SliceCtx {
+  index: number;
+  total: number;
+}
 
 /* 行内标记 → 包裹符；链接/图片单独处理 */
 export const INLINE_WRAPS: Partial<Record<MdOp['kind'], [string, string]>> = {
@@ -59,8 +67,9 @@ function prefixLines(slice: string, toggleTest: RegExp, make: (lineIndex: number
 
 const TABLE_TEMPLATE_ZH = '| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n|  |  |  |';
 
-/* 对单个源码片段套用操作，返回替换后的文本；tableTemplate 供 i18n 覆盖（缺省中文表头） */
-export function transformSlice(op: MdOp, slice: string, selectedText: string, tableTemplate = TABLE_TEMPLATE_ZH): string {
+/* 对单个源码片段套用操作，返回替换后的文本；tableTemplate 供 i18n 覆盖（缺省中文表头）；
+   ctx 供 tabGroup 逐段应用（index 从 0 起，total 为段总数） */
+export function transformSlice(op: MdOp, slice: string, selectedText: string, tableTemplate = TABLE_TEMPLATE_ZH, ctx: SliceCtx = { index: 0, total: 1 }): string {
   switch (op.kind) {
     case 'heading':
       return prefixLines(slice, new RegExp(`^${'#'.repeat(op.level)} `), () => `${'#'.repeat(op.level)} `);
@@ -87,6 +96,34 @@ export function transformSlice(op: MdOp, slice: string, selectedText: string, ta
       return slice.trimEnd() + '\n\n' + tableTemplate;
     case 'hr':
       return slice.trimEnd() + '\n\n---';
+    case 'tabGroup': {
+      const trimmed = slice.replace(/^\n+|\n+$/g, '');
+      if (!trimmed) return slice;
+      /* 标签取首个短文本行（纯文本，非图片/表格/标记行），并从内容中移除；
+         没有就用序号兜底（提取失败人工重建页签时图片组多为此情况） */
+      const lines = trimmed.split('\n');
+      const first = (lines[0] || '').trim();
+      const plain = first.length >= 1 && first.length <= 16
+        && !/^(!\[|\||<!--)/.test(first) && !/^[\s#*_-]+$/.test(first);
+      const label = plain
+        ? first.replace(/^#+\s*/, '').replace(/[*_`]/g, '').trim() || `页签${ctx.index + 1}`
+        : `页签${ctx.index + 1}`;
+      const body = plain ? lines.slice(1).join('\n').replace(/^\n+/, '') : trimmed;
+      const open = `<!-- tab:${label} -->\n\n`;
+      const close = ctx.index === ctx.total - 1 ? '\n\n<!-- /tab -->' : '';
+      return open + (body || trimmed) + close;
+    }
+    case 'tabStart':
+      return `<!-- tab:标签 -->\n\n` + slice.replace(/^\n+/, '');
+    case 'tabEnd':
+      return slice.replace(/\n+$/, '') + '\n\n<!-- /tab -->';
+    case 'tabClear':
+      return slice
+        .split('\n')
+        .filter(l => !/^\s*<!--\s*\/?\s*(?:tab|lang)\b/i.test(l))
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/^\n+|\n+$/g, '');
     case 'link':
     case 'image':
     case 'bold':
@@ -128,7 +165,7 @@ export interface MdMenuOp {
   syntax?: string;
 }
 
-export const MENU_SECTIONS: Array<{ labelKey: MessageKey; ops: MdMenuOp[] }> = [
+export const MENU_SECTIONS: Array<{ labelKey: MessageKey; hint?: MessageKey; ops: MdMenuOp[] }> = [
   {
     labelKey: 'md.sectionHeading',
     ops: [
@@ -165,6 +202,16 @@ export const MENU_SECTIONS: Array<{ labelKey: MessageKey; ops: MdMenuOp[] }> = [
     ops: [
       { op: { kind: 'link' }, icon: Link2, textKey: 'md.link', nameKey: 'md.link', syntax: '[]()' },
       { op: { kind: 'hr' }, icon: Minus, textKey: 'md.hr', nameKey: 'md.hr', syntax: '---' },
+    ],
+  },
+  {
+    labelKey: 'md.sectionTabs',
+    hint: 'md.sectionTabsHint',
+    ops: [
+      { op: { kind: 'tabGroup' }, icon: Layers, textKey: 'md.tabGroup', nameKey: 'md.tabGroupName' },
+      { op: { kind: 'tabStart' }, icon: PanelTop, textKey: 'md.tabStart', nameKey: 'md.tabStartName', syntax: '<!-- tab: -->' },
+      { op: { kind: 'tabEnd' }, icon: PanelBottom, textKey: 'md.tabEnd', nameKey: 'md.tabEndName', syntax: '<!-- /tab -->' },
+      { op: { kind: 'tabClear' }, icon: Eraser, textKey: 'md.tabClear', nameKey: 'md.tabClearName' },
     ],
   },
 ];
@@ -213,7 +260,7 @@ export const FormatMenu = React.memo<{
 
   /* 视口内夹紧，避免菜单溢出屏幕；小屏（横屏手机）允许内部滚动 */
   const MENU_W = 272;
-  const MENU_H = 395;
+  const MENU_H = 500;
   const left = Math.max(4, Math.min(menu.x, window.innerWidth - MENU_W - 8));
   const top = Math.max(4, Math.min(menu.y, window.innerHeight - MENU_H - 8));
 
@@ -264,6 +311,11 @@ export const FormatMenu = React.memo<{
           <div className={cn("text-[9px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
             {t(section.labelKey)}
           </div>
+          {section.hint && (
+            <div className={cn("text-[9px] leading-snug px-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+              {t(section.hint)}
+            </div>
+          )}
           <div className="grid grid-cols-7 gap-0.5">
             {section.ops.map(({ op, icon: Icon, textKey, nameKey, syntax }) => (
               <button

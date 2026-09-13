@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, createContext, useContext } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, ghcolors } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { Table, Image as ImageIcon, Plus, Minus } from 'lucide-react';
+import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP } from '../lib/platform';
 import { FormatMenu, transformSlice, type MdOp, type MenuState } from './MarkdownTools';
@@ -11,8 +11,35 @@ import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { PreviewFindBar } from './PreviewFindBar';
 import type { PointerPos } from '../hooks/useLastPointer';
 import { useT } from '../lib/i18nContext';
-import { splitLangSections } from '../lib/markdownLangs';
+import { parseLangBlocks } from '../lib/markdownLangs';
+import { applyImageTab } from '../lib/markdownTabs';
 
+/** 页签文档按块渲染时，块 md 的全文起始偏移（右键选区映射回源码用） */
+const BlockBaseContext = createContext(0);
+
+/* 把源码偏移量写到 DOM 上，供右键时把选区映射回源码。
+   页签文档按块渲染，remark 的偏移相对块字符串——用 context 注入块的
+   原文起始偏移，保证 data-md-* 始终是全文坐标 */
+const useSrcData = () => {
+  const base = useContext(BlockBaseContext);
+  return (node: any) => {
+    const start = node?.position?.start?.offset;
+    const end = node?.position?.end?.offset;
+    if (typeof start !== 'number' || typeof end !== 'number') return {};
+    return { 'data-md-start': String(start + base), 'data-md-end': String(end + base) };
+  };
+};
+
+/* 宽表（材料/倍率表可达十来列）超出容器时横向滚动，而非把标签列挤压成逐字竖排 */
+function TableBlock({ node, children, ...props }: any) {
+  const srcData = useSrcData();
+  const sd = srcData(node);
+  return (
+    <div {...sd} style={{ overflowX: 'auto' }}>
+      <table {...props} {...sd}>{children}</table>
+    </div>
+  );
+}
 /* ---- 本地图片：相对/绝对路径通过 Tauri fs 读取为 blob URL，带缓存 ---- */
 
 const imageCache = new Map<string, string>();
@@ -21,7 +48,12 @@ const MarkdownImage = React.memo<{
   src: string;
   alt: string;
   isDarkMode: boolean;
-}>(({ src, alt, isDarkMode }) => {
+  /** 图片语法在源码中的偏移（删除/剪切用）；页签文档下已是全文坐标 */
+  srcStart?: number;
+  srcEnd?: number;
+  onOpen?: (src: string, alt: string) => void;
+  onMenu?: (e: React.MouseEvent, info: { resolvedSrc: string; alt: string; srcStart?: number; srcEnd?: number }) => void;
+}>(({ src, alt, isDarkMode, srcStart, srcEnd, onOpen, onMenu }) => {
   const t = useT();
   const [imgSrc, setImgSrc] = useState<string>('');
   const [loadError, setLoadError] = useState<string>('');
@@ -93,17 +125,262 @@ const MarkdownImage = React.memo<{
     );
   }
 
+  const altName = (alt || '').split('|||LOCAL-FILE:')[0] || '';
+
   return (
     <img
-      src={imgSrc} alt={(alt || '').split('|||LOCAL-FILE:')[0] || ''}
+      src={imgSrc} alt={altName}
       loading="lazy"
       onError={() => setLoadError(t('image.errLoad'))}
-      style={{ maxWidth: '100%', height: 'auto', borderRadius: '0.5rem', display: 'block', marginLeft: 'auto', marginRight: 'auto', margin: '1.5rem 0' }}
+      onClick={(e) => { if (!onOpen) return; e.stopPropagation(); e.preventDefault(); onOpen(imgSrc, altName); }}
+      onContextMenu={(e) => { if (!onMenu) return; e.stopPropagation(); onMenu(e, { resolvedSrc: imgSrc, alt: altName, srcStart, srcEnd }); }}
+      style={{ maxWidth: '100%', height: 'auto', borderRadius: '0.5rem', display: 'block', marginLeft: 'auto', marginRight: 'auto', margin: '1.5rem 0', cursor: onOpen ? 'zoom-in' : undefined }}
     />
   );
 });
 
 MarkdownImage.displayName = 'MarkdownImage';
+
+MarkdownImage.displayName = 'MarkdownImage';
+
+/* ---- 图片查看器：点击图片进入，滚轮缩放（以光标为锚），拖拽平移，可切 1:1 原始尺寸 ---- */
+
+function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; alt: string; isDarkMode: boolean; onClose: () => void }) {
+  const t = useT();
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [scale, setScale] = useState(0); /* 0 = 适应窗口 */
+  const [fitScale, setFitScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  const movedRef = useRef(false);
+  const scaleRef = useRef(0);
+  const [dragging, setDragging] = useState(false);
+
+  const eff = scale || fitScale;
+  useEffect(() => { scaleRef.current = scale; }, [scale]);
+
+  /* 滚轮缩放（以光标为锚）：下载到 wrap 层并阻止页面滚动 */
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const from = scaleRef.current || fitScale;
+      const next = Math.min(8, Math.max(0.05, from * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      const f = next / from;
+      setOffset(o => ({
+        x: (e.clientX - cx) - (e.clientX - cx - o.x) * f,
+        y: (e.clientY - cy) - (e.clientY - cy - o.y) * f,
+      }));
+      setScale(next);
+      scaleRef.current = next;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [fitScale]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const setScaleAndRef = useCallback((v: number) => { setScale(v); scaleRef.current = v; }, []);
+  const fitToWindow = useCallback(() => { setScaleAndRef(0); setOffset({ x: 0, y: 0 }); }, [setScaleAndRef]);
+
+  const startDrag = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    dragRef.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y };
+    movedRef.current = false;
+    setDragging(true);
+  };
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: MouseEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 3) movedRef.current = true;
+      setOffset({ x: d.ox + (e.clientX - d.x), y: d.oy + (e.clientY - d.y) });
+    };
+    const onUp = () => setDragging(false);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, [dragging]);
+
+  const btn = cn(
+    'px-2 py-1 rounded-md text-xs transition-colors',
+    isDarkMode ? 'bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700' : 'bg-white/85 text-zinc-700 hover:bg-zinc-200',
+  );
+
+  return (
+    <div
+      ref={wrapRef}
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 select-none"
+      onClick={() => { if (!movedRef.current) onClose(); }}
+      onContextMenu={(e) => e.preventDefault()}
+      onMouseDown={startDrag}
+      style={{ cursor: dragging ? 'grabbing' : 'grab' }}
+    >
+      <img
+        src={src}
+        alt={alt}
+        draggable={false}
+        onLoad={(e) => {
+          const img = e.currentTarget;
+          if (img.naturalWidth > 0) {
+            const fit = Math.min((window.innerWidth * 0.9) / img.naturalWidth, (window.innerHeight * 0.9) / img.naturalHeight);
+            setFitScale(fit);
+          }
+        }}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => { e.stopPropagation(); setOffset({ x: 0, y: 0 }); setScaleAndRef(scaleRef.current === 1 ? 0 : 1); }}
+        style={{
+          transform: `translate(${offset.x}px, ${offset.y}px) scale(${eff})`,
+          transformOrigin: 'center center',
+          maxWidth: scale ? 'none' : '90vw',
+          maxHeight: scale ? 'none' : '90vh',
+          imageRendering: eff >= 3 ? 'pixelated' : 'auto',
+          cursor: dragging ? 'grabbing' : 'grab',
+          userSelect: 'none',
+        }}
+      />
+      <div
+        className={cn('fixed top-3 right-3 flex items-center gap-1.5 rounded-lg p-1.5', isDarkMode ? 'bg-zinc-900/85' : 'bg-white/90')}
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <span className={cn('text-xs px-1 tabular-nums', isDarkMode ? 'text-zinc-400' : 'text-zinc-500')}>
+          {Math.round(eff * 100)}%
+        </span>
+        {scale === 1 ? (
+          <button className={btn} onClick={fitToWindow}>{t('image.viewerFit')}</button>
+        ) : (
+          <button className={btn} onClick={() => { setOffset({ x: 0, y: 0 }); setScaleAndRef(1); }}>{t('image.viewerOriginal')}</button>
+        )}
+        <button className={btn} onClick={onClose} title={t('image.viewerClose')}>✕</button>
+      </div>
+      {alt && (
+        <div className={cn('fixed bottom-3 left-1/2 -translate-x-1/2 max-w-[80vw] truncate rounded-md px-2.5 py-1 text-xs', isDarkMode ? 'bg-zinc-900/85 text-zinc-300' : 'bg-white/90 text-zinc-600')}>
+          {alt}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- 图片右键菜单：复制 / 剪切 / 删除 / 设为页签 ---- */
+
+function ImageContextMenu({ x, y, canEdit, isDarkMode, onClose, onCopy, onCut, onDelete, onTab }: {
+  x: number; y: number; canEdit: boolean; isDarkMode: boolean;
+  onClose: () => void;
+  onCopy: () => void;
+  onCut: () => void;
+  onDelete: () => void;
+  onTab: () => void;
+}) {
+  const t = useT();
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const onDown = (e: PointerEvent | MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
+  const left = Math.min(x, window.innerWidth - 158);
+  const top = Math.min(y, window.innerHeight - (canEdit ? 158 : 52));
+
+  const item = cn(
+    'flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-xs transition-colors text-left',
+    isDarkMode ? 'hover:bg-zinc-700/70 text-zinc-200' : 'hover:bg-zinc-100 text-zinc-700',
+  );
+
+  return (
+    <div
+      ref={ref}
+      className={cn(
+        'fixed z-[150] w-40 rounded-lg border shadow-xl backdrop-blur-md p-1 flex flex-col',
+        isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
+      )}
+      style={{ left, top }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <button className={item} onClick={onCopy}><Copy size={13} />{t('image.copy')}</button>
+      {canEdit && <button className={item} onClick={onCut}><Scissors size={13} />{t('image.cut')}</button>}
+      {canEdit && <button className={cn(item, isDarkMode ? 'hover:bg-red-900/50' : 'hover:bg-red-50')} onClick={onDelete}><Trash2 size={13} />{t('image.delete')}</button>}
+      {canEdit && <button className={item} onClick={onTab}><Layers size={13} />{t('image.toTab')}</button>}
+    </div>
+  );
+}
+
+/* ---- 图片写入剪贴板：fetch → blob 优先，canvas 兜底，统一转 PNG ---- */
+
+async function copyImageToClipboard(src: string): Promise<boolean> {
+  try {
+    let blob: Blob | null = null;
+    try {
+      const r = await fetch(src);
+      if (r.ok) blob = await r.blob();
+    } catch { /* 跨域 fetch 失败走 canvas */ }
+    if (!blob || !blob.type.startsWith('image/')) {
+      blob = await new Promise<Blob | null>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            canvas.getContext('2d')!.drawImage(img, 0, 0);
+            canvas.toBlob(b => resolve(b), 'image/png');
+          } catch { resolve(null); }
+        };
+        img.onerror = () => resolve(null);
+        img.src = src;
+      });
+    }
+    if (!blob) return false;
+    if (blob.type !== 'image/png') {
+      const url = URL.createObjectURL(blob);
+      const png = await new Promise<Blob | null>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            canvas.getContext('2d')!.drawImage(img, 0, 0);
+            canvas.toBlob(b => resolve(b), 'image/png');
+          } catch { resolve(null); }
+        };
+        img.onerror = () => resolve(null);
+        img.src = url;
+      });
+      URL.revokeObjectURL(url);
+      if (!png) return false;
+      blob = png;
+    }
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /* ---- markdown 表格源码的解析 / 序列化 / 块插入 ---- */
 
@@ -386,22 +663,16 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     return cleaned;
   }, [isDarkMode]);
 
-  /* 把源码偏移量写到 DOM 上，供右键时把选区映射回源码 */
-  const srcData = (node: any) => {
-    const start = node?.position?.start?.offset;
-    const end = node?.position?.end?.offset;
-    if (typeof start !== 'number' || typeof end !== 'number') return {};
-    return { 'data-md-start': String(start), 'data-md-end': String(end) };
-  };
-
   /* 块级元素统一包一层以携带源码位置 */
   const block = (Tag: string) =>
     function Block({ node, children, ...props }: any) {
+      const srcData = useSrcData();
       return <Tag {...props} {...srcData(node)}>{children}</Tag>;
     };
 
   const codeComponent = useMemo(() => {
     return function CodeBlock({ node, className, children, ...props }: { node?: any; className?: string; children?: React.ReactNode; [key: string]: any }) {
+      const srcData = useSrcData();
       const match = /language-(\w+)/.exec(className || '');
       const codeContent = String(children).replace(/\n$/, '');
       const hasNewlines = codeContent.includes('\n');
@@ -476,17 +747,25 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     pre({ children }: { children?: React.ReactNode }) {
       return <>{children}</>;
     },
-    img({ src, alt, ...props }: { src?: string; alt?: string; [key: string]: any }) {
-      return <MarkdownImage src={src || ''} alt={alt || ''} isDarkMode={isDarkMode} />;
-    },
-    /* 宽表（材料/倍率表可达十来列）超出容器时横向滚动，而非把标签列挤压成逐字竖排 */
-    table({ node, children, ...props }: any) {
+    img({ src, alt, node, ...props }: any) {
+      const srcData = useSrcData();
       const sd = srcData(node);
       return (
-        <div {...sd} style={{ overflowX: 'auto' }}>
-          <table {...props} {...sd}>{children}</table>
-        </div>
+        <MarkdownImage
+          src={src || ''} alt={alt || ''} isDarkMode={isDarkMode}
+          srcStart={sd['data-md-start'] ? Number(sd['data-md-start']) : undefined}
+          srcEnd={sd['data-md-end'] ? Number(sd['data-md-end']) : undefined}
+          onOpen={(s, a) => setViewer({ src: s, alt: a })}
+          onMenu={(e, info) => {
+            e.preventDefault();
+            setImageMenu({ x: e.clientX, y: e.clientY, ...info, canEdit: !!onChangeRef.current });
+          }}
+        />
       );
+    },
+    /* 宽表（材料/倍率表可达十来列）超出容器时横向滚动，而非把标签列挤压成逐字竖排 */
+    table({ node, ...props }: any) {
+      return <TableBlock node={node} {...props} />;
     },
     p: block('p'),
     h1: block('h1'),
@@ -514,41 +793,110 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     );
   }, [isDarkMode]);
 
-  /* 多语言切换：文档含 >=2 个 `<!-- lang:标签 -->` 区块时顶部显示切换标签 */
-  const langSections = useMemo(() => splitLangSections(content), [content]);
-  const [activeLang, setActiveLang] = useState(0);
-  const langIdx = langSections ? Math.min(activeLang, langSections.length - 1) : 0;
+  /* 页签/多语言块：文档含 `<!-- lang|tab:标签 -->` 标记时解析为块序列，
+     每个页签组在文档原位渲染切换标签、独立切换（去 sticky，跟随内容位置） */
+  const langBlocks = useMemo(() => parseLangBlocks(content), [content]);
+  const [tabSelections, setTabSelections] = useState<Record<number, number>>({});
+  const selectTab = useCallback((blockIdx: number, sectionIdx: number) => {
+    setTabSelections(prev => ({ ...prev, [blockIdx]: sectionIdx }));
+  }, []);
 
-  /* 将本地图片路径改写为可由 MarkdownImage 读取的形式 */
-  const processedContent = useMemo(() => {
-    const base = langSections ? langSections[langIdx].md : content;
-    return base.replace(
-      /!\[([^\]]*)\]\(([^)]+)\)/g,
-      (match, alt, url) => {
-        if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
-          return match;
+  /* ---- 图片查看器 / 图片右键菜单 / 轻提示 ---- */
+  const [viewer, setViewer] = useState<{ src: string; alt: string } | null>(null);
+  const [imageMenu, setImageMenu] = useState<{
+    x: number; y: number; resolvedSrc: string; alt: string;
+    srcStart?: number; srcEnd?: number; canEdit: boolean;
+  } | null>(null);
+  const [toastMsg, setToastMsg] = useState('');
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /* 图片删除/剪切需要最新的 content 与 onChange（mdComponents 已 memo 化） */
+  const contentStrRef = useRef(content);
+  contentStrRef.current = content;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  const showToast = useCallback((msg: string) => {
+    setToastMsg(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToastMsg(''), 2200);
+  }, []);
+
+  const closeImageMenu = useCallback(() => setImageMenu(null), []);
+  /* 内容替换后图片重新挂载、高度塌陷会把滚动条挤回顶部——改前记住位置，渲染后还原 */
+  const withScrollRestore = useCallback((mutate: () => void) => {
+    const scroller = contentRef.current;
+    const top = scroller?.scrollTop ?? 0;
+    mutate();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => { if (scroller) scroller.scrollTop = top; });
+    });
+  }, []);
+  const handleImageCopy = useCallback(async (src: string) => {
+    setImageMenu(null);
+    const ok = await copyImageToClipboard(src);
+    showToast(ok ? t('image.copied') : t('image.copyFailed'));
+  }, [showToast, t]);
+  const handleImageDelete = useCallback((srcStart?: number, srcEnd?: number) => {
+    setImageMenu(null);
+    if (srcStart == null || srcEnd == null || !onChangeRef.current) return;
+    withScrollRestore(() => {
+      const cur = contentStrRef.current;
+      let next = cur.slice(0, srcStart) + cur.slice(srcEnd);
+      next = next.replace(/\n{3,}/g, '\n\n');
+      onChangeRef.current!(next);
+    });
+  }, [withScrollRestore]);
+  const handleImageCut = useCallback(async (info: { resolvedSrc: string; srcStart?: number; srcEnd?: number }) => {
+    const ok = await copyImageToClipboard(info.resolvedSrc);
+    if (ok) handleImageDelete(info.srcStart, info.srcEnd);
+    else showToast(t('image.copyFailed'));
+  }, [handleImageDelete, showToast, t]);
+  /* 设为页签：把图片所在行包成页签区块；若紧邻上一个已关闭的页签组，
+     则把该组末尾的结束标记挪到本图之后——连续右键多张图即逐张并入同组 */
+  const handleImageToTab = useCallback((srcStart?: number, srcEnd?: number) => {
+    setImageMenu(null);
+    if (srcStart == null || srcEnd == null || !onChangeRef.current) return;
+    withScrollRestore(() => {
+      onChangeRef.current!(applyImageTab(contentStrRef.current, srcStart, srcEnd));
+    });
+  }, [withScrollRestore]);
+
+  /* 将本地图片路径改写为可由 MarkdownImage 读取的形式（按块处理） */
+  const processedBlocks = useMemo(() => {
+    const rewrite = (base: string) =>
+      base.replace(
+        /!\[([^\]]*)\]\(([^)]+)\)/g,
+        (match, alt, url) => {
+          if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
+            return match;
+          }
+          let fixedUrl = url;
+          if ((fixedUrl.startsWith('"') && fixedUrl.endsWith('"')) || (fixedUrl.startsWith("'") && fixedUrl.endsWith("'"))) {
+            fixedUrl = fixedUrl.slice(1, -1);
+          }
+          if (fixedUrl.includes('\\')) {
+            fixedUrl = fixedUrl.replace(/\\/g, '/');
+          }
+          if (!fixedUrl.startsWith('file://') && /^[A-Za-z]:/.test(fixedUrl)) {
+            fixedUrl = 'file:///' + fixedUrl;
+          } else if (!fixedUrl.startsWith('/') && !fixedUrl.startsWith('./') && !fixedUrl.startsWith('file://')) {
+            fixedUrl = 'file:///' + fixedUrl;
+          }
+          const rawPath = fixedUrl.replace(/^file:\/+/, '');
+          /* 插入端写入的是百分号编码后的 URL，这里还原为真实路径再交给 fs 读取 */
+          let filePath = rawPath;
+          try { filePath = decodeURIComponent(rawPath); } catch { /* 含孤立 % 时保留原样 */ }
+          const encodedAlt = `${alt}|||LOCAL-FILE:${filePath}`;
+          return `![${encodedAlt}](https://local-image.placeholder)`;
         }
-        let fixedUrl = url;
-        if ((fixedUrl.startsWith('"') && fixedUrl.endsWith('"')) || (fixedUrl.startsWith("'") && fixedUrl.endsWith("'"))) {
-          fixedUrl = fixedUrl.slice(1, -1);
-        }
-        if (fixedUrl.includes('\\')) {
-          fixedUrl = fixedUrl.replace(/\\/g, '/');
-        }
-        if (!fixedUrl.startsWith('file://') && /^[A-Za-z]:/.test(fixedUrl)) {
-          fixedUrl = 'file:///' + fixedUrl;
-        } else if (!fixedUrl.startsWith('/') && !fixedUrl.startsWith('./') && !fixedUrl.startsWith('file://')) {
-          fixedUrl = 'file:///' + fixedUrl;
-        }
-        const rawPath = fixedUrl.replace(/^file:\/+/, '');
-        /* 插入端写入的是百分号编码后的 URL，这里还原为真实路径再交给 fs 读取 */
-        let filePath = rawPath;
-        try { filePath = decodeURIComponent(rawPath); } catch { /* 含孤立 % 时保留原样 */ }
-        const encodedAlt = `${alt}|||LOCAL-FILE:${filePath}`;
-        return `![${encodedAlt}](https://local-image.placeholder)`;
-      }
-    );
-  }, [content, langSections, langIdx]);
+      );
+    if (!langBlocks) return null;
+    return langBlocks.map((b, i) => {
+      if (b.type === 'md') return { md: rewrite(b.md), base: b.start };
+      const sel = Math.min(tabSelections[i] ?? 0, b.sections.length - 1);
+      return { md: rewrite(b.sections[sel].md), base: b.sections[sel].start };
+    });
+  }, [langBlocks, tabSelections]);
 
   /* ---- 空行/空列沿用相邻行/列的尺寸，输入内容后恢复按内容自适应 ---- */
   useLayoutEffect(() => {
@@ -603,7 +951,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         });
       }
     });
-  }, [processedContent, isDarkMode]);
+  }, [processedBlocks, langBlocks, tabSelections, isDarkMode]);
 
   /* ---- 右键：有选区弹格式菜单；无选区弹插入菜单（表格/图片） ---- */
 
@@ -658,14 +1006,20 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     if (!menu || !onChange) return;
     const inlineKinds: Array<MdOp['kind']> = ['link', 'image', 'bold', 'italic', 'strike', 'inlineCode'];
     const targets = inlineKinds.includes(op.kind) ? menu.blocks.slice(0, 1) : menu.blocks;
-    let next = content;
-    for (const b of [...targets].sort((x, y) => y.start - x.start)) {
-      const slice = content.slice(b.start, b.end);
-      next = next.slice(0, b.start) + transformSlice(op, slice, menu.text, t('md.tableTemplate')) + next.slice(b.end);
-    }
+    const sorted = [...targets].sort((x, y) => y.start - x.start);
+    withScrollRestore(() => {
+      let next = content;
+      for (let d = 0; d < sorted.length; d++) {
+        const b = sorted[d];
+        const slice = content.slice(b.start, b.end);
+        next = next.slice(0, b.start)
+          + transformSlice(op, slice, menu.text, t('md.tableTemplate'), { index: sorted.length - 1 - d, total: sorted.length })
+          + next.slice(b.end);
+      }
+      onChangeRef.current!(next);
+    });
     setMenu(null);
-    onChange(next);
-  }, [menu, content, onChange]);
+  }, [menu, content, onChange, withScrollRestore]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
   const closeBlankMenu = useCallback(() => setBlankMenu(null), []);
@@ -903,41 +1257,57 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       onClick={handleContainerClick}
     >
       <div className="mx-auto p-6 text-left max-w-[900px]">
-        {langSections && langSections.length > 1 && (
-          <div
-            className={cn(
-              'sticky top-0 z-10 flex flex-wrap items-center gap-1 mb-4 py-1.5 -mx-1 px-1 rounded-b-lg backdrop-blur-md',
-              isDarkMode ? 'bg-zinc-900/85' : 'bg-white/85',
-            )}
-          >
-            {langSections.map((s, i) => (
-              <button
-                key={s.label + i}
-                onClick={(e) => { e.stopPropagation(); setActiveLang(i); }}
-                className={cn(
-                  'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
-                  i === langIdx
-                    ? isDarkMode
-                      ? 'bg-indigo-500/20 border-indigo-400/60 text-indigo-300'
-                      : 'bg-indigo-50 border-indigo-300 text-indigo-600'
-                    : isDarkMode
-                      ? 'border-transparent text-zinc-400 hover:bg-zinc-800'
-                      : 'border-transparent text-zinc-500 hover:bg-zinc-100',
-                )}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-        )}
         <div className={proseClassName}>
           <MarkdownStyles isDarkMode={isDarkMode} />
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={mdComponents as any}
-          >
-            {processedContent}
-          </ReactMarkdown>
+          {processedBlocks && langBlocks ? (
+            processedBlocks.map((processed, i) => {
+              const block = langBlocks[i];
+              const content = (
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents as any}>
+                  {processed.md}
+                </ReactMarkdown>
+              );
+              if (block.type !== 'tabs') {
+                return (
+                  <BlockBaseContext.Provider key={i} value={processed.base}>
+                    {content}
+                  </BlockBaseContext.Provider>
+                );
+              }
+              const selIdx = Math.min(tabSelections[i] ?? 0, block.sections.length - 1);
+              return (
+                <div key={i}>
+                  <div className="flex flex-wrap items-center gap-1 mb-4 -mx-1 px-1">
+                    {block.sections.map((s, j) => (
+                      <button
+                        key={s.label + j}
+                        onClick={(e) => { e.stopPropagation(); selectTab(i, j); }}
+                        className={cn(
+                          'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                          j === selIdx
+                            ? isDarkMode
+                              ? 'bg-indigo-500/20 border-indigo-400/60 text-indigo-300'
+                              : 'bg-indigo-50 border-indigo-300 text-indigo-600'
+                            : isDarkMode
+                              ? 'border-transparent text-zinc-400 hover:bg-zinc-800'
+                              : 'border-transparent text-zinc-500 hover:bg-zinc-100',
+                        )}
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                  <BlockBaseContext.Provider value={processed.base}>
+                    {content}
+                  </BlockBaseContext.Provider>
+                </div>
+              );
+            })
+          ) : (
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents as any}>
+              {content}
+            </ReactMarkdown>
+          )}
         </div>
       </div>
 
@@ -1062,6 +1432,43 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           onConfirm={handleInsertImages}
           onClose={() => setImageModal(null)}
         />
+      )}
+
+      {/* 图片右键菜单：复制 / 剪切 / 删除 / 设为页签 */}
+      {imageMenu && (
+        <ImageContextMenu
+          x={imageMenu.x}
+          y={imageMenu.y}
+          canEdit={imageMenu.canEdit}
+          isDarkMode={isDarkMode}
+          onClose={closeImageMenu}
+          onCopy={() => handleImageCopy(imageMenu.resolvedSrc)}
+          onCut={() => handleImageCut(imageMenu)}
+          onDelete={() => handleImageDelete(imageMenu.srcStart, imageMenu.srcEnd)}
+          onTab={() => handleImageToTab(imageMenu.srcStart, imageMenu.srcEnd)}
+        />
+      )}
+
+      {/* 图片查看器：点击图片进入，滚轮缩放，双击/按钮切 1:1 原始尺寸 */}
+      {viewer && (
+        <ImageViewer
+          src={viewer.src}
+          alt={viewer.alt}
+          isDarkMode={isDarkMode}
+          onClose={() => setViewer(null)}
+        />
+      )}
+
+      {/* 轻提示（复制成功/失败等） */}
+      {toastMsg && (
+        <div
+          className={cn(
+            'fixed bottom-6 left-1/2 -translate-x-1/2 z-[210] rounded-lg px-3 py-1.5 text-xs shadow-lg',
+            isDarkMode ? 'bg-zinc-800/95 text-zinc-200 border border-zinc-700' : 'bg-white/95 text-zinc-700 border border-zinc-200',
+          )}
+        >
+          {toastMsg}
+        </div>
       )}
     </div>
   );

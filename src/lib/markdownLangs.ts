@@ -1,35 +1,94 @@
 /**
- * markdown 多语言切换：`<!-- lang:标签名 -->` 注释把文档切分为多个语言版本，
- * 预览顶部出现切换标签。GitHub 式的 HTML/CSS 切换在我们预览中不可用
- * （原始 HTML 被安全剥离），因此采用标记约定 + 预览原生渲染。
+ * markdown 多语言/页签切换：`<!-- lang:标签名 -->`（或 `<!-- tab:标签名 -->`）
+ * 注释开启一个可切换区块，连续的标记构成一个页签组，`<!-- /tab -->` 结束当前组、
+ * 其后回到普通内容。一篇文档允许任意多个页签组，每组在文档原位渲染切换标签、
+ * 独立切换（抓取端把「标签组 + 等量内容面板」重写为标记组）。
+ * GitHub 式的 HTML/CSS 切换在我们预览中不可用（原始 HTML 被安全剥离），
+ * 因此采用标记约定 + 预览原生渲染。
  */
 
 export interface LangSection {
   label: string;
   md: string;
+  /** 区块 md 在原文中的起始偏移（预览右键把选区映射回源码用） */
+  start: number;
 }
 
-const LANG_MARKER = /<!--\s*(?:lang|tab)\s*:\s*(.+?)\s*-->/gi;
+export type LangBlock =
+  | { type: 'md'; md: string; start: number }
+  | { type: 'tabs'; sections: LangSection[] };
 
-/** 按 lang 标记切分文档；标记少于两个（含无标记）返回 null 表示普通文档 */
-export function splitLangSections(content: string): LangSection[] | null {
-  const markers: { label: string; start: number; end: number }[] = [];
+const LANG_MARKER = /<!--\s*(?:lang|tab)\s*:\s*(.+?)\s*-->/gi;
+const LANG_END_MARKER = /<!--\s*\/\s*(?:lang|tab)\s*-->/gi;
+
+/**
+ * 把文档解析为块序列：普通内容块与页签组块交替。组内每个标记开启一个区块，
+ * 结束标记收组；结束标记之后的内容恢复普通块，后续标记开启新的组。
+ * 无任何标记返回 null（普通文档）；只有单个区块的组按普通内容降级。
+ */
+export function parseLangBlocks(content: string): LangBlock[] | null {
+  interface Ev {
+    kind: 'open' | 'close';
+    label: string;
+    start: number;
+    end: number;
+  }
+  const events: Ev[] = [];
   LANG_MARKER.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = LANG_MARKER.exec(content))) {
-    markers.push({ label: m[1].trim(), start: m.index, end: m.index + m[0].length });
+    events.push({ kind: 'open', label: m[1].trim(), start: m.index, end: m.index + m[0].length });
   }
-  if (markers.length < 2) return null;
+  LANG_END_MARKER.lastIndex = 0;
+  while ((m = LANG_END_MARKER.exec(content))) {
+    events.push({ kind: 'close', label: '', start: m.index, end: m.index + m[0].length });
+  }
+  events.sort((a, b) => a.start - b.start);
+  if (!events.some(e => e.kind === 'open')) return null;
 
-  const sections: LangSection[] = [];
-  for (let i = 0; i < markers.length; i++) {
-    const from = markers[i].end;
-    const to = i + 1 < markers.length ? markers[i + 1].start : content.length;
-    const body = content.slice(from, to).replace(/^\n+/, '').replace(/\s+$/, '');
-    sections.push({ label: markers[i].label, md: body });
+  const blocks: LangBlock[] = [];
+  /* 记录区块 md 的原文偏移（去掉前导空白后的起始位置） */
+  const pushMd = (to: number) => {
+    const raw = content.slice(cursor, to);
+    const md = raw.trim();
+    if (md) blocks.push({ type: 'md', md, start: cursor + (raw.length - raw.trimStart().length) });
+  };
+  let cursor = 0;
+  let group: LangSection[] | null = null;
+  let label = '';
+  let segStart = 0;
+  const flushSection = (to: number) => {
+    if (!group) return;
+    const raw = content.slice(segStart, to);
+    const md = raw.trim();
+    group.push({ label, md, start: segStart + (raw.length - raw.trimStart().length) });
+  };
+  const closeGroup = (to: number) => {
+    flushSection(to);
+    if (group && group.length >= 2) blocks.push({ type: 'tabs', sections: group });
+    else if (group && group.length === 1 && group[0].md) {
+      /* 单区块组无切换意义，按普通内容降级（保留原文偏移） */
+      blocks.push({ type: 'md', md: group[0].md, start: group[0].start });
+    }
+    group = null;
+  };
+
+  for (const ev of events) {
+    if (ev.kind === 'open') {
+      if (!group) {
+        pushMd(ev.start);
+        group = [];
+      } else {
+        flushSection(ev.start);
+      }
+      label = ev.label;
+      segStart = ev.end;
+    } else if (group) {
+      closeGroup(ev.start);
+      cursor = segStart = ev.end;
+    }
   }
-  /* 首个标记前的引导内容并入第一区块（如共享的标题/元信息） */
-  const pre = content.slice(0, markers[0].start).trim();
-  if (pre) sections[0].md = `${pre}\n\n${sections[0].md}`;
-  return sections;
+  if (group) closeGroup(content.length);
+  else pushMd(content.length);
+  return blocks;
 }

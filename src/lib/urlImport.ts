@@ -147,24 +147,77 @@ async function convertHtml(html: string, pageUrl: string): Promise<ConvertedDoc>
 }
 
 /**
- * 把 tab 配对按图片 src 回插为 markdown 注释标记（defuddle 会剥掉 DOM 里的
- * 注释与自定义属性，故在 markdown 层回插）。图片定位失败（被提取丢弃）时跳过。
+ * 把页签配对回插为 markdown 注释标记（defuddle 会剥掉 DOM 里的注释与
+ * 自定义属性，故在 markdown 层回插）：每组每个面板先按锚点预定位
+ * （优先图片 src，回退面板首个短文本），任一锚点找不到即整组放弃——
+ * 避免半残页签；成功则在锚点行前插 `<!-- tab:标签 -->`、组尾插
+ * `<!-- /tab -->`，页签区块只包住面板组，其后正文不随页签切换。
  */
 export function insertTabMarkers(bodyMd: string, groups: TabGroupEntry[][]): string {
   let md = bodyMd;
   let cursor = 0;
-  for (const group of groups) {
-    for (const entry of group) {
-      if (!entry.imgSrc) continue;
-      const i = md.indexOf(entry.imgSrc, cursor);
-      if (i < 0) continue;
-      const imgStart = md.lastIndexOf('![', i);
-      if (imgStart < 0) continue;
-      const lineStart = md.lastIndexOf('\n', imgStart) + 1;
-      const marker = `<!-- tab:${entry.label} -->\n\n`;
-      md = md.slice(0, lineStart) + marker + md.slice(lineStart);
-      cursor = lineStart + marker.length;
+  const findAnchor = (entry: TabGroupEntry, from: number): number => {
+    if (entry.imgSrc) {
+      const i = md.indexOf(entry.imgSrc, from);
+      if (i >= 0) return i;
     }
+    const t = entry.textAnchor.trim();
+    if (t.length >= 2) {
+      const i = md.indexOf(t, from);
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+  for (const group of groups) {
+    const marks: { at: number; label: string }[] = [];
+    let probe = cursor;
+    /* 标签行块定位：文本面板的标题常与标签文字相同（如角色故事），
+       若锚点命中标签行，标记会只包住标签而非内容。标签行在 md 里是
+       连续短行——按“各标签文本依次出现且间隔 ≤200 字符”探测标签块末尾，
+       探测成功则锚点一律从其之后找起。 */
+    let labelRunEnd = cursor;
+    {
+      let p = cursor;
+      let runOk = true;
+      for (const entry of group) {
+        const lt = entry.label.trim();
+        if (lt.length < 2) {
+          runOk = false;
+          break;
+        }
+        const i = md.indexOf(lt, p);
+        if (i < 0 || i - p > 200) {
+          runOk = false;
+          break;
+        }
+        p = i + lt.length;
+        labelRunEnd = p;
+      }
+      if (!runOk) labelRunEnd = cursor;
+    }
+    let ok = true;
+    for (const entry of group) {
+      const at = findAnchor(entry, Math.max(probe, labelRunEnd));
+      if (at < 0) {
+        ok = false;
+        break;
+      }
+      marks.push({ at, label: entry.label });
+      probe = at + 1;
+    }
+    if (!ok || marks.length < 2) continue;
+    /* 从后往前插，避免位置失效 */
+    const last = marks[marks.length - 1];
+    const endMarker = '\n\n<!-- /tab -->';
+    const lastLineEnd = md.indexOf('\n', last.at);
+    const endPos = lastLineEnd < 0 ? md.length : lastLineEnd;
+    md = md.slice(0, endPos) + endMarker + md.slice(endPos);
+    const markerLen = marks.reduce((acc, m) => acc + `<!-- tab:${m.label} -->\n\n`.length, 0);
+    for (let i = marks.length - 1; i >= 0; i--) {
+      const lineStart = md.lastIndexOf('\n', marks[i].at) + 1;
+      md = md.slice(0, lineStart) + `<!-- tab:${marks[i].label} -->\n\n` + md.slice(lineStart);
+    }
+    cursor = endPos + endMarker.length + markerLen;
   }
   return md;
 }

@@ -998,6 +998,22 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       }
     }
 
+    /* 选区转页签组：按空行拆段，逐段插页签标记，末段补结束标记 */
+    if (op.kind === 'tabGroup') {
+      const raw = doc.sliceString(from, to);
+      const parts = raw.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+      const grouped = parts
+        .map((p, i) => transformSlice(op, p, mdMenu.text, tr('md.tableTemplate'), { index: i, total: parts.length }))
+        .join('\n\n');
+      majorNextRef.current = true;
+      view.dispatch({
+        changes: { from, to, insert: grouped },
+        selection: { anchor: from, head: from + grouped.length },
+      });
+      setMdMenu(null);
+      return;
+    }
+
     const replaced = transformSlice(op, doc.sliceString(from, to), mdMenu.text, tr('md.tableTemplate'));
     majorNextRef.current = true;
     view.dispatch({
