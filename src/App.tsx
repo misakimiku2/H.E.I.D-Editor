@@ -45,6 +45,7 @@ import { UrlImportModal } from './components/UrlImportModal';
 import { FileTreeSidebar } from './components/FileTreeSidebar';
 import { getDirLister } from './lib/fileTree';
 import type { UrlImportResult } from './lib/urlImport';
+import { openExternal } from './lib/openExternal';
 import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
 import { useLastPointer } from './hooks/useLastPointer';
@@ -987,6 +988,12 @@ export default function App() {
       for (const st of session.tabs) {
         if (st.kind === 'virtual') {
           const base = st.title === 'welcome.ts' ? makeWelcomeTab() : makeUntitledTab(st.title);
+          if (st.title !== 'welcome.ts') {
+            /* 无路径标签的语言按标题扩展名还原（makeUntitledTab 默认 plaintext，
+               否则导入的 .md 恢复后丢失 markdown 预览/分屏入口） */
+            base.language = detectLanguageFromPath(st.title);
+            if (base.language === 'markdown' && st.mdView) base.mdView = st.mdView;
+          }
           if (st.draft) {
             /* 脏的无路径标签：内容在草稿里，恢复并标脏（草稿丢失则退化为空标签） */
             const draft = getDraft(draftKeyForTab({ path: null, title: st.title }));
@@ -1039,8 +1046,13 @@ export default function App() {
         const kept = prev.filter(t => !(t.id === INITIAL_WELCOME_ID && !t.isDirty));
         return [...kept, ...restored];
       });
-      /* activePath 为 null（激活的是无路径标签）时恰好匹配第一个无路径标签（通常为 welcome） */
-      const active = restored.find(t => t.path === session.activePath) ?? restored[restored.length - 1];
+      /* 激活标签还原：file 按路径；无路径（activePath=null）按 activeVirtualTitle 精确匹配——
+         否则「激活的是导入的 md」重启后会错误地落在第一个无路径标签（welcome）上 */
+      const active =
+        (session.activePath === null
+          ? restored.find(t => !t.path && t.title === session.activeVirtualTitle) ?? restored.find(t => !t.path)
+          : restored.find(t => t.path === session.activePath))
+        ?? restored[restored.length - 1];
       setActiveTabId(active.id);
     })();
     return () => {
@@ -1055,16 +1067,18 @@ export default function App() {
      避免状态更新对应的 effect 尚未执行、窗口已被销毁。 */
   const writeSessionSnapshot = useCallback(() => {
     if (!isTauri || !hydratedRef.current) return;
+    const active = tabsRef.current.find(t => t.id === activeTabIdRef.current);
     saveSessionState({
       tabs: tabsRef.current.flatMap((t): SessionTab[] => {
         if (t.path) return [{ kind: 'file', path: t.path, mdView: t.mdView }];
         /* 脏的无路径标签：内容在草稿（lib/drafts），快照只记 draft 标志；
            用户确认「不保存」退出时草稿与快照条目一并清除（见 confirmWindowClose / closeTab） */
         return t.isDirty
-          ? [{ kind: 'virtual', title: t.title, draft: !t.readOnly }]
-          : [{ kind: 'virtual', title: t.title }];
+          ? [{ kind: 'virtual', title: t.title, draft: !t.readOnly, mdView: t.mdView }]
+          : [{ kind: 'virtual', title: t.title, mdView: t.mdView }];
       }),
-      activePath: tabsRef.current.find(t => t.id === activeTabIdRef.current)?.path ?? null,
+      activePath: active?.path ?? null,
+      activeVirtualTitle: active && !active.path ? active.title : null,
     });
   }, []);
 
@@ -1118,6 +1132,34 @@ export default function App() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   });
+
+  /* ---- 全局链接导航守卫：渲染内容里的 <a>（预览正文、导入的来源链接等）不允许让应用 WebView 真实导航 ----
+     http(s) 交给系统浏览器打开，其余非锚点协议（javascript: / 相对路径 / 空链接）直接拦截。
+     放行两类：# 开头的文档内锚点跳转、带 download / blob: / data: 的下载链接（导出 HTML 走这里）。
+     否则点击链接会把整个应用导航成网页，WebView2 的鼠标侧键（历史前进/后退）随之在应用与网页间切换。 */
+  useEffect(() => {
+    const anchorOf = (target: EventTarget | null): HTMLAnchorElement | null => {
+      let el = target as HTMLElement | null;
+      while (el && el.tagName !== 'A') el = el.parentElement;
+      return el as HTMLAnchorElement | null;
+    };
+    const guard = (e: MouseEvent) => {
+      const a = anchorOf(e.target);
+      if (!a) return;
+      const href = a.getAttribute('href') ?? '';
+      if (href.startsWith('#')) return;
+      if (a.hasAttribute('download') || /^(blob:|data:)/i.test(href)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (/^https?:\/\//i.test(href)) void openExternal(href);
+    };
+    document.addEventListener('click', guard, true);
+    document.addEventListener('auxclick', guard, true);
+    return () => {
+      document.removeEventListener('click', guard, true);
+      document.removeEventListener('auxclick', guard, true);
+    };
+  }, []);
 
   /* ---- tab operations ---- */
 

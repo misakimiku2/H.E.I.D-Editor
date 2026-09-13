@@ -122,4 +122,45 @@ describe('saveSessionState / loadSessionState', () => {
       activePath: null,
     });
   });
+
+  it('virtual 条目的 mdView 往返保留，非法值归一为 undefined；旧快照缺省同样合法', () => {
+    const storage = memoryStorage();
+    const state: SessionState = {
+      tabs: [
+        { kind: 'virtual', title: '导入.md', draft: true, mdView: 'split' },
+        { kind: 'virtual', title: 'x.md', mdView: 'bogus' as unknown as undefined },
+      ],
+      activePath: null,
+    };
+    saveSessionState(state, storage);
+    expect(loadSessionState(storage)).toEqual({
+      tabs: [
+        { kind: 'virtual', title: '导入.md', draft: true, mdView: 'split' },
+        { kind: 'virtual', title: 'x.md' },
+      ],
+      activePath: null,
+    });
+  });
+
+  it('activeVirtualTitle 往返保留，非法值与缺省归一为 undefined（旧快照缺键同样合法）', () => {
+    const storage = memoryStorage();
+    saveSessionState(
+      { tabs: [{ kind: 'virtual', title: '导入.md' }], activePath: null, activeVirtualTitle: '导入.md' },
+      storage,
+    );
+    expect(loadSessionState(storage)).toEqual({
+      tabs: [{ kind: 'virtual', title: '导入.md' }],
+      activePath: null,
+      activeVirtualTitle: '导入.md',
+    });
+    storage.setItem('heid-session', JSON.stringify({
+      tabs: [{ kind: 'virtual', title: '导入.md' }],
+      activePath: null,
+      activeVirtualTitle: 42,
+    }));
+    expect(loadSessionState(storage)).toEqual({
+      tabs: [{ kind: 'virtual', title: '导入.md' }],
+      activePath: null,
+    });
+  });
 });

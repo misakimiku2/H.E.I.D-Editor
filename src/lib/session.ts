@@ -6,6 +6,7 @@
  * - virtual 标签：无路径的标签（welcome 示例页 / untitled），draft=false 表示内容可确定性重建；
  *   draft=true 表示退出时是脏标签，未保存内容在草稿里（lib/drafts 的 untitled:<title> 键），
  *   仅用于异常退出后的恢复；用户明确「不保存」退出时草稿与快照条目一并清除，标签不应"复活"。
+ *   mdView 记录 markdown 标签的视图模式（按标题扩展名在恢复时还原语言，缺省 edit）。
  */
 
 export type SessionMdView = 'edit' | 'split' | 'preview';
@@ -13,12 +14,14 @@ export type SessionMdView = 'edit' | 'split' | 'preview';
 /** 一个可恢复标签页的持久化描述 */
 export type SessionTab =
   | { kind: 'file'; path: string; mdView: SessionMdView }
-  | { kind: 'virtual'; title: string; draft?: boolean };
+  | { kind: 'virtual'; title: string; draft?: boolean; mdView?: SessionMdView };
 
 export interface SessionState {
   tabs: SessionTab[];
-  /** 激活标签的文件路径；null 表示激活的是无路径标签（恢复时回退 welcome / 最后一个） */
+  /** 激活标签的文件路径；null 表示激活的是无路径标签（按 activeVirtualTitle 精确还原） */
   activePath: string | null;
+  /** 激活的是无路径标签时的标题（activePath 为 null 时优先按它匹配，避免错误地落在 welcome 上） */
+  activeVirtualTitle?: string | null;
 }
 
 const STORAGE_KEY = 'heid-session';
@@ -46,7 +49,7 @@ export function loadSessionState(storage: Storage | null = defaultStorage()): Se
   try {
     const data: unknown = JSON.parse(raw);
     if (!data || typeof data !== 'object') return null;
-    const { tabs, activePath } = data as Record<string, unknown>;
+    const { tabs, activePath, activeVirtualTitle } = data as Record<string, unknown>;
     if (!Array.isArray(tabs)) return null;
     const parsed: SessionTab[] = [];
     for (const t of tabs) {
@@ -54,7 +57,12 @@ export function loadSessionState(storage: Storage | null = defaultStorage()): Se
       const rec = t as Record<string, unknown>;
       if (rec.kind === 'virtual') {
         if (typeof rec.title === 'string' && rec.title.length > 0) {
-          parsed.push({ kind: 'virtual', title: rec.title, draft: rec.draft === true ? true : undefined });
+          parsed.push({
+            kind: 'virtual',
+            title: rec.title,
+            draft: rec.draft === true ? true : undefined,
+            mdView: MD_VIEWS.includes(rec.mdView as SessionMdView) ? (rec.mdView as SessionMdView) : undefined,
+          });
         }
         continue;
       }
@@ -69,6 +77,8 @@ export function loadSessionState(storage: Storage | null = defaultStorage()): Se
     return {
       tabs: parsed,
       activePath: typeof activePath === 'string' && activePath.length > 0 ? activePath : null,
+      /* 归一为 undefined（而非 null）：缺省/非法与旧快照缺键一致，消费方按真值判断 */
+      activeVirtualTitle: typeof activeVirtualTitle === 'string' && activeVirtualTitle.length > 0 ? activeVirtualTitle : undefined,
     };
   } catch {
     return null;

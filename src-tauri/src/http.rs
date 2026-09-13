@@ -29,6 +29,14 @@ pub fn validate_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 去掉 # 锚点段：锚点是纯客户端概念，抓取无需发送（含编码锚点亦不例外）
+pub fn strip_fragment(url: &str) -> &str {
+    match url.find('#') {
+        Some(i) => &url[..i],
+        None => url,
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct HttpGetResult {
     pub status: u16,
@@ -41,10 +49,8 @@ pub struct HttpGetResult {
     pub lossy: bool,
 }
 
-#[tauri::command]
-pub fn http_get(url: String) -> Result<HttpGetResult, String> {
-    validate_url(&url)?;
-    let url = url.trim();
+/// 单次抓取（阻塞式，仅供 spawn_blocking 调用）
+fn fetch_once(url: &str) -> Result<HttpGetResult, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
         .build();
@@ -79,9 +85,43 @@ pub fn http_get(url: String) -> Result<HttpGetResult, String> {
     })
 }
 
+/// 抓取网页。async 命令 + spawn_blocking：阻塞请求不得占用主线程（同步命令
+/// 在主线程执行，15s 超时会把整个窗口冻成「未响应」）。传输类错误（连接超时、
+/// 重置等，非 HTTP 状态错误）自动重试一次；# 锚点段不发送。
+#[tauri::command]
+pub async fn http_get(url: String) -> Result<HttpGetResult, String> {
+    validate_url(&url)?;
+    let target = strip_fragment(url.trim()).to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut last_err: Option<String> = None;
+        for attempt in 0..2 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(800));
+            }
+            match fetch_once(&target) {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    // HTTP 状态错误（4xx/5xx）重试无意义，直接返回
+                    if e.starts_with("服务器返回 HTTP") {
+                        return Err(e);
+                    }
+                    last_err = Some(if attempt == 0 {
+                        format!("{e}（已自动重试）")
+                    } else {
+                        e
+                    });
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| "抓取失败".into()))
+    })
+    .await
+    .map_err(|e| format!("抓取任务失败：{e}"))?
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_url;
+    use super::{strip_fragment, validate_url};
 
     #[test]
     fn accepts_http_and_https() {
@@ -101,5 +141,16 @@ mod tests {
     fn rejects_missing_host() {
         assert!(validate_url("https://").is_err());
         assert!(validate_url("https:///path").is_err());
+    }
+
+    #[test]
+    fn strips_fragment_including_encoded_one() {
+        assert_eq!(strip_fragment("https://a.com/p#sec1"), "https://a.com/p");
+        assert_eq!(
+            strip_fragment("https://a.com/p#.E4.BA.BA.E7.89.A9"),
+            "https://a.com/p"
+        );
+        assert_eq!(strip_fragment("https://a.com/p?q=1#x"), "https://a.com/p?q=1");
+        assert_eq!(strip_fragment("https://a.com/p"), "https://a.com/p");
     }
 }

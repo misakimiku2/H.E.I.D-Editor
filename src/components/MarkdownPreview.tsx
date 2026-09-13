@@ -11,6 +11,7 @@ import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { PreviewFindBar } from './PreviewFindBar';
 import type { PointerPos } from '../hooks/useLastPointer';
 import { useT } from '../lib/i18nContext';
+import { splitLangSections } from '../lib/markdownLangs';
 
 /* ---- 本地图片：相对/绝对路径通过 Tauri fs 读取为 blob URL，带缓存 ---- */
 
@@ -478,6 +479,15 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     img({ src, alt, ...props }: { src?: string; alt?: string; [key: string]: any }) {
       return <MarkdownImage src={src || ''} alt={alt || ''} isDarkMode={isDarkMode} />;
     },
+    /* 宽表（材料/倍率表可达十来列）超出容器时横向滚动，而非把标签列挤压成逐字竖排 */
+    table({ node, children, ...props }: any) {
+      const sd = srcData(node);
+      return (
+        <div {...sd} style={{ overflowX: 'auto' }}>
+          <table {...props} {...sd}>{children}</table>
+        </div>
+      );
+    },
     p: block('p'),
     h1: block('h1'),
     h2: block('h2'),
@@ -489,7 +499,6 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     blockquote: block('blockquote'),
     ul: block('ul'),
     ol: block('ol'),
-    table: block('table'),
     td: block('td'),
     th: block('th'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -505,9 +514,15 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     );
   }, [isDarkMode]);
 
+  /* 多语言切换：文档含 >=2 个 `<!-- lang:标签 -->` 区块时顶部显示切换标签 */
+  const langSections = useMemo(() => splitLangSections(content), [content]);
+  const [activeLang, setActiveLang] = useState(0);
+  const langIdx = langSections ? Math.min(activeLang, langSections.length - 1) : 0;
+
   /* 将本地图片路径改写为可由 MarkdownImage 读取的形式 */
   const processedContent = useMemo(() => {
-    return content.replace(
+    const base = langSections ? langSections[langIdx].md : content;
+    return base.replace(
       /!\[([^\]]*)\]\(([^)]+)\)/g,
       (match, alt, url) => {
         if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
@@ -533,7 +548,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         return `![${encodedAlt}](https://local-image.placeholder)`;
       }
     );
-  }, [content]);
+  }, [content, langSections, langIdx]);
 
   /* ---- 空行/空列沿用相邻行/列的尺寸，输入内容后恢复按内容自适应 ---- */
   useLayoutEffect(() => {
@@ -888,6 +903,33 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       onClick={handleContainerClick}
     >
       <div className="mx-auto p-6 text-left max-w-[900px]">
+        {langSections && langSections.length > 1 && (
+          <div
+            className={cn(
+              'sticky top-0 z-10 flex flex-wrap items-center gap-1 mb-4 py-1.5 -mx-1 px-1 rounded-b-lg backdrop-blur-md',
+              isDarkMode ? 'bg-zinc-900/85' : 'bg-white/85',
+            )}
+          >
+            {langSections.map((s, i) => (
+              <button
+                key={s.label + i}
+                onClick={(e) => { e.stopPropagation(); setActiveLang(i); }}
+                className={cn(
+                  'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                  i === langIdx
+                    ? isDarkMode
+                      ? 'bg-indigo-500/20 border-indigo-400/60 text-indigo-300'
+                      : 'bg-indigo-50 border-indigo-300 text-indigo-600'
+                    : isDarkMode
+                      ? 'border-transparent text-zinc-400 hover:bg-zinc-800'
+                      : 'border-transparent text-zinc-500 hover:bg-zinc-100',
+                )}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        )}
         <div className={proseClassName}>
           <MarkdownStyles isDarkMode={isDarkMode} />
           <ReactMarkdown
@@ -1032,8 +1074,8 @@ const MarkdownStyles = React.memo<{ isDarkMode: boolean }>(({ isDarkMode }) => {
   return (
     <style>{`
       .prose { --tw-prose-body: ${isDarkMode ? '#d4d4d8' : '#374151'}; }
-      .prose table { border-collapse: collapse; margin: 1rem 0; display: table; width: fit-content; max-width: 100%; }
-      .prose th, .prose td { border: 1px solid ${isDarkMode ? '#3f3f46' : '#d4d4d8'}; padding: 0.5rem 0.75rem; text-align: left; }
+      .prose table { border-collapse: collapse; margin: 1rem 0; display: table; width: fit-content; }
+      .prose table th, .prose table td { border: 1px solid ${isDarkMode ? '#3f3f46' : '#d4d4d8'}; padding: 0.5rem 0.75rem; text-align: left; }
       .prose th { background-color: ${isDarkMode ? '#27272a' : '#f4f4f5'}; font-weight: 600; }
       .prose tr:nth-child(even) { background-color: ${isDarkMode ? 'rgba(39, 39, 42, 0.3)' : 'rgba(244, 244, 245, 0.5)'}; }
       .prose pre { background-color: transparent !important; padding: 0 !important; margin: 0 !important; border: none !important; box-shadow: none !important; }

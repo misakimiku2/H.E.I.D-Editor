@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { makeHeaderBlock, markdownFilename, resolveImageUrl } from './urlImport';
+import { makeHeaderBlock, markdownFilename, resolveImageUrl, sanitizeTitle } from './urlImport';
 
 describe('resolveImageUrl', () => {
   it('相对地址按页面 URL 补全为绝对地址', () => {
@@ -49,5 +49,20 @@ describe('makeHeaderBlock', () => {
     expect(block).toContain('2026-09-13');
     expect(block.startsWith('> ')).toBe(true);
     expect(block.endsWith('\n\n')).toBe(true);
+  });
+});
+
+describe('sanitizeTitle', () => {
+  it('剥离标题中的 HTML 标签', () => {
+    expect(sanitizeTitle('<span class="mw-page-title-main">主人公(女神异闻录3)</span>')).toBe('主人公(女神异闻录3)');
+  });
+
+  it('折叠多余空白并去除首尾空格', () => {
+    expect(sanitizeTitle('  一   二  ')).toBe('一 二');
+  });
+
+  it('空标题保持为空', () => {
+    expect(sanitizeTitle('')).toBe('');
+    expect(sanitizeTitle('<b></b>')).toBe('');
   });
 });

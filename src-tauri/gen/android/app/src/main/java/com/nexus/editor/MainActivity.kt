@@ -169,6 +169,200 @@ class MainActivity : TauriActivity() {
     fun exitApp() {
       runOnUiThread { finishAffinity() }
     }
+
+    /** 外部链接交给系统浏览器打开（预览内链接不允许在应用 WebView 内导航） */
+    @JavascriptInterface
+    fun openUrl(url: String) {
+      try {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
+      } catch (_: Exception) {
+      }
+    }
+
+    /** 网址导入渲染兜底：离屏 WebView 加载页面，渲染稳定后经 heid-render 事件回传 HTML */
+    @JavascriptInterface
+    fun renderPage(url: String) {
+      runOnUiThread { startOffscreenRender(url) }
+    }
+  }
+
+  /** 离屏渲染 WebView（网址导入兜底专用，用后即毁） */
+  private var renderWebView: WebView? = null
+  @Volatile private var renderDelivered = false
+
+  /** 注入到离屏渲染页的稳定检测 + 懒加载展开：稳定后点击短文本叶子展开懒加载面板
+     （关键词优先；误触路由用 history.back 恢复），取可见文本最长快照回传 */
+  private val renderSettleJs = """
+    (function () {
+      if (window.__HEID_SETTLE__) return;
+      window.__HEID_SETTLE__ = true;
+      var startHref = location.href;
+      var navFlag = false;
+      var bestText = null;
+      try {
+        var ps = history.pushState, rs = history.replaceState;
+        history.pushState = function () { navFlag = true; return ps.apply(this, arguments); };
+        history.replaceState = function () { navFlag = true; return rs.apply(this, arguments); };
+      } catch (e) {}
+      var snapshot = function () {
+        var text = document.body && document.body.innerText ? document.body.innerText : '';
+        if (!bestText || text.length > bestText.length) bestText = text;
+      };
+      var stable = function (idleNeed, tickCap, wait) {
+        return new Promise(function (done) {
+          var i = 0, t = 0, lastLen = -1;
+          var step = function () {
+            t++;
+            var len = document.documentElement ? document.documentElement.outerHTML.length : 0;
+            if (len === lastLen) { i++; } else { i = 0; lastLen = len; }
+            if (i >= idleNeed || t >= tickCap) { done(); return; }
+            setTimeout(step, wait);
+          };
+          step();
+        });
+      };
+      var KEY = /(语音|voice|技能|skill|天赋|talent|战斗|battle|档案|故事|story|资料|台词|audio)/i;
+      var clickThrough = function () {
+        return new Promise(function (done) {
+          var deadline = Date.now() + 10000;
+          var seen = {}, cands = [];
+          try {
+            var all = document.body ? document.body.querySelectorAll('*') : [];
+            for (var k = 0; k < all.length; k++) {
+              var el = all[k];
+              if (el.childElementCount !== 0) continue;
+              var tag = el.tagName;
+              if (tag === 'A' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'LABEL') continue;
+              if (tag === 'BUTTON' && el.getAttribute('type') === 'submit') continue;
+              if (el.closest && el.closest('a, nav, header, footer')) continue;
+              var t2 = (el.textContent || '').trim();
+              if (t2.length < 2 || t2.length > 20) continue;
+              if (!el.offsetParent) continue;
+              if (seen[t2]) continue;
+              seen[t2] = 1;
+              cands.push({ el: el, t: t2, pri: KEY.test(t2) ? 0 : 1 });
+            }
+          } catch (e) {}
+          cands.sort(function (a, b) { return a.pri - b.pri; });
+          cands = cands.slice(0, 24);
+          var idx = 0;
+          var step = function () {
+            if (idx >= cands.length || Date.now() > deadline) { done(); return; }
+            try { cands[idx].el.click(); } catch (e) {}
+            idx++;
+            setTimeout(function () {
+              if (navFlag || location.href !== startHref) {
+                navFlag = false;
+                try { history.back(); } catch (e) {}
+                setTimeout(function () {
+                  if (location.href === startHref) { try { snapshot(); } catch (e) {} step(); }
+                  else done();
+                }, 700);
+                return;
+              }
+              try { snapshot(); } catch (e) {}
+              step();
+            }, 350);
+          };
+          step();
+        });
+      };
+      var send = function (html, text) {
+        try { window.HeidRender.renderDone(html || '', text || '', window.location.href); } catch (e) {}
+      };
+      var saveInjections = function () {
+        var nodes = document.querySelectorAll('[class*="item-content"]');
+        for (var k = 0; k < nodes.length; k++) {
+          var c = nodes[k];
+          if (c.getAttribute('data-heid-saved')) continue;
+          var host = c.parentElement;
+          if (!host) continue;
+          c.setAttribute('data-heid-saved', '1');
+          var clone = c.cloneNode(true);
+          clone.setAttribute('data-heid-saved', '1');
+          host.appendChild(clone);
+        }
+      };
+      var clickPlayers = function () {
+        return new Promise(function (done) {
+          var deadline = Date.now() + 10000;
+          var players = [];
+          try {
+            var all = document.body ? document.body.querySelectorAll('[class*="player"], [class*="audio"]') : [];
+            for (var k = 0; k < all.length; k++) {
+              if (!all[k].offsetParent) continue;
+              players.push(all[k]);
+            }
+          } catch (e) {}
+          players = players.slice(0, 20);
+          var idx = 0;
+          var step = function () {
+            if (idx >= players.length || Date.now() > deadline) { saveInjections(); done(); return; }
+            try { players[idx].click(); } catch (e) {}
+            idx++;
+            setTimeout(function () { try { saveInjections(); } catch (e) {} step(); }, 500);
+          };
+          step();
+        });
+      };
+      var run = async function () {
+        await stable(5, 24, 500);
+        snapshot();
+        await clickThrough();
+        await stable(3, 10, 400);
+        snapshot();
+        await clickPlayers();
+        await stable(2, 8, 400);
+        snapshot();
+        send(
+          document.documentElement ? document.documentElement.outerHTML.slice(0, 8388608) : '',
+          (bestText || '').slice(0, 1048576)
+        );
+      };
+      run();
+    })()
+  """.trimIndent()
+
+  private fun startOffscreenRender(url: String) {
+    renderWebView?.destroy()
+    renderDelivered = false
+    val wv = WebView(this)
+    renderWebView = wv
+    wv.settings.javaScriptEnabled = true
+    wv.settings.domStorageEnabled = true
+    wv.addJavascriptInterface(RenderResultBridge(), "HeidRender")
+    wv.webViewClient = object : android.webkit.WebViewClient() {
+      override fun onPageFinished(view: WebView, url: String) {
+        view.evaluateJavascript(renderSettleJs, null)
+      }
+    }
+    /* 整体看门狗：20s 仍未回传则放弃并销毁 */
+    wv.postDelayed({
+      if (!renderDelivered) deliverRender("", "", url)
+    }, 42000)
+    wv.loadUrl(url)
+  }
+
+  private inner class RenderResultBridge {
+    @JavascriptInterface
+    fun renderDone(html: String, text: String, url: String) {
+      runOnUiThread { deliverRender(html, text, url) }
+    }
+  }
+
+  /** 只投递一次：把渲染结果以 heid-render 事件推给主 WebView，随后销毁离屏实例 */
+  private fun deliverRender(html: String, text: String, url: String) {
+    if (renderDelivered) return
+    renderDelivered = true
+    val capped = if (html.length > 8 * 1024 * 1024) html.substring(0, 8 * 1024 * 1024) else html
+    val cappedText = if (text.length > 1024 * 1024) text.substring(0, 1024 * 1024) else text
+    evalJs(
+      "window.dispatchEvent(new CustomEvent('heid-render',{detail:{html:\"${jsonEscape(capped)}\",text:\"${jsonEscape(cappedText)}\",url:\"${jsonEscape(url)}\"}}))"
+    )
+    renderWebView?.destroy()
+    renderWebView = null
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {

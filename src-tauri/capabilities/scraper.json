@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "scraper",
+  "description": "隐藏渲染抓取窗口（heid-scraper）：仅向远程 http(s) 页面授予 render_result 一条命令——页面只能把渲染后的 HTML 字符串回传给应用，无法触碰文件系统与其他任何命令",
+  "windows": ["heid-scraper"],
+  "remote": {
+    "urls": ["http://*/*", "https://*/*"]
+  },
+  "permissions": ["allow-render-result"]
+}
