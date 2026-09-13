@@ -2,6 +2,7 @@ package com.nexus.editor
 
 import android.app.Activity
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
@@ -146,6 +147,12 @@ class MainActivity : TauriActivity() {
       else -> Charsets.UTF_8
     }
 
+    /** 系统当前是否深色（WebView prefers-color-scheme 在 configChanges 含 uiMode 时不
+        随系统更新，深浅色初值与变化都走此桥） */
+    @JavascriptInterface
+    fun isSystemDark(): Boolean =
+      (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
     /** 状态栏/导航栏图标外观跟随应用主题（应用内切换深浅色时由 JS 调用；
         键盘自身主题无公开 API 可控，跟随系统设置） */
     @JavascriptInterface
@@ -223,6 +230,14 @@ class MainActivity : TauriActivity() {
       }
     })
   }
+
+    /* uiMode 在 configChanges 中：系统深浅色切换不重建 Activity，WebView 的
+       prefers-color-scheme 也不会更新——此处捕获变化推给前端 */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+      super.onConfigurationChanged(newConfig)
+      val dark = (newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+      evalJs("window.dispatchEvent(new CustomEvent('heid-sysdark',{detail:{dark:$dark}}))")
+    }
 
   override fun onWebViewCreate(webView: WebView) {
     webViewRef = webView

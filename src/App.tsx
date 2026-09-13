@@ -503,12 +503,24 @@ export default function App() {
     const saved = localStorage.getItem('heid-theme-mode');
     return saved === 'light' || saved === 'dark' ? saved : 'system';
   });
+  /* 安卓 WebView 的 prefers-color-scheme 不随运行时系统主题更新，
+     初值与变化改走 HeidBridge（isSystemDark / heid-sysdark 事件） */
   const [systemDark, setSystemDark] = useState(
-    () => window.matchMedia('(prefers-color-scheme: dark)').matches
+    () => IS_ANDROID_APP
+      ? !!(window as any).HeidBridge?.isSystemDark?.()
+      : window.matchMedia('(prefers-color-scheme: dark)').matches
   );
 
   /* 系统主题变化监听（跟随系统模式使用） */
   useEffect(() => {
+    if (IS_ANDROID_APP) {
+      const onSysDark = (e: Event) => {
+        const d = (e as CustomEvent<{ dark: boolean }>).detail;
+        if (d && typeof d.dark === 'boolean') setSystemDark(d.dark);
+      };
+      window.addEventListener('heid-sysdark', onSysDark);
+      return () => window.removeEventListener('heid-sysdark', onSysDark);
+    }
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
     mq.addEventListener('change', onChange);
