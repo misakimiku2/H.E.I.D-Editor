@@ -150,7 +150,7 @@ export function FileTreeSidebar({
         className={cn(
           panel,
           overlay
-            ? 'heid-fade-in fixed inset-y-0 left-0 z-[80] w-72 max-w-[85vw] border-r shadow-2xl pt-[env(safe-area-inset-top)]'
+            ? 'heid-fade-in fixed inset-y-0 left-0 z-[80] w-72 max-w-[85vw] border-r shadow-2xl pt-[var(--heid-safe-top,0px)]'
             : 'relative w-64 shrink-0 border-r',
         )}
       >

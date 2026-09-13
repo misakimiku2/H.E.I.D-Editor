@@ -1238,6 +1238,26 @@ export default function App() {
   const t = useCallback((key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars), [lang]);
   useEffect(() => { setRuntimeLang(lang); }, [lang]);
 
+  /* ---- 安全区：MainActivity 经 heid-insets 桥推送状态栏/手势条高度（css px），
+     写入 :root 的 --heid-safe-top/bottom 供 safe-top/safe-bottom 与标题栏内联样式使用；
+     WebView 的 env() 不可靠，必须走此桥 ---- */
+  useEffect(() => {
+    if (!IS_ANDROID_APP) return;
+    const root = document.documentElement;
+    const apply = (top: number, bottom: number) => {
+      root.style.setProperty('--heid-safe-top', `${top}px`);
+      root.style.setProperty('--heid-safe-bottom', `${bottom}px`);
+    };
+    const bridge = (window as any).HeidBridge;
+    try { apply(bridge?.top?.() ?? 0, bridge?.bottom?.() ?? 0); } catch { /* 桥不可用时等事件 */ }
+    const onInsets = (e: Event) => {
+      const d = (e as CustomEvent<{ top: number; bottom: number }>).detail;
+      if (d) apply(d.top, d.bottom);
+    };
+    window.addEventListener('heid-insets', onInsets);
+    return () => window.removeEventListener('heid-insets', onInsets);
+  }, []);
+
   /* ---- 文件树侧栏：选择器走平台提供者；记忆根目录，抽屉默认关闭 ---- */
   const chooseTreeFolder = useCallback(async () => {
     const l = getDirLister(isTauri, IS_ANDROID_APP);
@@ -1714,15 +1734,20 @@ export default function App() {
         />
       ) : (
       <div
-        data-tauri-drag-region
+        data-tauri-drag-region={!IS_ANDROID_APP}
         className={cn(
           "h-10 border-b flex items-center pl-3 gap-1.5 shrink-0 select-none",
           isDarkMode ? "border-zinc-700 bg-zinc-800" : "border-zinc-200 bg-white"
         )}
+        /* 安卓边到边：标题栏向下让出系统状态栏高度（var 仅安卓注入，桌面回退 0） */
+        style={{
+          height: 'calc(2.5rem + var(--heid-safe-top, 0px))',
+          paddingTop: 'var(--heid-safe-top, 0px)',
+        }}
       >
-        <div className="flex items-center gap-2 shrink-0" data-tauri-drag-region>
+        <div className="flex items-center gap-2 shrink-0" data-tauri-drag-region={!IS_ANDROID_APP}>
           <HeidMark className="w-10 h-3.5 shrink-0" />
-          <span className="text-sm font-semibold tracking-tight" data-tauri-drag-region>H.E.I.D</span>
+          <span className="text-sm font-semibold tracking-tight" data-tauri-drag-region={!IS_ANDROID_APP}>H.E.I.D</span>
         </div>
 
         <button
@@ -1740,8 +1765,15 @@ export default function App() {
 
         {/* 标签页 */}
         <div
-          data-tauri-drag-region
+          data-tauri-drag-region={!IS_ANDROID_APP}
           className="min-w-0 flex items-center gap-0.5 overflow-x-auto"
+          onWheel={(e) => {
+            /* 桌面滚轮→横滚（滚动条已隐藏）；触摸端走原生滑动 */
+            const el = e.currentTarget;
+            if (el.scrollWidth > el.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+              el.scrollLeft += e.deltaY;
+            }
+          }}
           onContextMenu={(e) => {
             /* 空白处右键：无锚点标签，只提供新建与全部关闭 */
             e.preventDefault();
@@ -1802,7 +1834,7 @@ export default function App() {
           <Plus size={15} />
         </button>
 
-        <div className="flex-1 h-full" data-tauri-drag-region />
+        <div className="flex-1 h-full" data-tauri-drag-region={!IS_ANDROID_APP} />
 
         {!IS_ANDROID_APP && <WindowControls isDarkMode={isDarkMode} />}
       </div>
@@ -2167,9 +2199,13 @@ export default function App() {
 
             {/* bottom status bar（手机端隐藏）：文件信息 + 光标位置 + 编码/换行符 + 还原 */}
             {!isPhone && (<div className={cn(
-              "h-6 border-t flex items-center px-4 gap-2 text-[11px] shrink-0 relative",
+              "border-t flex items-center px-4 gap-2 text-[11px] shrink-0 relative",
               isDarkMode ? "border-zinc-700 bg-zinc-800 text-zinc-500" : "border-zinc-200 bg-zinc-100 text-zinc-500"
-            )}>
+            )}
+            style={{
+              height: 'calc(1.5rem + var(--heid-safe-bottom, 0px))',
+              paddingBottom: 'var(--heid-safe-bottom, 0px)',
+            }}>
               <span className="truncate" title={activeTab.path || t('status.unsavedPath')}>{activeTab.path || t('status.unsavedPath')}</span>
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{LANGUAGE_LABELS[activeTab.language] || activeTab.language}</span>
