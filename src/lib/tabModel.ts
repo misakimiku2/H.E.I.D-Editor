@@ -10,7 +10,20 @@ import { SAMPLE_CODE } from './welcomeContent';
 /* markdown 标签页的视图模式：编辑 / 分屏（左预览右源码）/ 预览（持久化词汇表定义于 lib/session） */
 export type MdViewMode = SessionMdView;
 
-export interface FileTab {
+/** csv 标签页的视图模式：网格（缺省，`csvView` 未设即 grid）/ 原文本 */
+export type CsvViewMode = 'grid' | 'text';
+
+/** csv 页签的会话内 UI 状态（可选字段：缺省时按各自默认值生效） */
+export interface CsvTabState {
+  /** 网格 / 原文本视图；缺省 grid */
+  csvView?: CsvViewMode;
+  /** 首行作表头；缺省 true */
+  csvHeaderOn?: boolean;
+  /** 手动列宽（按列下标；双击列边界恢复自适应后删除该项） */
+  csvColWidths?: number[];
+}
+
+export interface FileTab extends CsvTabState {
   id: string;
   title: string;
   path: string | null;

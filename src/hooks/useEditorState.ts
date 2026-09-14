@@ -10,7 +10,7 @@ import {
   ensureHistory, recordStep, undoStep, redoStep, canUndoHistory, canRedoHistory,
   type TabHistory,
 } from '../lib/tabHistory';
-import type { FileTab, MdViewMode } from '../lib/tabModel';
+import type { FileTab, MdViewMode, CsvTabState } from '../lib/tabModel';
 
 /** 内容变化来源：edit=软件内编辑（同步记内部 diff 时间线）；external=磁盘外部修改；revert=时间线撤销回写 */
 export type ContentChangeSource = 'edit' | 'external' | 'revert';
@@ -123,6 +123,12 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
     setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, mdView: mode } : t));
   }, [activeTab]);
 
+  /* 更新当前 csv 标签页的网格 UI 状态（视图/表头开关/手动列宽），其余字段不动 */
+  const setCsvState = useCallback((patch: Partial<CsvTabState>) => {
+    if (!activeTab) return;
+    setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, ...patch } : t));
+  }, [activeTab]);
+
   /* 当前被标签页引用的真实文件路径（去重）——两条时间线的存活域（关最后一个标签页即丢弃） */
   const referencedPaths = useMemo(
     () => Array.from(new Set(tabs.flatMap(t => (t.path ? [t.path] : [])))),
@@ -143,6 +149,7 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
     updateTabContent,
     canUndo, canRedo, handleUndo, handleRedo,
     setMdView,
+    setCsvState,
     referencedPaths,
     deleteTab,
   };

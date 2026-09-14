@@ -25,6 +25,7 @@ export const READ_EXTENSIONS = [
   '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.cs', '.rb', '.php',
   '.html', '.htm', '.css', '.scss', '.less', '.json', '.yaml', '.yml',
   '.xml', '.svg', '.md', '.sh', '.bash', '.sql', '.toml', '.ini', '.txt',
+  '.csv', '.tsv',
   '.swift', '.kt', '.kts', '.scala', '.vue', '.svelte',
 ];
 

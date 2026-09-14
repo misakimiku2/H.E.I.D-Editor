@@ -4,11 +4,14 @@ import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
   GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
+  Table, Code,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
 import { cn } from './lib/utils';
 import { CodeEditor } from './components/CodeEditor';
+import { CsvGridEditor } from './components/CsvGridEditor';
+import { detectDelimiter, delimiterLabel, CSV_GRID_MAX_CHARS, CSV_GRID_MAX_ROWS, type CsvDelimiter } from './lib/csv';
 import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
 import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
@@ -588,6 +591,33 @@ export default function App() {
   const activeTab = editor.activeTab;
   const isMarkdown = activeTab?.language === 'markdown';
 
+  /* ---- CSV 网格视图：检测分隔符、行列规模、性能闸门 ----
+     csvView 未设置时按闸门取默认（超大文件默认文本视图，工具栏可手动切网格） */
+  const isCsv = activeTab?.language === 'csv';
+  const activeContent = activeTab?.content ?? '';
+  const csvDelimiter: CsvDelimiter = useMemo(
+    () => (isCsv ? detectDelimiter(activeContent) : ','),
+    [isCsv, activeContent],
+  );
+  const isLargeCsv = !!isCsv && (
+    activeContent.length > CSV_GRID_MAX_CHARS
+    || activeContent.split('\n').length > CSV_GRID_MAX_ROWS
+  );
+  const effectiveCsvView = activeTab
+    ? (activeTab.csvView ?? (isLargeCsv ? 'text' : 'grid'))
+    : 'grid';
+  const csvGridActive = !!isCsv && !!activeTab && !activeTab.binary && effectiveCsvView === 'grid';
+  const [csvShape, setCsvShape] = useState({ rows: 0, cols: 0 });
+  useEffect(() => { setCsvShape({ rows: 0, cols: 0 }); }, [editor.activeTabId]);
+  const handleCsvShape = useCallback((rows: number, cols: number) => {
+    setCsvShape(s => (s.rows === rows && s.cols === cols ? s : { rows, cols }));
+  }, []);
+  /* 网格视图下无光标概念：Ctrl+F 打开查找时自动落到文本视图（查找栏挂在 CodeEditor 上） */
+  const [gateBannerClosedId, setGateBannerClosedId] = useState<string | null>(null);
+  useEffect(() => {
+    if (findState.open && csvGridActive) editor.setCsvState({ csvView: 'text' });
+  }, [findState.open, csvGridActive]);
+
   /* 手机端无分屏：split 折叠为预览，由底部工具栏在编辑/预览间切换 */
   const effectiveView: MdViewMode = activeTab
     ? (isPhone && activeTab.mdView === 'split' ? 'preview' : activeTab.mdView)
@@ -597,11 +627,11 @@ export default function App() {
     editor.setMdView(effectiveView === 'preview' ? 'edit' : 'preview');
   };
 
-  /* 编辑器面板当前是否渲染（分屏/编辑态 Ctrl+F 搜索源码）；同步进 ref 供 window 快捷键读取 */
-  const editorVisible = !!activeTab && !(isMarkdown && effectiveView === 'preview');
+  /* 编辑器面板当前是否渲染（分屏/编辑态 Ctrl+F 搜索源码）；同步进 ref 供 window 快捷键读取。
+     CSV 网格视图下 CodeEditor 未挂载，同样视为不可见（状态栏光标段随之隐藏） */
+  const editorVisible = !!activeTab && !csvGridActive && !(isMarkdown && effectiveView === 'preview');
 
   /* 字数统计：Markdown 按 CJK 感知计数，其余按空白分词（200 万字符单次线性扫描，毫秒级） */
-  const activeContent = activeTab?.content ?? '';
   const activeLanguage = activeTab?.language ?? '';
   const wordCountInfo = useMemo(
     () => countWords(activeContent, activeLanguage === 'markdown'),
@@ -642,6 +672,25 @@ export default function App() {
         findOpen={previewVisible && effectiveView === 'preview' && findState.open ? true : undefined}
         onFindClose={closeFind}
         getPointer={getPointer}
+      />
+    );
+  };
+
+  const renderCsvGrid = () => {
+    if (!activeTab) return null;
+    return (
+      <CsvGridEditor
+        key={activeTab.id}
+        content={activeTab.content}
+        delimiter={csvDelimiter}
+        isDarkMode={isDarkMode}
+        headerOn={activeTab.csvHeaderOn ?? true}
+        manualWidths={activeTab.csvColWidths}
+        readOnly={!!activeTab.readOnly}
+        onChange={(v) => editor.updateTabContent(activeTab.id, v)}
+        onHeaderToggle={(on) => editor.setCsvState({ csvHeaderOn: on })}
+        onWidthsChange={(w) => editor.setCsvState({ csvColWidths: w })}
+        onShape={handleCsvShape}
       />
     );
   };
@@ -873,6 +922,40 @@ export default function App() {
                 <button
                   key={m}
                   onClick={() => editor.setMdView(m)}
+                  title={title}
+                  className={cn(
+                    "w-7 h-6 rounded-full flex items-center justify-center transition-all",
+                    active
+                      ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
+                      : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
+                  )}
+                >
+                  <Icon size={13} />
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* CSV 视图两档切换：网格 | 文本（仅 csv 文件显示） */}
+        {isCsv && activeTab && (
+          <div
+            role="group"
+            aria-label={t('csv.viewAria')}
+            className={cn(
+              "flex items-center rounded-full p-0.5 mr-2 shrink-0",
+              isDarkMode ? "bg-zinc-700/60" : "bg-zinc-200/80"
+            )}
+          >
+            {([
+              { mode: 'grid', icon: Table, title: t('csv.grid') },
+              { mode: 'text', icon: Code, title: t('csv.text') },
+            ] as const).map(({ mode: m, icon: Icon, title }) => {
+              const active = effectiveCsvView === m;
+              return (
+                <button
+                  key={m}
+                  onClick={() => editor.setCsvState({ csvView: m })}
                   title={title}
                   className={cn(
                     "w-7 h-6 rounded-full flex items-center justify-center transition-all",
@@ -1154,6 +1237,28 @@ export default function App() {
         <div className="flex-1 flex flex-col overflow-hidden">
         {activeTab ? (
           <>
+            {/* CSV 性能闸门提示条：超大文件默认文本视图，可手动改用网格 */}
+            {isCsv && isLargeCsv && effectiveCsvView === 'text' && gateBannerClosedId !== activeTab.id && (
+              <div className={cn(
+                "flex items-center gap-3 px-4 py-1.5 text-xs shrink-0",
+                isDarkMode ? "bg-amber-500/10 text-amber-300 border-b border-amber-500/20" : "bg-amber-50 text-amber-700 border-b border-amber-200"
+              )}>
+                <span className="flex-1 truncate">{t('csv.largeNotice')}</span>
+                <button
+                  className={cn("px-2 py-0.5 rounded-md font-medium shrink-0", isDarkMode ? "hover:bg-amber-500/20" : "hover:bg-amber-100")}
+                  onClick={() => editor.setCsvState({ csvView: 'grid' })}
+                >
+                  {t('csv.largeOpenGrid')}
+                </button>
+                <button
+                  className={cn("p-0.5 rounded-md shrink-0", isDarkMode ? "hover:bg-amber-500/20" : "hover:bg-amber-100")}
+                  onClick={() => setGateBannerClosedId(activeTab.id)}
+                  title={t('common.close')}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            )}
             {/* 行容器恒定：预览槽位永远是第一个子元素（跨视图/跨标签保活不重挂） */}
             <div className="flex flex-1 overflow-hidden">
               {/* 预览保活槽位：不可见时仅 display:none，不卸载 */}
@@ -1170,7 +1275,11 @@ export default function App() {
                   </div>
                 </>
               ) : !previewVisible ? (
-                isSvgTab ? (
+                csvGridActive ? (
+                  <div className="flex-1 min-w-0 overflow-hidden">
+                    {renderCsvGrid()}
+                  </div>
+                ) : isSvgTab ? (
                   <SvgWorkbench content={activeTab.content} isDarkMode={isDarkMode} stacked={isPhone}>
                     {renderEditor()}
                   </SvgWorkbench>
@@ -1204,6 +1313,14 @@ export default function App() {
               <span className="shrink-0">{formatFileSize(activeTab.content)}</span>
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{t('status.lines', { n: activeTab.content.split('\n').length })}</span>
+              {csvGridActive && (
+                <>
+                  <span className="shrink-0 opacity-50">|</span>
+                  <span className="shrink-0 tabular-nums">{t('csv.shape', { rows: csvShape.rows, cols: csvShape.cols })}</span>
+                  <span className="shrink-0 opacity-50">|</span>
+                  <span className="shrink-0">{t('csv.delimiter')} {delimiterLabel(csvDelimiter)}</span>
+                </>
+              )}
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0 tabular-nums">
                 {t('status.charCount', { n: wordCountInfo.chars })} · {t('status.wordCount', { n: wordCountInfo.words })}
