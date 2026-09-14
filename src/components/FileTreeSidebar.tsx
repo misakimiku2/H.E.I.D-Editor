@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown, ChevronRight, FileText, Folder, FolderX, FolderOpen,
   Loader2, PanelLeftClose, RefreshCw,
-  FilePlus, FolderPlus, Scissors, Copy, ClipboardPaste, Pencil, Trash2, Link2, FolderSearch,
+  FilePlus, FolderPlus, FileImage, Scissors, Copy, ClipboardPaste, Pencil, Trash2, Link2, FolderSearch,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import {
   getDirLister, makeRoot, toggleDir, withChildren, withError,
   joinPath, parentPathOf, findNode, isValidEntryName, uniqueEntryName, relativePathUnderRoot,
+  isImagePath, isSvgPath,
   type DirLister, type TreeNode,
 } from '../lib/fileTree';
 import { fsMkdir, fsRename, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
@@ -32,6 +33,8 @@ interface FileTreeSidebarProps {
   activeTabId: string;
   tabs: SidebarTabInfo[];
   onOpenFile: (path: string) => void;
+  /** 打开图片文件（走通用图片查看器；缺省时图片仍按文本文件打开） */
+  onOpenImage?: (path: string) => void;
   /** 关闭文件夹（清空根目录） */
   onRootChange: (path: string | null) => void;
   /** 收起抽屉 */
@@ -124,7 +127,7 @@ function NameRow({
  */
 export function FileTreeSidebar({
   rootPath, open, overlay, isDarkMode, activeTabId, tabs,
-  onOpenFile, onRootChange, onClose,
+  onOpenFile, onOpenImage, onRootChange, onClose,
   canManage, askDangerConfirm, onTabsRenamed, onFileDeleted,
 }: FileTreeSidebarProps) {
   const t = useT();
@@ -326,7 +329,11 @@ export function FileTreeSidebar({
           />
         ) : (
           <button
-            onClick={() => (node.isDir ? handleDirClick(node) : onOpenFile(node.path))}
+            onClick={() => {
+              if (node.isDir) handleDirClick(node);
+              else if (isImagePath(node.path) && onOpenImage) onOpenImage(node.path);
+              else onOpenFile(node.path);
+            }}
             onContextMenu={(e) => openMenu(e, node)}
             onMouseEnter={handleRowEnter}
             style={{ paddingLeft: 8 + depth * 12 }}
@@ -338,9 +345,13 @@ export function FileTreeSidebar({
             ) : (
               <span className="w-3 shrink-0" />
             )}
-            {node.isDir
-              ? <Folder size={13} className="shrink-0 opacity-70" />
-              : <FileText size={13} className="shrink-0 opacity-60" />}
+            {node.isDir ? (
+              <Folder size={13} className="shrink-0 opacity-70" />
+            ) : isImagePath(node.path) || isSvgPath(node.path) ? (
+              <FileImage size={13} className="shrink-0 opacity-70" />
+            ) : (
+              <FileText size={13} className="shrink-0 opacity-60" />
+            )}
             <span className="heid-name-clip truncate flex-1 min-w-0">
               <span className="heid-name-text inline-block whitespace-nowrap">{node.name}</span>
             </span>

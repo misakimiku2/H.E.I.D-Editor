@@ -14,6 +14,9 @@ import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { AlertDialog } from './components/AlertDialog';
+import { ImageViewer } from './components/ImageViewer';
+import { SvgWorkbench } from './components/SvgWorkbench';
+import { resolveImageSrc, ImageForbiddenError } from './lib/imageSrc';
 import { appAlert, registerAppAlert } from './lib/appAlert';
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
@@ -34,7 +37,7 @@ import { deleteDraft, draftKeyForTab } from './lib/drafts';
 import { SettingsDialog } from './components/SettingsDialog';
 import { UrlImportModal } from './components/UrlImportModal';
 import { FileTreeSidebar } from './components/FileTreeSidebar';
-import { getDirLister, loadTreeRoot, saveTreeRoot } from './lib/fileTree';
+import { getDirLister, isSvgPath, loadTreeRoot, saveTreeRoot } from './lib/fileTree';
 import type { UrlImportResult } from './lib/urlImport';
 import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
@@ -259,6 +262,17 @@ export default function App() {
   }, [showAlert]);
   /* 标签栏右键菜单（tabId 为 null 表示右键在标签条空白处，无「关闭其他」锚点） */
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tabId: string | null } | null>(null);
+  /* 通用图片查看器（文件树点击图片文件打开，复用预览内的查看器组件） */
+  const [imageViewer, setImageViewer] = useState<{ src: string; name: string } | null>(null);
+  const openImageInViewer = useCallback(async (path: string) => {
+    try {
+      const src = await resolveImageSrc(path);
+      setImageViewer({ src, name: displayNameFromPath(path) });
+    } catch (e) {
+      appAlert(e instanceof ImageForbiddenError ? t('image.errForbidden') : t('image.errLoad'));
+    }
+  }, [t]);
+
   /* 主菜单「最近打开」二级子菜单开合（菜单整体关闭时一并复位）。
      关闭走短延迟：鼠标从触发项移向子菜单（经过桥接区）时不中断 */
   const [recentSubOpen, setRecentSubOpen] = useState(false);
@@ -608,6 +622,8 @@ export default function App() {
   }, [activeTab, isMarkdown, editor.tabs, lastMdTabId]);
   /* 预览当前是否处于可见形态（分屏 / 纯预览） */
   const previewVisible = isMarkdown && (effectiveView === 'split' || effectiveView === 'preview');
+  /* SVG 标签：源码 + 实时可视化预览工作台（svg 是可编辑的代码，不走图片查看器） */
+  const isSvgTab = !!activeTab && !activeTab.readOnly && isSvgPath(activeTab.path ?? activeTab.title);
 
   const renderMdPreview = () => {
     if (!mdAliveTab) return null;
@@ -1126,6 +1142,7 @@ export default function App() {
             activeTabId={editor.activeTabId}
             tabs={editor.tabs}
             onOpenFile={(p) => void file.openPathIntoTab(p)}
+            onOpenImage={(p) => void openImageInViewer(p)}
             onRootChange={handleTreeRootChange}
             onClose={() => setTreeOpen(false)}
             canManage={isTauri && !IS_ANDROID_APP}
@@ -1153,9 +1170,15 @@ export default function App() {
                   </div>
                 </>
               ) : !previewVisible ? (
-                <div className="flex-1 min-w-0 overflow-hidden">
-                  {renderEditor()}
-                </div>
+                isSvgTab ? (
+                  <SvgWorkbench content={activeTab.content} isDarkMode={isDarkMode} stacked={isPhone}>
+                    {renderEditor()}
+                  </SvgWorkbench>
+                ) : (
+                  <div className="flex-1 min-w-0 overflow-hidden">
+                    {renderEditor()}
+                  </div>
+                )
               ) : null}
             </div>
 
@@ -1610,6 +1633,16 @@ export default function App() {
           message={alertState.message}
           isDarkMode={isDarkMode}
           onClose={closeAlert}
+        />
+      )}
+
+      {/* 通用图片查看器（文件树点击图片文件；z 层高于弹窗） */}
+      {imageViewer && (
+        <ImageViewer
+          src={imageViewer.src}
+          alt={imageViewer.name}
+          isDarkMode={isDarkMode}
+          onClose={() => setImageViewer(null)}
         />
       )}
     </div>

@@ -88,6 +88,27 @@ export function findNode(node: TreeNode, path: string): TreeNode | null {
   return null;
 }
 
+/* ---------- 图片文件判定（文件树图标与点击打开查看器） ---------- */
+
+/** 可直接由 <img>/图片查看器展示的扩展名（与 lib/imageSrc 的 MIME 表一致）。
+    SVG 例外：它同时是可编辑的代码，走源码标签页 + 可视化工作台（isSvgPath） */
+export const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'];
+
+/** 图片文件路径判定；安卓 SAF URI 先解码再取扩展名 */
+export function isImagePath(path: string): boolean {
+  let p = path;
+  try { p = decodeURIComponent(path); } catch { /* 含孤立 % 时按原文处理 */ }
+  const ext = p.split('.').pop()?.toLowerCase() ?? '';
+  return IMAGE_EXTS.includes(ext);
+}
+
+/** SVG 路径判定：按代码文件打开（XML 高亮）并进入可视化编辑工作台 */
+export function isSvgPath(path: string): boolean {
+  let p = path;
+  try { p = decodeURIComponent(path); } catch { /* 含孤立 % 时按原文处理 */ }
+  return p.split('.').pop()?.toLowerCase() === 'svg';
+}
+
 export function makeRoot(rootPath: string): TreeNode {
   return { path: rootPath, name: pathTail(rootPath), isDir: true, expanded: true, children: null, error: null };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  findNode, isUnderRoot, isValidEntryName, joinPath, makeRoot, parentPathOf,
+  findNode, isImagePath, isSvgPath, isUnderRoot, isValidEntryName, joinPath, makeRoot, parentPathOf,
   relativePathUnderRoot, sortEntries, toggleDir, uniqueEntryName,
   withChildren, withError,
   type DirEntry, type TreeNode,
@@ -144,5 +144,31 @@ describe('findNode', () => {
     expect(findNode(root, '/r/src/main.rs')?.name).toBe('main.rs');
     expect(findNode(root, '/r/a.md')?.name).toBe('a.md');
     expect(findNode(root, '/r/missing')).toBeNull();
+  });
+});
+
+describe('isImagePath', () => {
+  it('识别常见图片扩展名（大小写不敏感；svg 例外走源码标签页）', () => {
+    for (const p of ['a.png', 'C:\\r\\b.JPG', '/r/c.jpeg', 'e.webp', 'f.gif', 'g.bmp', 'h.ico']) {
+      expect(isImagePath(p), p).toBe(true);
+    }
+  });
+  it('非图片扩展名与无扩展名返回 false', () => {
+    for (const p of ['a.md', 'b', 'c.png.md', 'd.txt']) {
+      expect(isImagePath(p), p).toBe(false);
+    }
+  });
+  it('安卓 SAF URI 先解码再取扩展名', () => {
+    expect(isImagePath('content://x/tree/primary%3ADCIM/pic%2Epng')).toBe(true);
+  });
+});
+
+describe('isSvgPath', () => {
+  it('识别 svg 扩展名（大小写不敏感），且不在 IMAGE_EXTS 中（走源码标签页）', () => {
+    expect(isSvgPath('icon.SVG')).toBe(true);
+    expect(isSvgPath('C:\\r\\logo.svg')).toBe(true);
+    expect(isSvgPath('content://x/doc/pic%2Esvg')).toBe(true);
+    expect(isSvgPath('a.png')).toBe(false);
+    expect(isImagePath('a.svg')).toBe(false);
   });
 });
