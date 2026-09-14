@@ -59,7 +59,7 @@ import { FALLBACK_APP_VERSION } from './lib/update';
 
 /* ---------- App ---------- */
 
-/* H.E.I.D 品牌 >_< 标识（简化自应用图标，随主题变色） */
+/* H.I.D.E 品牌 >_< 标识（简化自应用图标，随主题变色） */
 function HeidMark({ className }: { className?: string }) {
   return (
     <svg
@@ -606,7 +606,7 @@ export default function App() {
       {isPhone ? (
         <TopAppBar
           isDarkMode={isDarkMode}
-          title={activeTab?.title ?? 'H.E.I.D'}
+          title={activeTab?.title ?? 'H.I.D.E'}
           isDirty={!!activeTab?.isDirty}
           isMarkdown={!!isMarkdown}
           saving={file.saving}
@@ -640,7 +640,7 @@ export default function App() {
       >
         <div className="flex items-center gap-2 shrink-0" data-tauri-drag-region={!IS_ANDROID_APP}>
           <HeidMark className="w-10 h-3.5 shrink-0" />
-          <span className="text-sm font-semibold tracking-tight" data-tauri-drag-region={!IS_ANDROID_APP}>H.E.I.D</span>
+          <span className="text-sm font-semibold tracking-tight" data-tauri-drag-region={!IS_ANDROID_APP}>H.I.D.E</span>
         </div>
 
         <button
@@ -1245,10 +1245,10 @@ export default function App() {
           <div className="flex-1 flex flex-col items-center justify-center p-6">
             <img
               src={isDarkMode ? heidIconLight : heidIconDark} /* 资源名按图标自身配色命名：dark=深色底图标（适合浅色界面），故深色主题用 light */
-              alt="H.E.I.D"
+              alt="H.I.D.E"
               className="w-20 h-20 drop-shadow-md mb-4"
             />
-            <h3 className="text-lg font-medium mb-1">H.E.I.D</h3>
+            <h3 className="text-lg font-medium mb-1">H.I.D.E</h3>
             <p className="text-sm text-zinc-500 max-w-sm text-center mb-4">
               {t('empty.hint')}
             </p>
@@ -1365,10 +1365,10 @@ export default function App() {
               </button>
               <img
                 src={isDarkMode ? heidIconLight : heidIconDark} /* 资源名按图标自身配色命名：dark=深色底图标（适合浅色界面），故深色主题用 light */
-                alt="H.E.I.D"
+                alt="H.I.D.E"
                 className="w-20 h-20 drop-shadow-md"
               />
-              <h2 className="mt-4 text-lg font-bold tracking-widest">H.E.I.D</h2>
+              <h2 className="mt-4 text-lg font-bold tracking-widest">H.I.D.E</h2>
               <p className="mt-1 text-[11px] text-zinc-500 tracking-wide">
                 Highlighting Intelligent Document Editor
               </p>
@@ -1427,7 +1427,7 @@ export default function App() {
                 "mt-4 pt-3 w-full text-[10px] border-t",
                 isDarkMode ? "border-zinc-700 text-zinc-500" : "border-zinc-200 text-zinc-400"
               )}>
-                © 2026 H.E.I.D
+                © 2026 H.I.D.E
               </div>
             </div>
           </div>

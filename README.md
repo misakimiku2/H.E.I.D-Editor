@@ -1,6 +1,6 @@
-# H.E.I.D
+# H.I.D.E
 
-**H.E.I.D**（Highlighting Intelligent Document Editor）—— 从 `nexus-ai-assistant`（已废弃项目）中提取出来的独立代码编辑器，基于 CodeMirror 6 + React + Vite + Tailwind CSS，通过 Tauri 2 打包为 Windows 桌面应用与 Android 应用（一套代码，双端复用）。
+**H.I.D.E**（Highlighting Intelligent Document Editor）—— 从 `nexus-ai-assistant`（已废弃项目）中提取出来的独立代码编辑器，基于 CodeMirror 6 + React + Vite + Tailwind CSS，通过 Tauri 2 打包为 Windows 桌面应用与 Android 应用（一套代码，双端复用）。
 
 ## 功能特性
 
@@ -37,7 +37,7 @@ npm run tauri:build         # 编译 Rust 并打包（首次约 4-10 分钟）
 产物位置：
 
 - **独立可执行文件**：`src-tauri/target/release/nexus-editor.exe`（需系统已有 WebView2，Win10/11 默认自带）
-- **安装程序**：`src-tauri/target/release/bundle/nsis/H.E.I.D_0.4.0_x64-setup.exe`
+- **安装程序**：`src-tauri/target/release/bundle/nsis/H.I.D.E_0.4.0_x64-setup.exe`
 
 ## 构建安卓应用（Android 7.0 / API 24+）
 

@@ -4,7 +4,7 @@
  */
 import { rt } from './i18nContext';
 
-const RAW_SAMPLE_CODE = `// 欢迎使用 H.E.I.D
+const RAW_SAMPLE_CODE = `// 欢迎使用 H.I.D.E
 // Highlighting Intelligent Document Editor
 // 特性：语法高亮 / 迷你地图 / 粘性滚动 / 行号拖选 / 代码折叠
 

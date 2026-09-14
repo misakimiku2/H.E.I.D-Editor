@@ -45,7 +45,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'H.E.I.D ${{ github.ref_name }}'
+          releaseName: 'H.I.D.E ${{ github.ref_name }}'
           releaseBody: 'See the assets to download and install this version.'
           releaseDraft: false
           prerelease: false

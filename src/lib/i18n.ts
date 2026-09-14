@@ -28,7 +28,7 @@ const zh = {
   'menu.closeCurrentTab': '关闭当前标签页',
   'menu.settings': '设置',
   'menu.shortcuts': '键盘快捷键',
-  'menu.about': '关于 H.E.I.D',
+  'menu.about': '关于 H.I.D.E',
 
   'theme.label': '主题',
   'theme.light': '浅色',
@@ -364,7 +364,7 @@ const en: Record<MessageKey, string> = {
   'menu.closeCurrentTab': 'Close Current Tab',
   'menu.settings': 'Settings',
   'menu.shortcuts': 'Keyboard Shortcuts',
-  'menu.about': 'About H.E.I.D',
+  'menu.about': 'About H.I.D.E',
 
   'theme.label': 'Theme',
   'theme.light': 'Light',

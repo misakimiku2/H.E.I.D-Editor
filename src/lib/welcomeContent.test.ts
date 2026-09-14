@@ -10,7 +10,7 @@ describe('SAMPLE_CODE', () => {
   });
 
   it('内容完整（多语言示例保留）', () => {
-    expect(SAMPLE_CODE.includes('H.E.I.D')).toBe(true);
+    expect(SAMPLE_CODE.includes('H.I.D.E')).toBe(true);
     expect(SAMPLE_CODE.includes('def greet')).toBe(true);
   });
 });
