@@ -2,9 +2,18 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 
+/** 字节数 → 展示文本（B / KB / MB） */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
 /**
  * 图片查看器：预览内点击图片与文件树打开图片文件共用。
+ * 初始尺寸：图片大于窗口时适应窗口，小于窗口时按原始尺寸显示；
  * 滚轮缩放（以光标为锚），拖拽平移，双击/按钮切 1:1 原始尺寸与适应窗口，Esc/点击空白关闭。
+ * 底部信息栏：文件名（加粗加大）+ 像素尺寸 + 文件大小。
  */
 export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; alt: string; isDarkMode: boolean; onClose: () => void }) {
   const t = useT();
@@ -16,9 +25,25 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
   const movedRef = useRef(false);
   const scaleRef = useRef(0);
   const [dragging, setDragging] = useState(false);
+  /* 图片信息（底部信息栏）：像素尺寸取自加载结果，文件大小经 blob 尽力获取（拿不到就隐藏） */
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
+  const [bytes, setBytes] = useState<number | null>(null);
 
   const eff = scale || fitScale;
   useEffect(() => { scaleRef.current = scale; }, [scale]);
+
+  useEffect(() => {
+    let alive = true;
+    setBytes(null);
+    (async () => {
+      try {
+        const r = await fetch(src);
+        const b = await r.blob();
+        if (alive) setBytes(b.size);
+      } catch { /* 跨域等取不到大小时不显示该项 */ }
+    })();
+    return () => { alive = false; };
+  }, [src]);
 
   /* 滚轮缩放（以光标为锚）：下载到 wrap 层并阻止页面滚动 */
   useEffect(() => {
@@ -98,10 +123,13 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
         draggable={false}
         onLoad={(e) => {
           const img = e.currentTarget;
-          if (img.naturalWidth > 0) {
-            const fit = Math.min((window.innerWidth * 0.9) / img.naturalWidth, (window.innerHeight * 0.9) / img.naturalHeight);
-            setFitScale(fit);
-          }
+          if (img.naturalWidth <= 0) return;
+          const w = window.innerWidth;
+          const h = window.innerHeight;
+          setFitScale(Math.min((w * 0.9) / img.naturalWidth, (h * 0.9) / img.naturalHeight));
+          /* 大于窗口 → 适应窗口（scale 0）；小于窗口 → 原始尺寸（100%） */
+          if (img.naturalWidth <= w && img.naturalHeight <= h) setScaleAndRef(1);
+          setDims({ w: img.naturalWidth, h: img.naturalHeight });
         }}
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => { e.stopPropagation(); setOffset({ x: 0, y: 0 }); setScaleAndRef(scaleRef.current === 1 ? 0 : 1); }}
@@ -131,10 +159,29 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
         )}
         <button className={btn} onClick={onClose} title={t('image.viewerClose')}>✕</button>
       </div>
-      {alt && (
-        <div className={cn('fixed bottom-3 left-1/2 -translate-x-1/2 max-w-[80vw] truncate rounded-md px-2.5 py-1 text-xs border shadow-xl',
-          isDarkMode ? 'bg-zinc-800 border-zinc-600/60 text-zinc-300' : 'bg-white border-zinc-200 text-zinc-600')}>
-          {alt}
+      {(alt || dims) && (
+        <div className={cn(
+          'fixed bottom-3 left-1/2 -translate-x-1/2 max-w-[86vw] flex items-center gap-3 rounded-lg px-3.5 py-2 border shadow-xl',
+          isDarkMode ? 'bg-zinc-800 border-zinc-600/60' : 'bg-white border-zinc-200',
+        )}
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        >
+          {alt && (
+            <span className={cn('truncate font-semibold text-sm', isDarkMode ? 'text-zinc-100' : 'text-zinc-800')}>
+              {alt}
+            </span>
+          )}
+          {dims && (
+            <span className={cn('shrink-0 text-xs tabular-nums', isDarkMode ? 'text-zinc-400' : 'text-zinc-500')}>
+              {dims.w} × {dims.h} px
+            </span>
+          )}
+          {bytes != null && (
+            <span className={cn('shrink-0 text-xs tabular-nums', isDarkMode ? 'text-zinc-400' : 'text-zinc-500')}>
+              {formatBytes(bytes)}
+            </span>
+          )}
         </div>
       )}
     </div>
