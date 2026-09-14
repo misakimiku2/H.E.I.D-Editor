@@ -170,3 +170,30 @@ export function getDirLister(isTauri: boolean, isAndroidApp: boolean): DirLister
   if (isTauri) return tauriDirLister;
   return null;
 }
+
+/* ---------- 根目录记忆（localStorage）：启动零 I/O，抽屉本身每次启动保持关闭 ---------- */
+
+const TREE_ROOT_KEY = 'heid-tree-root';
+
+export function loadTreeRoot(storage: Storage | null = defaultStorage()): string | null {
+  try {
+    return storage?.getItem(TREE_ROOT_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveTreeRoot(path: string | null, storage: Storage | null = defaultStorage()): void {
+  try {
+    if (path) storage?.setItem(TREE_ROOT_KEY, path);
+    else storage?.removeItem(TREE_ROOT_KEY);
+  } catch { /* 忽略持久化失败 */ }
+}
+
+function defaultStorage(): Storage | null {
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage : null;
+  } catch {
+    return null;
+  }
+}

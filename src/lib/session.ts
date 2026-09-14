@@ -94,3 +94,18 @@ export function saveSessionState(state: SessionState, storage: Storage | null = 
     console.warn('[session] 保存会话失败:', e);
   }
 }
+
+/**
+ * 虚拟标签按标题去重（保留首个出现）：
+ * 无路径标签由标题即可确定性重建，同标题多条目只可能是历史 bug 的复制产物
+ * （welcome 标脏导致恢复失效、快照逐次累积），此处收敛保证恢复结果不随重启增长。
+ */
+export function dedupeVirtualByTitle(tabs: SessionTab[]): SessionTab[] {
+  const seen = new Set<string>();
+  return tabs.filter(t => {
+    if (t.kind !== 'virtual') return true;
+    if (seen.has(t.title)) return false;
+    seen.add(t.title);
+    return true;
+  });
+}

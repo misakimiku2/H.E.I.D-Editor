@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadSessionState, saveSessionState, type SessionState } from './session';
+import { loadSessionState, saveSessionState, dedupeVirtualByTitle, type SessionState, type SessionTab } from './session';
 
 /** 基于 Map 的 Storage 桩（vitest node 环境无 localStorage） */
 function memoryStorage(): Storage {
@@ -162,5 +162,29 @@ describe('saveSessionState / loadSessionState', () => {
       tabs: [{ kind: 'virtual', title: '导入.md' }],
       activePath: null,
     });
+  });
+});
+
+describe('dedupeVirtualByTitle', () => {
+  it('同标题的虚拟条目只保留首个，file 条目不受影响', () => {
+    const tabs: SessionTab[] = [
+      { kind: 'virtual', title: 'welcome.ts' },
+      { kind: 'file', path: 'C:/a.md', mdView: 'split' },
+      { kind: 'virtual', title: 'welcome.ts', draft: true },
+      { kind: 'file', path: 'C:/a.md', mdView: 'edit' },
+      { kind: 'virtual', title: 'welcome.ts' },
+    ];
+    const deduped = dedupeVirtualByTitle(tabs);
+    expect(deduped).toEqual([
+      { kind: 'virtual', title: 'welcome.ts' },
+      { kind: 'file', path: 'C:/a.md', mdView: 'split' },
+      { kind: 'file', path: 'C:/a.md', mdView: 'edit' },
+    ]);
+  });
+
+  it('无重复时原样返回，空数组安全', () => {
+    const tabs: SessionTab[] = [{ kind: 'virtual', title: 'untitled-1.txt' }];
+    expect(dedupeVirtualByTitle(tabs)).toEqual(tabs);
+    expect(dedupeVirtualByTitle([])).toEqual([]);
   });
 });

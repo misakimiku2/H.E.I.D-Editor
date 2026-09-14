@@ -3,6 +3,73 @@ mod external;
 mod http;
 mod render;
 
+/// 单实例与文件关联的启动路径：首实例从 argv 收集（NSIS「打开方式」/ 拖到快捷方式传入），
+/// 二次启动经 single-instance 回调转发给已运行实例（聚焦窗口 + heid-open-paths 事件）。
+#[cfg(desktop)]
+mod launch {
+    use std::sync::Mutex;
+    use tauri::{Emitter, Manager, State};
+
+    #[derive(Default)]
+    pub struct LaunchPaths(Mutex<Vec<String>>);
+
+    impl LaunchPaths {
+        /// 取走暂存的启动路径（取后清空，前端挂载时调用一次）
+        pub fn take(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .map(|mut p| std::mem::take(&mut *p))
+                .unwrap_or_default()
+        }
+
+        pub fn extend(&self, paths: &[String]) {
+            if let Ok(mut p) = self.0.lock() {
+                p.extend(paths.iter().cloned());
+            }
+        }
+    }
+
+    /// 从 argv 提取真实存在的文件路径（跳过程序名与选项参数）
+    fn file_args(argv: &[String]) -> Vec<String> {
+        argv.iter()
+            .skip(1)
+            .filter(|a| !a.starts_with('-') && std::path::Path::new(a).is_file())
+            .cloned()
+            .collect()
+    }
+
+    /// 首实例 setup：记录启动参数里的文件路径，前端就绪后经 take_launch_paths 取走
+    pub fn collect_argv(app: &tauri::AppHandle) {
+        let argv: Vec<String> = std::env::args().collect();
+        let paths = file_args(&argv);
+        if !paths.is_empty() {
+            let state: State<LaunchPaths> = app.state();
+            state.extend(&paths);
+        }
+    }
+
+    /// 单实例回调：二次启动不开启新进程，聚焦已有窗口并转发待打开路径
+    /// （argv 由 single-instance 插件以 Vec<String> 传入）
+    pub fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, _cwd: String) {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        let paths = file_args(&argv);
+        if !paths.is_empty() {
+            let _ = app.emit_to("main", "heid-open-paths", paths);
+        }
+    }
+}
+
+/// 首实例启动路径（文件关联「打开方式」）。仅桌面：安卓经 SAF content URI 打开，无 argv
+#[cfg(desktop)]
+#[tauri::command]
+fn take_launch_paths(state: tauri::State<launch::LaunchPaths>) -> Vec<String> {
+    state.take()
+}
+
 /// 文本文件读取：自动检测编码（BOM / UTF-8 / GBK 系）并解码。
 /// force 传入编码 label 时按该编码解码（「以该编码重新打开」）。
 #[tauri::command]
@@ -61,20 +128,35 @@ mod theme_icon {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    /* 桌面专属：单实例必须最先注册（官方要求），启动路径状态供文件关联命令读取 */
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_single_instance::init(launch::on_second_instance))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .manage(launch::LaunchPaths::default());
+
+    builder
         .invoke_handler(tauri::generate_handler![
             read_text_file,
             write_text_file,
             http::http_get,
             external::open_external,
             render::render_page,
-            render::render_result
+            render::render_result,
+            #[cfg(desktop)]
+            take_launch_paths
         ])
         .setup(|app| {
             #[cfg(desktop)]
-            theme_icon::setup(app.handle())?;
+            {
+                theme_icon::setup(app.handle())?;
+                launch::collect_argv(app.handle());
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

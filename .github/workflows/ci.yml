@@ -1,0 +1,108 @@
+name: CI
+
+# 日常校验：vitest 单测 + tsc 类型检查 + 桌面（NSIS）/安卓构建产物。
+# 不依赖任何 secrets（更新签名产物在 tag 触发的 release 工作流中生成）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: 前端测试与类型检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: vitest 单测
+        run: npx vitest run
+
+      - name: tsc 类型检查 + 前端构建
+        run: npm run build
+
+  desktop:
+    name: 桌面构建（Windows / NSIS）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装依赖
+        run: npm ci
+
+      # createUpdaterArtifacts 关闭：签名需要私钥 secrets，日常 CI 不签名
+      - name: tauri build（NSIS 安装包）
+        shell: bash
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: 上传安装包产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: heid-windows-setup
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  android:
+    name: 安卓构建（arm64 debug APK）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 定位 Android NDK
+        run: echo "ANDROID_NDK_HOME=$(ls -d "$ANDROID_HOME"/ndk/* | head -n1)" >> "$GITHUB_ENV"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: tauri android build（arm64 debug APK）
+        run: npx tauri android build --debug --apk --target aarch64
+
+      - name: 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: heid-android-arm64-debug
+          path: |
+            src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk
+          if-no-files-found: error

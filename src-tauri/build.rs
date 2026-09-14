@@ -10,6 +10,7 @@ fn main() {
             "open_external",
             "render_page",
             "render_result",
+            "take_launch_paths",
         ])),
     )
     .expect("failed to run tauri-build");

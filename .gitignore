@@ -9,6 +9,9 @@ src-tauri/gen/schemas/
 # 本地备份
 src-tauri/icons/legacy-backup/
 
+# 更新签名密钥（私钥绝不入库；公钥已内嵌 tauri.conf.json，见 docs/RELEASE.md）
+src-tauri/keys/
+
 # 环境与日志
 *.local
 *.log

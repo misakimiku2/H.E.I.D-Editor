@@ -1,6 +1,6 @@
 [package]
 name = "nexus-editor"
-version = "0.5.0"
+version = "1.0.0"
 description = "Nexus Editor - a standalone code editor extracted from nexus-ai-assistant"
 edition = "2021"
 rust-version = "1.77.2"
@@ -20,6 +20,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 encoding_rs = "0.8"
 ureq = "2"
+
+# 桌面专属插件：单实例聚焦 / 自动更新（安卓按侧载场景走前端版本检查，不引入原生更新器）
+[target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [profile.release]
 codegen-units = 1

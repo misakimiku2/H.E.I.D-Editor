@@ -1,7 +1,7 @@
 {
   "name": "heid",
   "private": true,
-  "version": "0.5.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -29,6 +29,8 @@
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-fs": "^2.4.5",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.11.0",
     "@uiw/react-codemirror": "^4.25.9",
     "clsx": "^2.1.1",
     "defuddle": "^0.19.3",

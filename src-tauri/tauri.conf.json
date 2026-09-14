@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "H.E.I.D",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "identifier": "com.nexus.editor",
   "build": {
     "frontendDist": "../dist",
@@ -28,9 +28,33 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNEMjgyMzQ3NzYxMUQxNEMKUldSTTBSRjJSeU1vUFQ4UVpQajlpKzNjNFh3aG0vTDJSWndTREhNRko1NkM3UStObmkzaUNIeGYK",
+      "endpoints": [
+        "https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "fileAssociations": [
+      {
+        "ext": [
+          "txt", "log", "md", "markdown",
+          "json", "yaml", "yml", "toml", "ini", "xml", "svg",
+          "ts", "tsx", "js", "jsx", "py", "rs", "go", "java",
+          "c", "cpp", "cc", "cxx", "h", "hpp", "cs", "rb", "php",
+          "html", "htm", "css", "scss", "less",
+          "sh", "bash", "sql", "swift", "kt", "kts", "scala", "vue", "svelte"
+        ],
+        "name": "H.E.I.D Document",
+        "description": "文本与代码文档（H.E.I.D 编辑器）",
+        "role": "Editor"
+      }
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

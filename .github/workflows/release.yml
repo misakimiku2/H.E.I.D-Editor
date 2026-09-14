@@ -1,0 +1,91 @@
+name: Release
+
+# 正式发布：推送 v* 标签触发。
+# 桌面：tauri-action 构建带更新签名的 NSIS 安装包 + latest.json，自动发布 GitHub Release
+#       （latest.json 作为 Release 资产，恰为 updater endpoints 指向的地址）。
+# 安卓：侧载场景构建 debug 签名 APK 附到同一 Release（无签名密钥要求）。
+#
+# 前置 secrets（见 docs/RELEASE.md）：
+#   TAURI_SIGNING_PRIVATE_KEY           更新签名私钥（src-tauri/keys/heid.key 的内容）
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  私钥密码（无密码则留空字符串）
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  desktop-release:
+    name: 桌面发布（签名安装包 + latest.json）
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建并发布 Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'H.E.I.D ${{ github.ref_name }}'
+          releaseBody: 'See the assets to download and install this version.'
+          releaseDraft: false
+          prerelease: false
+
+  android-release:
+    name: 安卓发布（侧载 APK）
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 定位 Android NDK
+        run: echo "ANDROID_NDK_HOME=$(ls -d "$ANDROID_HOME"/ndk/* | head -n1)" >> "$GITHUB_ENV"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: tauri android build（arm64 debug APK）
+        run: npx tauri android build --debug --apk --target aarch64
+
+      - name: 附到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk

@@ -1,7 +1,7 @@
 # H.E.I.D 后续开发规划
 
 > 定位：**轻量文本编辑器**。每项功能都要过"轻量"这道门槛：不显著增加包体积、不引入常驻后台、不让界面复杂化。
-> 当前版本：v0.5.0（2026-09，未发布）
+> 当前版本：v1.0.0（2026-09，发布链路就绪）
 
 ## 版本策略
 
@@ -72,14 +72,25 @@ v1.1 时核实的缺口已全部补齐（见 v0.3 一节的勾选）。
 > v0.5 后续细化：文件树实时 watch（fs 插件 watch 已授权）、文件树重命名/删除、
 > 网址导入的图片下载到本地、导出 HTML 的代码高亮、欢迎页文档内容按语言切换、en 词典懒加载（当前主包 +23KB）。
 
-## v1.0.0 —— 正式发布（发布与工程化）
+## v1.0.0 —— 正式发布（发布与工程化）✅ 已完成（2026-09）
 
-> 以下发布门槛全部就位（连同 v0.3 ~ v0.5 的功能面）即升 **v1.0.0 正式发布**。
+> 以下发布门槛全部就位（连同 v0.3 ~ v0.5 的功能面），版本号已升至 **v1.0.0**。
 
-15. **文件关联与单实例**：NSIS 注册 `.txt/.md/.json/...` 的"打开方式"，argv 路径传入 + 单实例聚焦（`tauri-plugin-single-instance`）
-16. **自动更新**：`tauri-plugin-updater` + 签名发布流程（安卓按侧载场景可只做版本检查提示）
-17. **CI**：GitHub Actions —— vitest + `tsc` + 桌面/安卓构建产物
-18. **代码结构**：`App.tsx`（约 1660 行）拆分为文件读写、标签页管理、平台适配等 hooks；核心路径补单测
+15. ✅ **文件关联与单实例**
+    - NSIS 经 `bundle.fileAssociations` 注册 40+ 文本/代码扩展名的「打开方式」（Editor 角色）
+    - `tauri-plugin-single-instance`：二次启动不开启新进程，聚焦已有窗口；
+      argv 路径首实例经 `take_launch_paths` 命令取走、二次实例经 `heid-open-paths` 事件转发，前端统一走 openPathIntoTab
+16. ✅ **自动更新**
+    - 桌面 `tauri-plugin-updater` + `createUpdaterArtifacts`：minisign 密钥对已生成
+      （私钥本地保存不入库，公钥内嵌配置，见 `docs/RELEASE.md`）；启动 4s 后静默检查（24h 节流）+「关于」弹窗手动检查，确认后下载安装并经 plugin-process 重启
+    - 安卓侧载：复用既有 `http_get` 抓取 `latest.json` 比较版本，有新版提示「前往下载」跳转 Releases 页；浏览器模式无更新通道
+    - 发布流程：推送 `v*` 标签触发 release 工作流，tauri-action 产出签名安装包 + latest.json 自动建 Release
+17. ✅ **CI**：GitHub Actions（`.github/workflows/ci.yml`）—— vitest + tsc + 前端构建、Windows NSIS 桌面构建（无 secrets 依赖，关闭签名产物）、安卓 arm64 debug APK 构建；`release.yml` 按标签签名发布
+18. ✅ **代码结构**：`App.tsx`（2743 行）拆分为 9 个 hooks（useTheme / useEditorState / useDiffTimelines / useFileActions / useSessionPersistence / useDiscardConfirm / usePlatformIntegration / useAppShortcuts / useSplitScroll）+ 纯逻辑库（lib/fileIO、lib/tabModel、lib/tabHistory、lib/update 等）；核心路径补单测（撤销历史合并/截断、文件解码与换行符归一、版本比较、latest.json 解析、自动检查节流），前端单测 235 → 254 条
+
+> v1.0 后续可议（不影响发布）：文件树实时 watch 与重命名/删除、网址导入图片下载到本地、
+> 导出 HTML 的代码高亮、欢迎页文案按语言切换、en 词典懒加载（当前主包 +23KB）、
+> 小地图大文件适配（待真实 MB 级文档验证）、安卓 release 签名（侧载 debug 签名已够用）。
 
 ---
 
