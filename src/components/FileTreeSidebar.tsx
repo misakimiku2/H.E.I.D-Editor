@@ -1,13 +1,20 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown, ChevronRight, FileText, Folder, FolderX, FolderOpen,
   Loader2, PanelLeftClose, RefreshCw,
+  FilePlus, FolderPlus, Scissors, Copy, ClipboardPaste, Pencil, Trash2, Link2, FolderSearch,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import {
-  getDirLister, makeRoot, toggleDir, withChildren, withError, type DirLister, type TreeNode,
+  getDirLister, makeRoot, toggleDir, withChildren, withError,
+  joinPath, parentPathOf, findNode, isValidEntryName, uniqueEntryName, relativePathUnderRoot,
+  type DirLister, type TreeNode,
 } from '../lib/fileTree';
+import { fsMkdir, fsRename, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
+import { writeLocalPath } from '../lib/fileIO';
+import { appAlert } from '../lib/appAlert';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 
 export interface SidebarTabInfo {
   id: string;
@@ -29,6 +36,14 @@ interface FileTreeSidebarProps {
   onRootChange: (path: string | null) => void;
   /** 收起抽屉 */
   onClose: () => void;
+  /** 文件管理（新建/重命名/删除/剪贴板）当前环境是否可用（桌面 Tauri） */
+  canManage: boolean;
+  /** 危险操作确认（删除）：resolve true = 确认 */
+  askDangerConfirm: (message: string, confirmText: string) => Promise<boolean>;
+  /** 树内重命名/移动完成后同步标签页（oldPath 自身或其子树内路径 → newPath） */
+  onTabsRenamed: (oldPath: string, newPath: string, isDir: boolean) => void;
+  /** 树内删除完成后同步标签页（干净标签关闭，脏标签摘除路径保留缓冲） */
+  onFileDeleted: (path: string) => void;
 }
 
 const lister: DirLister | null = getDirLister(
@@ -36,16 +51,90 @@ const lister: DirLister | null = getDirLister(
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window && /Android/i.test(window.navigator.userAgent),
 );
 
+/** 新建/重命名共用的内联命名行：Enter 确认、Esc 取消、失焦确认（确认/取消只生效一次） */
+function NameRow({
+  depth, isDir, initial = '', selectStem = false, isDarkMode, placeholder, onCommit, onCancel,
+}: {
+  depth: number;
+  isDir: boolean;
+  initial?: string;
+  selectStem?: boolean;
+  isDarkMode: boolean;
+  placeholder?: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const doneRef = useRef(false);
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.focus();
+    if (selectStem) {
+      const dot = initial.lastIndexOf('.');
+      el.setSelectionRange(0, dot > 0 ? dot : initial.length);
+    } else {
+      el.select();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const commit = () => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    const value = inputRef.current?.value ?? '';
+    if (!value.trim()) { onCancel(); return; }
+    onCommit(value);
+  };
+  const cancel = () => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    onCancel();
+  };
+  return (
+    <div style={{ paddingLeft: 8 + depth * 12 }} className="heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-7 flex items-center gap-1.5">
+      {isDir
+        ? <Folder size={13} className="shrink-0 opacity-70" />
+        : <FileText size={13} className="shrink-0 opacity-60" />}
+      <input
+        ref={inputRef}
+        defaultValue={initial}
+        placeholder={placeholder}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit();
+          else if (e.key === 'Escape') cancel();
+          else e.stopPropagation();
+        }}
+        onBlur={commit}
+        className={cn(
+          'flex-1 min-w-0 h-6 px-1.5 rounded-md border text-xs outline-none',
+          isDarkMode
+            ? 'bg-zinc-900 border-emerald-500/60 text-zinc-100 placeholder-zinc-600'
+            : 'bg-white border-emerald-500 text-zinc-800 placeholder-zinc-400',
+        )}
+      />
+    </div>
+  );
+}
+
 /**
  * 文件树侧栏（默认关闭）：懒加载目录树，点击文件走既有打开通道；
- * 活动标签高亮、脏状态橙点；刷新重载根目录；不做重命名/删除/拖拽。
+ * 活动标签高亮、脏状态橙点；刷新重载根目录。
+ * 桌面端附带文件管理：右键新建/重命名/删除/剪切复制粘贴/复制路径/资源管理器中显示
+ * （走自定义 fs_* 命令；安卓 SAF 桥无对应能力，canManage=false 时仅导航）。
  */
 export function FileTreeSidebar({
   rootPath, open, overlay, isDarkMode, activeTabId, tabs,
   onOpenFile, onRootChange, onClose,
+  canManage, askDangerConfirm, onTabsRenamed, onFileDeleted,
 }: FileTreeSidebarProps) {
   const t = useT();
   const [tree, setTree] = useState<TreeNode | null>(null);
+  /* 文件剪贴板（树内剪切/复制）；cut=true 表示粘贴后删除源 */
+  const [clip, setClip] = useState<{ path: string; name: string; isDir: boolean; cut: boolean } | null>(null);
+  /* 内联命名行：新建（挂载于父目录内）/ 重命名（替换原行） */
+  const [creating, setCreating] = useState<{ parentPath: string; isDir: boolean } | null>(null);
+  const [renaming, setRenaming] = useState<{ path: string; name: string; isDir: boolean } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
 
   const dirtyMap = useMemo(() => {
     const m = new Map<string, boolean>();
@@ -61,6 +150,15 @@ export function FileTreeSidebar({
     } catch (e: any) {
       setTree(prev => (prev ? withError(prev, node.path, e?.message ?? String(e)) : prev));
     }
+  }, []);
+
+  /** 重载单个目录（管理操作后同步该层视图；失败静默，下次展开会重读） */
+  const reloadDir = useCallback(async (dirPath: string) => {
+    if (!lister) return;
+    try {
+      const entries = await lister.list(dirPath);
+      setTree(prev => (prev ? withChildren(prev, dirPath, entries) : prev));
+    } catch { /* 忽略：下次展开时重读 */ }
   }, []);
 
   /* 抽屉首次打开时恢复根目录列表（启动本身不产生 I/O） */
@@ -88,47 +186,194 @@ export function FileTreeSidebar({
     if (!node.expanded && node.children === null) void ensureChildren(node);
   }, [ensureChildren]);
 
+  /* 长文件名悬停滚动：进入行时测量溢出量写入 --name-shift（无溢出为 0，动画静止） */
+  const handleRowEnter = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    const clip = e.currentTarget.querySelector<HTMLElement>('.heid-name-clip');
+    const text = e.currentTarget.querySelector<HTMLElement>('.heid-name-text');
+    if (!clip || !text) return;
+    const shift = clip.clientWidth - text.scrollWidth - 4; /* 滚到底留一点呼吸空隙 */
+    text.style.setProperty('--name-shift', `${Math.min(0, shift)}px`);
+  }, []);
+
+  /* ---- 管理操作（桌面） ---- */
+
+  const opFailed = useCallback((e: unknown) => {
+    appAlert(t('ctx.opFailed', { msg: e instanceof Error ? e.message : String(e) }));
+  }, [t]);
+
+  const startCreate = useCallback((parentPath: string, isDir: boolean) => {
+    setCreating({ parentPath, isDir });
+    /* 父目录折叠时先展开（含未加载的懒加载层） */
+    const node = tree ? findNode(tree, parentPath) : null;
+    if (node && !node.expanded) {
+      setTree(prev => (prev ? toggleDir(prev, parentPath) : prev));
+      if (node.children === null) void ensureChildren(node);
+    }
+  }, [tree, ensureChildren]);
+
+  const commitCreate = useCallback(async (name: string) => {
+    const target = creating;
+    setCreating(null);
+    if (!target) return;
+    if (!isValidEntryName(name)) { appAlert(t('tree.invalidName')); return; }
+    const newPath = joinPath(target.parentPath, name);
+    try {
+      if (target.isDir) await fsMkdir(newPath);
+      else await writeLocalPath(newPath, '', 'utf-8', false);
+      await reloadDir(target.parentPath);
+      if (!target.isDir) onOpenFile(newPath);
+    } catch (e) { opFailed(e); }
+  }, [creating, onOpenFile, opFailed, reloadDir, t]);
+
+  const commitRename = useCallback(async (name: string) => {
+    const target = renaming;
+    setRenaming(null);
+    if (!target || name === target.name) return;
+    if (!isValidEntryName(name)) { appAlert(t('tree.invalidName')); return; }
+    try {
+      const newPath = joinPath(parentPathOf(target.path), name);
+      await fsRename(target.path, newPath);
+      await reloadDir(parentPathOf(target.path));
+      onTabsRenamed(target.path, newPath, target.isDir);
+    } catch (e) { opFailed(e); }
+  }, [renaming, onTabsRenamed, opFailed, reloadDir, t]);
+
+  const handleDelete = useCallback(async (node: TreeNode) => {
+    const ok = await askDangerConfirm(t('tree.deleteConfirm', { name: node.name }), t('tree.delete'));
+    if (!ok) return;
+    try {
+      await fsDelete(node.path, node.isDir);
+      await reloadDir(parentPathOf(node.path));
+      onFileDeleted(node.path);
+    } catch (e) { opFailed(e); }
+  }, [askDangerConfirm, onFileDeleted, opFailed, reloadDir, t]);
+
+  const handlePaste = useCallback(async (targetDir: string) => {
+    const c = clip;
+    if (!c) return;
+    try {
+      const entries = await lister?.list(targetDir).catch(() => []) ?? [];
+      const destName = uniqueEntryName(c.name, entries.map(e => e.name), t('tree.copySuffix'));
+      const dest = joinPath(targetDir, destName);
+      if (dest !== c.path) {
+        if (c.cut) {
+          try {
+            await fsRename(c.path, dest);
+          } catch {
+            /* 跨盘移动 rename 不支持：复制 + 删除兜底 */
+            await fsCopy(c.path, dest);
+            await fsDelete(c.path, c.isDir);
+          }
+        } else {
+          await fsCopy(c.path, dest);
+        }
+      }
+      if (c.cut) setClip(null);
+      await reloadDir(targetDir);
+    } catch (e) { opFailed(e); }
+  }, [clip, opFailed, reloadDir, t]);
+
+  /* ---- 右键菜单 ---- */
+
+  const openMenu = useCallback((e: React.MouseEvent, node: TreeNode | null) => {
+    if (!canManage) return; /* 安卓 SAF / 浏览器：不接管（保持系统行为） */
+    e.preventDefault();
+    e.stopPropagation();
+    const isRoot = node === null || node.path === rootPath;
+    const selfDir = node?.isDir ? node.path : rootPath;
+    const parentDir = node && !node.isDir ? parentPathOf(node.path) : selfDir;
+    const isDir = !!node?.isDir;
+    const items: ContextMenuItem[] = [
+      { icon: <FilePlus size={13} />, label: t('menu.newFile'), onSelect: () => startCreate(selfDir, false) },
+      { icon: <FolderPlus size={13} />, label: t('tree.newFolder'), onSelect: () => startCreate(selfDir, true) },
+      { separatorBefore: true, icon: <Scissors size={13} />, label: t('ctx.cut'), disabled: isRoot, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: true }) },
+      { icon: <Copy size={13} />, label: t('ctx.copy'), disabled: isRoot, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: false }) },
+      { icon: <ClipboardPaste size={13} />, label: t('ctx.paste'), disabled: !clip, onSelect: () => void handlePaste(parentDir) },
+      { separatorBefore: true, icon: <Pencil size={13} />, label: t('tree.rename'), disabled: isRoot || !!renaming, onSelect: () => node && setRenaming({ path: node.path, name: node.name, isDir: node.isDir }) },
+      { icon: <Trash2 size={13} />, label: t('tree.delete'), danger: true, disabled: isRoot, onSelect: () => node && void handleDelete(node) },
+      { separatorBefore: true, icon: <Link2 size={13} />, label: t('tree.copyPath'), onSelect: () => void writeClipboardText(node?.path ?? rootPath).catch(() => {}) },
+      { icon: <Link2 size={13} />, label: t('tree.copyRelPath'), onSelect: () => void writeClipboardText(relativePathUnderRoot(node?.path ?? rootPath, rootPath)).catch(() => {}) },
+      { icon: <FolderSearch size={13} />, label: t('tree.reveal'), onSelect: () => void fsReveal(node?.path ?? rootPath).catch(opFailed) },
+    ];
+    /* 目录/根才有「刷新」语义（对文件无意义） */
+    if (!node || isDir) {
+      items.push({ separatorBefore: true, icon: <RefreshCw size={13} />, label: t('tree.refresh'), onSelect: () => void reloadDir(selfDir) });
+    }
+    setMenu({ x: e.clientX, y: e.clientY, items });
+  }, [canManage, clip, renaming, rootPath, startCreate, handleDelete, handlePaste, opFailed, reloadDir, t]);
+
   const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
     const active = tabs.some(tb => tb.id === activeTabId && tb.path === node.path);
+    /* 行样式与右键菜单项一致：左右留边距的圆角行，悬停同色调 */
+    const rowClass = cn(
+      'heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-7 rounded-lg text-xs flex items-center gap-1.5 transition-colors text-left',
+      active
+        ? (isDarkMode ? 'bg-zinc-700/80 text-zinc-100' : 'bg-zinc-200/80 text-zinc-900')
+        : (isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700'),
+    );
     return (
       <div key={node.path}>
-        <button
-          onClick={() => (node.isDir ? handleDirClick(node) : onOpenFile(node.path))}
-          style={{ paddingLeft: 8 + depth * 12 }}
-          className={cn(
-            'w-full pr-2 h-7 rounded-md text-xs flex items-center gap-1.5 transition-colors text-left',
-            active
-              ? (isDarkMode ? 'bg-zinc-700/80 text-zinc-100' : 'bg-zinc-200/80 text-zinc-900')
-              : (isDarkMode ? 'hover:bg-zinc-700/50 text-zinc-300' : 'hover:bg-zinc-200/60 text-zinc-700'),
-          )}
-          title={node.path}
-        >
-          {node.isDir ? (
-            node.expanded ? <ChevronDown size={12} className="shrink-0 opacity-60" /> : <ChevronRight size={12} className="shrink-0 opacity-60" />
-          ) : (
-            <span className="w-3 shrink-0" />
-          )}
-          {node.isDir
-            ? <Folder size={13} className="shrink-0 opacity-70" />
-            : <FileText size={13} className="shrink-0 opacity-60" />}
-          <span className="truncate flex-1">{node.name}</span>
-          {dirtyMap.get(node.path) && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />}
-        </button>
+        {renaming?.path === node.path ? (
+          <NameRow
+            depth={depth}
+            isDir={node.isDir}
+            initial={node.name}
+            selectStem
+            isDarkMode={isDarkMode}
+            placeholder={t('tree.namePlaceholder')}
+            onCommit={(name) => void commitRename(name)}
+            onCancel={() => setRenaming(null)}
+          />
+        ) : (
+          <button
+            onClick={() => (node.isDir ? handleDirClick(node) : onOpenFile(node.path))}
+            onContextMenu={(e) => openMenu(e, node)}
+            onMouseEnter={handleRowEnter}
+            style={{ paddingLeft: 8 + depth * 12 }}
+            className={rowClass}
+            title={node.path}
+          >
+            {node.isDir ? (
+              node.expanded ? <ChevronDown size={12} className="shrink-0 opacity-60" /> : <ChevronRight size={12} className="shrink-0 opacity-60" />
+            ) : (
+              <span className="w-3 shrink-0" />
+            )}
+            {node.isDir
+              ? <Folder size={13} className="shrink-0 opacity-70" />
+              : <FileText size={13} className="shrink-0 opacity-60" />}
+            <span className="heid-name-clip truncate flex-1 min-w-0">
+              <span className="heid-name-text inline-block whitespace-nowrap">{node.name}</span>
+            </span>
+            {dirtyMap.get(node.path) && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />}
+          </button>
+        )}
         {node.isDir && node.expanded && (
-          node.error ? (
-            <div style={{ paddingLeft: 20 + depth * 12 }} className="pr-2 py-0.5 text-[10px] text-red-500 flex items-center gap-1">
-              <span className="truncate flex-1">{node.error}</span>
-              <button onClick={() => handleDirClick({ ...node, expanded: false })} className="opacity-70 hover:opacity-100">
-                <RefreshCw size={10} />
-              </button>
-            </div>
-          ) : node.children === null ? (
-            <div style={{ paddingLeft: 20 + depth * 12 }} className="py-1 text-zinc-500">
-              <Loader2 size={11} className="animate-spin" />
-            </div>
-          ) : (
-            node.children.map(c => renderNode(c, depth + 1))
-          )
+          <>
+            {creating?.parentPath === node.path && (
+              <NameRow
+                depth={depth + 1}
+                isDir={creating.isDir}
+                isDarkMode={isDarkMode}
+                placeholder={t('tree.namePlaceholder')}
+                onCommit={(name) => void commitCreate(name)}
+                onCancel={() => setCreating(null)}
+              />
+            )}
+            {node.error ? (
+              <div style={{ paddingLeft: 20 + depth * 12 }} className="mx-1.5 w-[calc(100%-12px)] pr-2 py-0.5 text-[10px] text-red-500 flex items-center gap-1">
+                <span className="truncate flex-1">{node.error}</span>
+                <button onClick={() => handleDirClick({ ...node, expanded: false })} className="opacity-70 hover:opacity-100">
+                  <RefreshCw size={10} />
+                </button>
+              </div>
+            ) : node.children === null ? (
+              <div style={{ paddingLeft: 20 + depth * 12 }} className="mx-1.5 py-1 text-zinc-500">
+                <Loader2 size={11} className="animate-spin" />
+              </div>
+            ) : (
+              node.children.map(c => renderNode(c, depth + 1))
+            )}
+          </>
         )}
       </div>
     );
@@ -187,12 +432,27 @@ export function FileTreeSidebar({
             </button>
           )}
         </div>
-        {/* 树体 */}
-        <div className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1">
-          {tree ? tree.children !== null && tree.children.length === 0 ? (
-            <div className="px-3 py-6 text-center text-[11px] opacity-50">{t('tree.empty')}</div>
-          ) : (
-            renderNode(tree, 0)
+        {/* 树体（空白处右键 = 根目录菜单） */}
+        <div className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1" onContextMenu={(e) => openMenu(e, null)}>
+          {tree ? (
+            <>
+              {/* 根目录内新建：命名行置顶（目录内的在对应目录展开区里） */}
+              {creating?.parentPath === rootPath && (
+                <NameRow
+                  depth={0}
+                  isDir={creating.isDir}
+                  isDarkMode={isDarkMode}
+                  placeholder={t('tree.namePlaceholder')}
+                  onCommit={(name) => void commitCreate(name)}
+                  onCancel={() => setCreating(null)}
+                />
+              )}
+              {tree.children !== null && tree.children.length === 0 && !creating ? (
+                <div className="px-3 py-6 text-center text-[11px] opacity-50">{t('tree.empty')}</div>
+              ) : (
+                renderNode(tree, 0)
+              )}
+            </>
           ) : (
             <div className="px-3 py-6 text-center">
               <Loader2 size={13} className="animate-spin mx-auto opacity-50" />
@@ -200,6 +460,9 @@ export function FileTreeSidebar({
           )}
         </div>
       </div>
+      {menu && (
+        <ContextMenu menu={{ x: menu.x, y: menu.y, items: menu.items }} isDarkMode={isDarkMode} onClose={() => setMenu(null)} />
+      )}
     </>
   );
 }

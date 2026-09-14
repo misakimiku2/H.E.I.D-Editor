@@ -12,6 +12,7 @@ import {
 import { decodeAs, detectEncoding } from './encoding';
 import { rt } from './i18nContext';
 import type { FileTab } from './tabModel';
+import { appAlert } from './appAlert';
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -221,7 +222,7 @@ export async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = f
     }
     const ok = await androidWriteUri(target, content, tab.encoding, tab.bom);
     if (!ok) {
-      if (!silent) alert(rt('save.errAndroidWrite'));
+      if (!silent) appAlert(rt('save.errAndroidWrite'));
       return { ok: false, savedPath: null };
     }
     return { ok: true, savedPath: target };
@@ -233,7 +234,7 @@ export async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = f
         return { ok: true, savedPath: tab.path };
       } catch (e) {
         console.error('Save failed:', e);
-        if (!silent) alert(rt('save.errGeneric', { msg: String(e) }));
+        if (!silent) appAlert(rt('save.errGeneric', { msg: String(e) }));
         return { ok: false, savedPath: null };
       }
     }
@@ -246,7 +247,7 @@ export async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = f
         return { ok: true, savedPath: target };
       } catch (e) {
         console.error('Save failed:', e);
-        if (!silent) alert(rt('save.errGeneric', { msg: String(e) }));
+        if (!silent) appAlert(rt('save.errGeneric', { msg: String(e) }));
         return { ok: false, savedPath: null };
       }
     }

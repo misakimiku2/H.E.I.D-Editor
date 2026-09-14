@@ -1,19 +1,26 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, highlightWhitespace, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine } from '@codemirror/view';
-import { history, indentWithTab } from '@codemirror/commands';import { syntaxTree, ensureSyntaxTree, indentUnit, foldGutter, bracketMatching, indentOnInput, syntaxHighlighting, foldKeymap, HighlightStyle, defaultHighlightStyle } from '@codemirror/language';
-import { highlightSelectionMatches } from '@codemirror/search';
+import { history as historyExtension, indentWithTab, toggleComment, selectAll, deleteLine, moveLineUp, moveLineDown, copyLineDown } from '@codemirror/commands';import { syntaxTree, ensureSyntaxTree, indentUnit, foldGutter, bracketMatching, indentOnInput, syntaxHighlighting, foldKeymap, HighlightStyle, defaultHighlightStyle, foldAll, unfoldAll, language as languageFacet } from '@codemirror/language';
+import { highlightSelectionMatches, selectSelectionMatches } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { Tag, tags as t, highlightTree, type Highlighter } from '@lezer/highlight';
 import type { Tree } from '@lezer/common';
 import { EditorState, Extension, StateEffect } from '@codemirror/state';
-import { Type } from 'lucide-react';
+import {
+  Type,
+  Undo2, Redo2, Scissors, Copy, ClipboardPaste, TextSelect, Search, MessageSquareQuote,
+  CaseUpper, CaseLower, ArrowUpNarrowWide, ArrowDownWideNarrow, ListX, Eraser,
+  CopyPlus, ArrowUp, ArrowDown, Trash2, Regex, FoldVertical, UnfoldVertical,
+} from 'lucide-react';
 import { useT } from '../lib/i18nContext';
 import { cn } from '../lib/utils';
 import { FormatMenu, INLINE_WRAPS, transformSlice, footnoteEdit, type MdOp } from './MarkdownTools';
 import { spliceSelectionTab } from '../lib/markdownTabs';
 import { FindReplaceBar } from './FindReplaceBar';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { findHighlightExtension } from '../lib/editorSearch';
+import { readClipboardText, writeClipboardText } from '../lib/fileOps';
 import { loadLanguageExtension } from '../lib/codemirror';
 import { DEFAULT_SETTINGS, type EditorSettings } from '../lib/settings';
 import {
@@ -144,6 +151,82 @@ function getHighlightedLineHTML(view: EditorView, from: number, to: number, high
   return html;
 }
 
+/* ---------- 编辑器右键菜单操作：全部经由 CodeMirror view 读写（不依赖 DOM 焦点） ---------- */
+
+/** 行排序 / 去重共用：数字感知、大小写不敏感 */
+const LINE_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+/** 选区行范围（多行选区含尾行；单行选区即光标行） */
+function selectedLines(view: EditorView): { fromLine: number; toLine: number } {
+  const sel = view.state.selection.main;
+  return { fromLine: view.state.doc.lineAt(sel.from).number, toLine: view.state.doc.lineAt(sel.to).number };
+}
+
+function replaceSelection(view: EditorView, transform: (text: string) => string): void {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  const replaced = transform(view.state.sliceDoc(sel.from, sel.to));
+  view.dispatch({
+    changes: { from: sel.from, to: sel.to, insert: replaced },
+    selection: { anchor: sel.from, head: sel.from + replaced.length },
+  });
+  view.focus();
+}
+
+/** 对选区行（无选区时整篇）做整块行级替换 */
+function replaceSelectedLines(view: EditorView, transform: (lines: string[]) => string[] | null): void {
+  const { fromLine, toLine } = selectedLines(view);
+  const start = view.state.doc.line(fromLine);
+  const end = view.state.doc.line(toLine);
+  const lines = view.state.sliceDoc(start.from, end.to).split('\n');
+  const replaced = transform(lines);
+  if (replaced === null) return;
+  const text = replaced.join('\n');
+  view.dispatch({
+    changes: { from: start.from, to: end.to, insert: text },
+    selection: { anchor: start.from, head: start.from + text.length },
+  });
+  view.focus();
+}
+
+async function copySelectionText(view: EditorView): Promise<void> {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  await writeClipboardText(view.state.sliceDoc(sel.from, sel.to));
+}
+
+async function cutSelectionText(view: EditorView): Promise<void> {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  await writeClipboardText(view.state.sliceDoc(sel.from, sel.to));
+  view.dispatch({ changes: { from: sel.from, to: sel.to, insert: '' }, selection: { anchor: sel.from }, userEvent: 'delete.cut' });
+  view.focus();
+}
+
+async function pasteFromClipboard(view: EditorView): Promise<void> {
+  const text = await readClipboardText();
+  if (!text) return;
+  const sel = view.state.selection.main;
+  view.dispatch({
+    changes: { from: sel.from, to: sel.to, insert: text },
+    selection: { anchor: sel.from + text.length },
+    userEvent: 'input.paste',
+  });
+  view.focus();
+}
+
+/** 当前语言是否支持注释（commentTokens 语言数据；纯文本无 → 菜单项隐藏） */
+function hasCommentTokens(view: EditorView): boolean {
+  try {
+    const pos = view.state.selection.main.head;
+    return view.state
+      .languageDataAt<{ line?: string; block?: { open: string; close: string } }>('commentTokens', pos)
+      .some(tk => !!tk && (!!tk.line || !!tk.block));
+  } catch {
+    return false;
+  }
+}
+
 /* ---------- CodeEditor component ---------- */
 
 export interface CodeEditorProps {
@@ -176,6 +259,10 @@ export interface CodeEditorProps {
     onUndo: () => void;
     onRedo: () => void;
   };
+  /** 编辑历史（撤销/重做）：通用右键菜单的撤销重做项（与 markdown 菜单同一数据源） */
+  history?: { canUndo: boolean; canRedo: boolean; onUndo: () => void; onRedo: () => void };
+  /** 打开查找浮层（通用右键菜单「查找/替换」入口） */
+  onFindOpen?: () => void;
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({
@@ -194,6 +281,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onFindClose,
   getPointer,
   markdownMenu,
+  history,
+  onFindOpen,
 }) => {
   /* tags 以 t 导入（@lezer/highlight），翻译函数让位使用别名 tr */
   const tr = useT();
@@ -234,6 +323,19 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   /* markdown 右键格式化后，下一次 onChange 以 major 记入撤销历史 */
   const majorNextRef = useRef(false);
   const [mdMenu, setMdMenu] = useState<{ x: number; y: number; from: number; to: number; text: string } | null>(null);
+  /* 通用右键菜单（非 markdown 格式化路径都走这里；minimap/行号随容器一并接管） */
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  /* 粘贴项可用性：菜单打开后异步探测一次剪贴板读取（无权限时置灰，探测期间按可用展示） */
+  const [pasteAvailable, setPasteAvailable] = useState(true);
+  useEffect(() => {
+    if (!ctxMenu) return;
+    let alive = true;
+    setPasteAvailable(true);
+    readClipboardText()
+      .then(() => { if (alive) setPasteAvailable(true); })
+      .catch(() => { if (alive) setPasteAvailable(false); });
+    return () => { alive = false; };
+  }, [ctxMenu]);
   /* 光标上报去重（extensions memo 重建时避免重复回调同值） */
   const lastCursorRef = useRef<{ line: number; col: number; selChars: number } | null>(null);
   /* 触屏：选区非空时浮出「格式化」入口（长按 contextmenu 在安卓上不可靠） */
@@ -953,18 +1055,102 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
   }, []);
 
-  /* ---- markdown 选区右键格式化 ---- */
+  /* ---- 编辑器右键：markdown 有选区走格式菜单，其余统一弹通用编辑菜单 ---- */
 
   const handleEditorContextMenu = useCallback((e: React.MouseEvent) => {
-    if (!markdownMenu) return;
+    e.preventDefault();
     const view = viewReadyRef.current;
     if (!view) return;
-    const { state } = view;
-    const { from, to } = state.selection.main;
-    if (from === to) return; /* 无选区走浏览器默认菜单 */
-    e.preventDefault();
-    setMdMenu({ x: e.clientX, y: e.clientY, from, to, text: state.sliceDoc(from, to) });
+    const { from, to } = view.state.selection.main;
+    if (markdownMenu && from !== to) {
+      setMdMenu({ x: e.clientX, y: e.clientY, from, to, text: view.state.sliceDoc(from, to) });
+      return;
+    }
+    setCtxMenu({ x: e.clientX, y: e.clientY });
   }, [markdownMenu]);
+
+  /** 通用编辑菜单项：按当前可编辑/选区/语言状态裁剪（右侧快捷键为真实已绑定的键） */
+  const buildEditorMenuItems = useCallback((): ContextMenuItem[] => {
+    const view = viewReadyRef.current;
+    if (!view) return [];
+    const hasSel = view.state.selection.main.from !== view.state.selection.main.to;
+    const readOnly = !editable;
+    const multiLine = (() => {
+      const { fromLine, toLine } = selectedLines(view);
+      return fromLine !== toLine;
+    })();
+    const run = (fn: (view: EditorView) => void | Promise<void>) => () => {
+      const v = viewReadyRef.current;
+      if (v) void fn(v);
+    };
+    const items: ContextMenuItem[] = [];
+    if (history) {
+      items.push(
+        { icon: <Undo2 size={13} />, label: tr('menu.undo'), shortcut: 'Ctrl+Z', disabled: readOnly || !history.canUndo, onSelect: history.onUndo },
+        { icon: <Redo2 size={13} />, label: tr('menu.redo'), shortcut: 'Ctrl+Y', disabled: readOnly || !history.canRedo, onSelect: history.onRedo, separatorBefore: true },
+      );
+    }
+    items.push(
+      { icon: <Scissors size={13} />, label: tr('ctx.cut'), shortcut: 'Ctrl+X', disabled: readOnly || !hasSel, onSelect: run(cutSelectionText) },
+      { icon: <Copy size={13} />, label: tr('ctx.copy'), shortcut: 'Ctrl+C', disabled: !hasSel, onSelect: run(copySelectionText) },
+      { icon: <ClipboardPaste size={13} />, label: tr('ctx.paste'), shortcut: 'Ctrl+V', disabled: readOnly || !pasteAvailable, onSelect: run(pasteFromClipboard) },
+      { icon: <TextSelect size={13} />, label: tr('ctx.selectAll'), shortcut: 'Ctrl+A', onSelect: run(v => { selectAll(v); v.focus(); }), separatorBefore: true },
+      { icon: <Search size={13} />, label: tr('ctx.find'), shortcut: 'Ctrl+F', disabled: !onFindOpen, onSelect: () => onFindOpen?.() },
+    );
+    if (!readOnly && hasCommentTokens(view)) {
+      items.push({ icon: <MessageSquareQuote size={13} />, label: tr('ctx.toggleComment'), shortcut: 'Ctrl+/', onSelect: run(v => { toggleComment(v); v.focus(); }) });
+    }
+    if (!readOnly && hasSel) {
+      items.push(
+        { icon: <CaseUpper size={13} />, label: tr('ctx.uppercase'), onSelect: run(v => replaceSelection(v, s => s.toUpperCase())), separatorBefore: true },
+        { icon: <CaseLower size={13} />, label: tr('ctx.lowercase'), onSelect: run(v => replaceSelection(v, s => s.toLowerCase())) },
+      );
+      if (multiLine) {
+        items.push(
+          { icon: <ArrowUpNarrowWide size={13} />, label: tr('ctx.sortAsc'), onSelect: run(v => replaceSelectedLines(v, lines => [...lines].sort((a, b) => LINE_COLLATOR.compare(a, b)))) },
+          { icon: <ArrowDownWideNarrow size={13} />, label: tr('ctx.sortDesc'), onSelect: run(v => replaceSelectedLines(v, lines => [...lines].sort((a, b) => LINE_COLLATOR.compare(b, a)))) },
+          { icon: <ListX size={13} />, label: tr('ctx.deleteDupLines'), onSelect: run(v => replaceSelectedLines(v, lines => {
+              const seen = new Set<string>();
+              const kept = lines.filter(l => (seen.has(l) ? false : (seen.add(l), true)));
+              return kept.length === lines.length ? null : kept;
+            })) },
+        );
+      }
+    }
+    if (!readOnly) {
+      items.push({ icon: <Eraser size={13} />, label: tr('ctx.trimTrailing'), onSelect: run(v => {
+        const sel = v.state.selection.main;
+        const first = sel.empty ? 1 : v.state.doc.lineAt(sel.from).number;
+        const last = sel.empty ? v.state.doc.lines : v.state.doc.lineAt(sel.to).number;
+        const changes: { from: number; to: number }[] = [];
+        for (let n = first; n <= last; n++) {
+          const line = v.state.doc.line(n);
+          const trimmed = line.text.replace(/[ \t]+$/, '');
+          if (trimmed.length !== line.text.length) changes.push({ from: line.from + trimmed.length, to: line.to });
+        }
+        if (changes.length) v.dispatch({ changes });
+        v.focus();
+      }) });
+    }
+    if (!readOnly) {
+      items.push(
+        { icon: <CopyPlus size={13} />, label: tr('ctx.copyLineDown'), onSelect: run(v => { copyLineDown(v); v.focus(); }), separatorBefore: true },
+        { icon: <ArrowUp size={13} />, label: tr('ctx.moveLineUp'), onSelect: run(v => { moveLineUp(v); v.focus(); }) },
+        { icon: <ArrowDown size={13} />, label: tr('ctx.moveLineDown'), onSelect: run(v => { moveLineDown(v); v.focus(); }) },
+        { icon: <Trash2 size={13} />, label: tr('ctx.deleteLine'), onSelect: run(v => { deleteLine(v); v.focus(); }) },
+      );
+    }
+    if (hasSel) {
+      items.push({ icon: <Regex size={13} />, label: tr('ctx.selectMatches'), onSelect: run(v => { selectSelectionMatches(v); v.focus(); }), separatorBefore: true });
+    }
+    if (!!view.state.facet(languageFacet)) {
+      items.push(
+        { icon: <FoldVertical size={13} />, label: tr('ctx.foldAll'), onSelect: run(v => { foldAll(v); v.focus(); }), separatorBefore: !hasSel },
+        { icon: <UnfoldVertical size={13} />, label: tr('ctx.unfoldAll'), onSelect: run(v => { unfoldAll(v); v.focus(); }) },
+      );
+    }
+    return items;
+  }, [editable, history, pasteAvailable, onFindOpen, tr]);
 
   const applyEditorMdOp = useCallback((op: MdOp) => {
     const view = viewReadyRef.current;
@@ -1142,7 +1328,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     const exts: Extension[] = [
       syntaxHighlighting(isDarkMode ? vsCodeDarkHighlightStyle : vsCodeLightHighlightStyle),
       highlightSpecialChars(),
-      history(),
+      historyExtension(),
       drawSelection(),
       dropCursor(),
       EditorState.allowMultipleSelections.of(true),
@@ -1172,6 +1358,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         ...closeBracketsKeymap,
         indentWithTab,
         { key: 'Mod-s', run: () => { onSaveRef.current?.(); return true; } },
+        { key: 'Mod-/', run: toggleComment },
         { key: 'Escape', run: () => {
           if (!findOpenRef.current) return false;
           onFindCloseRef.current?.();
@@ -1269,6 +1456,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           onRedo={() => { setMdMenu(null); markdownMenu.onRedo(); }}
           onApply={applyEditorMdOp}
           onClose={() => setMdMenu(null)}
+        />
+      )}
+      {ctxMenu && (
+        <ContextMenu
+          menu={{ x: ctxMenu.x, y: ctxMenu.y, items: buildEditorMenuItems() }}
+          isDarkMode={isDarkMode}
+          onClose={() => setCtxMenu(null)}
         />
       )}
       {IS_ANDROID_APP && markdownMenu && touchFmtBtn && !mdMenu && (

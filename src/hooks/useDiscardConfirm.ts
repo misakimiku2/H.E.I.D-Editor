@@ -8,6 +8,8 @@
 import { useCallback, useRef, useState } from 'react';
 
 export interface PendingDiscardConfirm {
+  /** 弹窗标题；缺省「未保存的更改」（文件树删除等场景传入自己的标题） */
+  title?: string;
   message: string;
   confirmText: string;
   saveText: string | null;
@@ -25,10 +27,12 @@ export function useDiscardConfirm() {
     message: string,
     confirmText: string,
     saveText?: string,
+    title?: string,
   ): Promise<DiscardDecision> => {
     if (pendingDiscardRef.current) return Promise.resolve('cancel');
     return new Promise(resolve => {
       setPendingDiscard({
+        title,
         message,
         confirmText,
         saveText: saveText ?? null,

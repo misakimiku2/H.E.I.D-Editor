@@ -36,6 +36,58 @@ function pathTail(p: string): string {
   return tail || p;
 }
 
+/** 目录路径与子项名拼接（沿用根路径已有的分隔符风格） */
+export function joinPath(dir: string, name: string): string {
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
+  return dir.endsWith('/') || dir.endsWith('\\') ? dir + name : dir + sep + name;
+}
+
+/** 新建/重命名条目名校验：非空、不含路径分隔与 Windows 保留字符、不以空格或点结尾 */
+export function isValidEntryName(name: string): boolean {
+  if (!name || name !== name.trim() || /[\\/:*?"<>|]/.test(name)) return false;
+  if (name === '.' || name === '..') return false;
+  if (/[. ]$/.test(name)) return false;
+  return true;
+}
+
+/** 目标目录已存在同名时按「name - 副本 / name - 副本 2…」推导不冲突的名字 */
+export function uniqueEntryName(name: string, existing: readonly string[], suffix: string): string {
+  const names = new Set(existing);
+  if (!names.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  for (let i = 1; ; i++) {
+    const candidate = i === 1 ? `${stem} - ${suffix}${ext}` : `${stem} - ${suffix} ${i}${ext}`;
+    if (!names.has(candidate)) return candidate;
+  }
+}
+
+/** 绝对路径转相对根目录的显示路径；不在根下时原样返回 */
+export function relativePathUnderRoot(path: string, root: string): string {
+  const normRoot = root.replace(/[\\/]+$/, '');
+  if (!path.startsWith(normRoot)) return path;
+  const rest = path.slice(normRoot.length).replace(/^[\\/]+/, '');
+  return rest || path;
+}
+
+/** 父目录路径（末段剥除；根级路径原样返回） */
+export function parentPathOf(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, '');
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  return idx > 0 ? trimmed.slice(0, idx) : trimmed;
+}
+
+/** 按 path 深度查找节点（树内右键/新建定位父目录用） */
+export function findNode(node: TreeNode, path: string): TreeNode | null {
+  if (node.path === path) return node;
+  for (const c of node.children ?? []) {
+    const found = findNode(c, path);
+    if (found) return found;
+  }
+  return null;
+}
+
 export function makeRoot(rootPath: string): TreeNode {
   return { path: rootPath, name: pathTail(rootPath), isDir: true, expanded: true, children: null, error: null };
 }
@@ -159,10 +211,6 @@ export const tauriDirLister: DirLister = {
   },
 };
 
-function joinPath(dir: string, name: string): string {
-  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
-  return dir.endsWith('/') || dir.endsWith('\\') ? dir + name : dir + sep + name;
-}
 
 /** 当前运行环境的目录提供者；浏览器（无 Tauri）返回 null */
 export function getDirLister(isTauri: boolean, isAndroidApp: boolean): DirLister | null {

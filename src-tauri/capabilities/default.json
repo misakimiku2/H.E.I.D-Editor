@@ -44,6 +44,13 @@
       "identifier": "fs:allow-watch",
       "allow": [{ "path": "**" }]
     },
-    "fs:allow-unwatch"
+    "fs:allow-unwatch",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "allow-fs-mkdir",
+    "allow-fs-rename",
+    "allow-fs-copy",
+    "allow-fs-delete",
+    "allow-fs-reveal"
   ]
 }

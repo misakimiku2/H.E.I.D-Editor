@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  isUnderRoot, makeRoot, sortEntries, toggleDir, withChildren, withError,
+  findNode, isUnderRoot, isValidEntryName, joinPath, makeRoot, parentPathOf,
+  relativePathUnderRoot, sortEntries, toggleDir, uniqueEntryName,
+  withChildren, withError,
   type DirEntry, type TreeNode,
 } from './fileTree';
 
@@ -75,5 +77,72 @@ describe('路径归属', () => {
     expect(isUnderRoot('/home/user/docs2/a.txt', '/home/user/docs')).toBe(false);
     expect(isUnderRoot('/home/user/docs', '/home/user/docs')).toBe(true);
     expect(isUnderRoot('content://x/tree/primary%3AD/doc/uri', 'content://x/tree/primary%3AD')).toBe(true);
+  });
+});
+
+describe('isValidEntryName', () => {
+  it('接受普通文件与文件夹名', () => {
+    for (const n of ['a.md', '笔记', 'src', '.gitignore', 'a b.c', 'v1.2.3']) {
+      expect(isValidEntryName(n), n).toBe(true);
+    }
+  });
+  it('拒绝空名、路径分隔符与 Windows 保留字符', () => {
+    for (const n of ['', '  ', 'a/b', 'a\\b', 'a:b', 'a*b', 'a?b', '"q"', '<x>', 'a|b']) {
+      expect(isValidEntryName(n), n).toBe(false);
+    }
+  });
+  it('拒绝点目录与结尾的点和空格（Windows 语义）', () => {
+    for (const n of ['.', '..', 'a.', 'a ', 'a. ']) {
+      expect(isValidEntryName(n), n).toBe(false);
+    }
+  });
+});
+
+describe('uniqueEntryName', () => {
+  it('无冲突时原样返回', () => {
+    expect(uniqueEntryName('a.md', ['b.md'], '副本')).toBe('a.md');
+  });
+  it('冲突时扩展名前的主名加后缀，序号递增', () => {
+    expect(uniqueEntryName('a.md', ['a.md'], '副本')).toBe('a - 副本.md');
+    expect(uniqueEntryName('a.md', ['a.md', 'a - 副本.md'], '副本')).toBe('a - 副本 2.md');
+    expect(uniqueEntryName('a.md', ['a.md', 'a - 副本.md', 'a - 副本 2.md'], '副本')).toBe('a - 副本 3.md');
+  });
+  it('无扩展名与隐藏文件按整名处理', () => {
+    expect(uniqueEntryName('src', ['src'], 'copy')).toBe('src - copy');
+    expect(uniqueEntryName('.gitignore', ['.gitignore'], 'copy')).toBe('.gitignore - copy');
+  });
+});
+
+describe('relativePathUnderRoot', () => {
+  it('剥离根前缀与首部分隔符', () => {
+    expect(relativePathUnderRoot('C:\\root\\a\\b.md', 'C:\\root')).toBe('a\\b.md');
+    expect(relativePathUnderRoot('/root/a/b.md', '/root')).toBe('a/b.md');
+  });
+  it('不在根下或就是根时原样返回', () => {
+    expect(relativePathUnderRoot('D:\\other\\a.md', 'C:\\root')).toBe('D:\\other\\a.md');
+    expect(relativePathUnderRoot('C:\\root', 'C:\\root')).toBe('C:\\root');
+  });
+});
+
+describe('parentPathOf 与 joinPath', () => {
+  it('剥除最后一段并保留分隔符风格', () => {
+    expect(parentPathOf('C:\\root\\a\\b.md')).toBe('C:\\root\\a');
+    expect(parentPathOf('/root/a')).toBe('/root');
+  });
+  it('joinPath 按目录已有分隔符拼接', () => {
+    expect(joinPath('C:\\root', 'a.md')).toBe('C:\\root\\a.md');
+    expect(joinPath('/root', 'a.md')).toBe('/root/a.md');
+    expect(joinPath('C:\\root\\', 'a.md')).toBe('C:\\root\\a.md');
+  });
+});
+
+describe('findNode', () => {
+  it('按路径定位任意层级的节点', () => {
+    let root = makeRoot('/r');
+    root = withChildren(root, '/r', [e('src', true), e('a.md', false)]);
+    root = withChildren(root, '/r/src', [{ name: 'main.rs', path: '/r/src/main.rs', isDir: false }]);
+    expect(findNode(root, '/r/src/main.rs')?.name).toBe('main.rs');
+    expect(findNode(root, '/r/a.md')?.name).toBe('a.md');
+    expect(findNode(root, '/r/missing')).toBeNull();
   });
 });

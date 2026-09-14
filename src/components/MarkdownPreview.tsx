@@ -586,6 +586,8 @@ InsertMenu.displayName = 'InsertMenu';
 
 interface MarkdownPreviewProps {
   content: string;
+  /** 文档标识（标签页 id）：变化表示打开了另一篇文档，预览立即重渲染（跳过防抖） */
+  docKey?: string;
   isDarkMode: boolean;
   /** 提供后（非只读标签页）才允许选区右键格式化与插入菜单 */
   onChange?: (next: string) => void;
@@ -641,7 +643,7 @@ export interface MarkdownPreviewHandle {
 }
 
 export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle, MarkdownPreviewProps>(({
-  content, isDarkMode, onChange, canUndo, canRedo, onUndo, onRedo, onScroller,
+  content, docKey, isDarkMode, onChange, canUndo, canRedo, onUndo, onRedo, onScroller,
   findOpen, onFindClose, getPointer,
 }, ref) => {
   const t = useT();
@@ -807,9 +809,25 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     );
   }, [isDarkMode]);
 
+  /* ---- 预览解析防抖 ----
+     渲染管线只读 renderedContent（滞后镜像）：连续内容变化（打字）停顿 180ms 后才整篇重解析；
+     docKey 变化（打开/切换文档）在 render 期立即跟上，不引入切换延迟。
+     编辑类操作（表格/图片/插入）仍读写实时 content */
+  const [renderedContent, setRenderedContent] = useState(content);
+  const docKeyRef = useRef(docKey);
+  if (docKeyRef.current !== docKey) {
+    docKeyRef.current = docKey;
+    setRenderedContent(content);
+  }
+  useEffect(() => {
+    if (content === renderedContent) return;
+    const id = setTimeout(() => setRenderedContent(content), 180);
+    return () => clearTimeout(id);
+  }, [content, renderedContent]);
+
   /* 页签/多语言块：文档含 `<!-- lang|tab:标签 -->` 标记时解析为块序列，
      每个页签组在文档原位渲染切换标签、独立切换（去 sticky，跟随内容位置） */
-  const langBlocks = useMemo(() => parseLangBlocks(content), [content]);
+  const langBlocks = useMemo(() => parseLangBlocks(renderedContent), [renderedContent]);
   const [tabSelections, setTabSelections] = useState<Record<number, number>>({});
   const selectTab = useCallback((blockIdx: number, sectionIdx: number) => {
     setTabSelections(prev => ({ ...prev, [blockIdx]: sectionIdx }));
@@ -1348,7 +1366,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
             })
           ) : (
             <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={mdComponents as any}>
-              {content}
+              {renderedContent}
             </ReactMarkdown>
           )}
         </div>

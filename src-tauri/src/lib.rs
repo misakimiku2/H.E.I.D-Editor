@@ -1,5 +1,6 @@
 mod encoding;
 mod external;
+mod fsops;
 mod http;
 mod render;
 
@@ -130,7 +131,8 @@ mod theme_icon {
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
 
     /* 桌面专属：单实例必须最先注册（官方要求），启动路径状态供文件关联命令读取 */
     #[cfg(desktop)]
@@ -148,6 +150,11 @@ pub fn run() {
             external::open_external,
             render::render_page,
             render::render_result,
+            fsops::fs_mkdir,
+            fsops::fs_rename,
+            fsops::fs_copy,
+            fsops::fs_delete,
+            fsops::fs_reveal,
             #[cfg(desktop)]
             take_launch_paths
         ])

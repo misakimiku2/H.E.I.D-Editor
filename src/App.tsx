@@ -13,10 +13,12 @@ import { MarkdownPreview, type MarkdownPreviewHandle } from './components/Markdo
 import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { AlertDialog } from './components/AlertDialog';
+import { appAlert, registerAppAlert } from './lib/appAlert';
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
-import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY } from './lib/platform';
-import { LANGUAGE_LABELS } from './lib/codemirror';
+import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath } from './lib/platform';
+import { LANGUAGE_LABELS, detectLanguageFromPath } from './lib/codemirror';
 import {
   EOL_LABELS, applyLineEnding, type LineEnding,
 } from './lib/lineEndings';
@@ -241,6 +243,20 @@ export default function App() {
 
   /* ---- 弹层与 UI 状态 ---- */
   const [menuOpen, setMenuOpen] = useState(false);
+  /* 应用内警示弹窗（毛玻璃，替代原生 alert）：lib 层经 appAlert() 全局入口触发 */
+  const [alertState, setAlertState] = useState<{ message: string; resolve: () => void } | null>(null);
+  const showAlert = useCallback((message: string) => {
+    return new Promise<void>(resolve => {
+      setAlertState(prev => { prev?.resolve(); return { message, resolve }; });
+    });
+  }, []);
+  const closeAlert = useCallback(() => {
+    setAlertState(s => { s?.resolve(); return null; });
+  }, []);
+  useEffect(() => {
+    registerAppAlert(showAlert);
+    return () => registerAppAlert(null);
+  }, [showAlert]);
   /* 标签栏右键菜单（tabId 为 null 表示右键在标签条空白处，无「关闭其他」锚点） */
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tabId: string | null } | null>(null);
   /* 主菜单「最近打开」二级子菜单开合（菜单整体关闭时一并复位）。
@@ -291,6 +307,35 @@ export default function App() {
   const [treeOpen, setTreeOpen] = useState(false);
   const [treeRootPath, setTreeRootPath] = useState<string | null>(() => loadTreeRoot());
   useEffect(() => { saveTreeRoot(treeRootPath); }, [treeRootPath]);
+
+  /* ---- 文件树管理操作的标签页同步与危险确认（管理命令在 FileTreeSidebar 内执行） ---- */
+
+  /** 删除确认（复用全局自绘确认弹窗，标题换为删除语义） */
+  const askTreeConfirm = useCallback((message: string, confirmText: string) => {
+    return askDiscardConfirm(message, confirmText, undefined, t('tree.deleteTitle')).then(d => d === 'discard');
+  }, [askDiscardConfirm, t]);
+
+  /** 树内重命名/移动后同步受影响标签页：文件自身换路径，目录则替换其子树前缀 */
+  const handleTreeTabsRenamed = useCallback((oldPath: string, newPath: string, isDir: boolean) => {
+    const prefix = oldPath.endsWith('/') || oldPath.endsWith('\\') ? oldPath : oldPath + '/';
+    editor.setTabs(prev => prev.map(tab => {
+      const retab = (np: string) => ({
+        ...tab, path: np, title: displayNameFromPath(np), language: detectLanguageFromPath(np),
+      });
+      if (tab.path === oldPath) return retab(newPath);
+      if (isDir && tab.path && tab.path.startsWith(prefix)) return retab(newPath + tab.path.slice(oldPath.length));
+      return tab;
+    }));
+  }, [editor.setTabs]);
+
+  /** 树内删除后同步标签页：干净标签直接关闭；脏标签摘除路径保留缓冲（保存时走另存为） */
+  const handleTreeFileDeleted = useCallback((path: string) => {
+    editor.setTabs(prev => prev.flatMap(tab => {
+      if (tab.path !== path) return [tab];
+      return tab.isDirty && !tab.readOnly ? [{ ...tab, path: null }] : [];
+    }));
+  }, [editor.setTabs]);
+
   const menuRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<MarkdownPreviewHandle | null>(null);
 
@@ -485,7 +530,7 @@ export default function App() {
         const created = await androidCreateDoc(baseName, 'text/html');
         if (!created) return;
         const ok = await androidWriteUri(created.uri, html, 'utf-8', false);
-        if (!ok) alert(rt('save.errAndroidWrite'));
+        if (!ok) appAlert(rt('save.errAndroidWrite'));
         return;
       }
       if (isTauri) {
@@ -506,7 +551,7 @@ export default function App() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (e: any) {
-      alert(t('export.errGeneric', { msg: e?.message ?? String(e) }));
+      appAlert(t('export.errGeneric', { msg: e?.message ?? String(e) }));
     }
   }, [editor.activeTab, isDarkMode, t]);
 
@@ -549,22 +594,36 @@ export default function App() {
     [activeContent, activeLanguage],
   );
 
+  /* ---- markdown 预览保活 ----
+     记住最近打开的 markdown 标签：切到代码文件或编辑视图时预览只隐藏不卸载，
+     切回免全量重解析（MarkdownPreview 的解析是整篇同步的，重挂载是切换卡顿主因）。
+     activeTab 是 markdown 时直接用它（同步，避免先渲染旧文档一帧） */
+  const [lastMdTabId, setLastMdTabId] = useState<string | null>(null);
+  useEffect(() => {
+    if (isMarkdown && activeTab) setLastMdTabId(activeTab.id);
+  }, [isMarkdown, activeTab]);
+  const mdAliveTab = useMemo(() => {
+    if (activeTab && isMarkdown) return activeTab;
+    return editor.tabs.find(t => t.id === lastMdTabId && t.language === 'markdown') ?? null;
+  }, [activeTab, isMarkdown, editor.tabs, lastMdTabId]);
+  /* 预览当前是否处于可见形态（分屏 / 纯预览） */
+  const previewVisible = isMarkdown && (effectiveView === 'split' || effectiveView === 'preview');
+
   const renderMdPreview = () => {
-    if (!activeTab) return null;
-    /* 预览查找仅在纯预览形态启用（分屏时 Ctrl+F 搜索编辑器源码） */
-    const previewOnly = isMarkdown && effectiveView === 'preview';
+    if (!mdAliveTab) return null;
     return (
       <MarkdownPreview
         ref={previewRef}
-        content={activeTab.content}
+        docKey={mdAliveTab.id}
+        content={mdAliveTab.content}
         isDarkMode={isDarkMode}
-        onChange={activeTab.readOnly ? undefined : (v) => editor.updateTabContent(activeTab.id, v, { major: true })}
+        onChange={mdAliveTab.readOnly ? undefined : (v) => editor.updateTabContent(mdAliveTab.id, v, { major: true })}
         canUndo={editor.canUndo}
         canRedo={editor.canRedo}
         onUndo={editor.handleUndo}
         onRedo={editor.handleRedo}
         onScroller={attachPreviewScroller}
-        findOpen={previewOnly && findState.open ? true : undefined}
+        findOpen={previewVisible && effectiveView === 'preview' && findState.open ? true : undefined}
         onFindClose={closeFind}
         getPointer={getPointer}
       />
@@ -588,7 +647,9 @@ export default function App() {
         onCursor={setCursorInfo}
         find={findState.open ? findState : undefined}
         onFindClose={closeFind}
+        onFindOpen={() => openFind(false, false)}
         getPointer={getPointer}
+        history={{ canUndo: editor.canUndo, canRedo: editor.canRedo, onUndo: editor.handleUndo, onRedo: editor.handleRedo }}
         markdownMenu={isMarkdown && !activeTab.readOnly
           ? { canUndo: editor.canUndo, canRedo: editor.canRedo, onUndo: editor.handleUndo, onRedo: editor.handleRedo }
           : undefined}
@@ -618,8 +679,8 @@ export default function App() {
           onSaveAs={file.handleSaveAs}
           onImportUrl={isTauri ? () => setUrlImportOpen(true) : undefined}
           onOpenDiff={() => setDiffModalOpen(true)}
-          onInsertTable={() => previewRef.current?.insertTable()}
-          onInsertImage={() => previewRef.current?.openImageModal()}
+          onInsertTable={() => { if (isMarkdown) previewRef.current?.insertTable(); }}
+          onInsertImage={() => { if (isMarkdown) previewRef.current?.openImageModal(); }}
           onCloseTab={() => activeTab && void file.closeTab(activeTab.id)}
           onSettings={() => setSettingsOpen(true)}
           onShortcuts={() => setShortcutsOpen(true)}
@@ -1067,31 +1128,36 @@ export default function App() {
             onOpenFile={(p) => void file.openPathIntoTab(p)}
             onRootChange={handleTreeRootChange}
             onClose={() => setTreeOpen(false)}
+            canManage={isTauri && !IS_ANDROID_APP}
+            askDangerConfirm={askTreeConfirm}
+            onTabsRenamed={handleTreeTabsRenamed}
+            onFileDeleted={handleTreeFileDeleted}
           />
         )}
         <div className="flex-1 flex flex-col overflow-hidden">
         {activeTab ? (
           <>
-            {/* markdown 分屏（左预览右源码）/ 预览 / 编辑器 */}
-            {isMarkdown && effectiveView === 'split' ? (
-              <div className="flex flex-1 overflow-hidden">
-                <div className="flex-1 min-w-0 overflow-hidden">
+            {/* 行容器恒定：预览槽位永远是第一个子元素（跨视图/跨标签保活不重挂） */}
+            <div className="flex flex-1 overflow-hidden">
+              {/* 预览保活槽位：不可见时仅 display:none，不卸载 */}
+              {mdAliveTab && (
+                <div className={cn("min-w-0 overflow-hidden", previewVisible ? "flex-1" : "hidden")}>
                   {renderMdPreview()}
                 </div>
-                <div className={cn("w-px shrink-0", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+              )}
+              {isMarkdown && effectiveView === 'split' ? (
+                <>
+                  <div className={cn("w-px shrink-0", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+                  <div className="flex-1 min-w-0 overflow-hidden">
+                    {renderEditor()}
+                  </div>
+                </>
+              ) : !previewVisible ? (
                 <div className="flex-1 min-w-0 overflow-hidden">
                   {renderEditor()}
                 </div>
-              </div>
-            ) : isMarkdown && effectiveView === 'preview' ? (
-              <div className="flex-1 overflow-hidden">
-                {renderMdPreview()}
-              </div>
-            ) : (
-              <div className="flex-1 overflow-hidden">
-                {renderEditor()}
-              </div>
-            )}
+              ) : null}
+            </div>
 
             {/* bottom status bar（手机端隐藏）：文件信息 + 光标位置 + 编码/换行符 + 还原 */}
             {!isPhone && (<div className={cn(
@@ -1524,7 +1590,7 @@ export default function App() {
       {/* 丢弃确认弹窗（退出应用 / 关闭脏标签共用，自绘以统一三端视觉） */}
       {pendingDiscard && (
         <ConfirmDialog
-          title={t('confirm.unsavedTitle')}
+          title={pendingDiscard.title ?? t('confirm.unsavedTitle')}
           message={pendingDiscard.message}
           isDarkMode={isDarkMode}
           confirmText={pendingDiscard.confirmText}
@@ -1534,6 +1600,16 @@ export default function App() {
             : undefined}
           onConfirm={() => pendingDiscard.resolve('discard')}
           onCancel={() => pendingDiscard.resolve('cancel')}
+        />
+      )}
+
+      {/* 应用内警示弹窗（替代原生 alert，毛玻璃单按钮） */}
+      {alertState && (
+        <AlertDialog
+          title={t('alert.title')}
+          message={alertState.message}
+          isDarkMode={isDarkMode}
+          onClose={closeAlert}
         />
       )}
     </div>

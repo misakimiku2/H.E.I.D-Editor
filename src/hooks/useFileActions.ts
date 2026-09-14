@@ -20,6 +20,7 @@ import { applyLineEnding, type LineEnding } from '../lib/lineEndings';
 import { encodingLabel } from '../lib/encoding';
 import { addRecentFile, listRecentFiles, type RecentFile } from '../lib/recentFiles';
 import { deleteDraft, draftKeyForTab, saveDraft, getDraft } from '../lib/drafts';
+import { appAlert } from '../lib/appAlert';
 import type { MessageKey } from '../lib/i18n';
 import type { EditorState } from './useEditorState';
 import type { DiscardDecision, PendingDiscardConfirm } from './useDiscardConfirm';
@@ -95,7 +96,7 @@ export function useFileActions({
       addRecent(path, file.name);
     } catch (e) {
       console.error('Failed to open file:', path, e);
-      alert(t('open.errPath', { path }));
+      appAlert(t('open.errPath', { path }));
     }
   }, [addRecent, setTabs, t]);
 
@@ -113,7 +114,7 @@ export function useFileActions({
       result = await pickAndReadFile();
     } catch (e: any) {
       console.error('打开文件失败:', e);
-      alert(t('open.errGeneric', { msg: e?.message ?? e }));
+      appAlert(t('open.errGeneric', { msg: e?.message ?? e }));
       return;
     }
     if (!result) return;
@@ -290,7 +291,7 @@ export function useFileActions({
       }
     } catch (e) {
       console.error('以指定编码重新打开失败:', e);
-      alert(t('open.errReopen', { enc: encodingLabel(encoding) }));
+      appAlert(t('open.errReopen', { enc: encodingLabel(encoding) }));
     }
   }, [askDiscardConfirm, setTabs, t]);
 
@@ -301,7 +302,7 @@ export function useFileActions({
       return;
     }
     const ok = await persistTab({ ...tab, encoding }, false);
-    if (!ok) alert(t('save.errConvert'));
+    if (!ok) appAlert(t('save.errConvert'));
   }, [persistTab, setTabs, t]);
 
   /** 切换换行符（保存时生效；与磁盘原值不同即标记未保存） */

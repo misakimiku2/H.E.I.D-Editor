@@ -112,6 +112,21 @@ body {
 .heid-fade-in {
   animation: heid-fade-in 0.15s ease-out;
 }
+
+/* ---- 文件树长文件名悬停循环滚动 ----
+   位移量由行内 mouseenter 测量溢出后写入 --name-shift（无溢出时为 0，动画静止）；
+   起点稍作停留 → 匀速滚到末尾 → 末尾稍作停留 → 瞬间回到起点再循环（非往返） */
+@keyframes heid-name-scroll {
+  0%, 10% { transform: translateX(0); }
+  70%, 85% { transform: translateX(var(--name-shift, 0px)); }
+  85.01%, 100% { transform: translateX(0); }
+}
+.heid-tree-row:hover .heid-name-text {
+  animation: heid-name-scroll 8s linear 0.4s infinite;
+}
+.heid-tree-row:hover .heid-name-clip {
+  text-overflow: clip;
+}
 /* ---- Markdown 预览查找高亮（CSS Custom Highlight API，浅深主题通用）----
    黄绿 #B0D700，与笔记高亮的黄色区分开 */
 ::highlight(heid-find) {

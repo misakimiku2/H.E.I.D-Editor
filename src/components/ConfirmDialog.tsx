@@ -47,10 +47,11 @@ export function ConfirmDialog({
 
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center">
-      <div className="absolute inset-0 bg-zinc-950/50" onClick={onCancel} />
+      {/* 遮罩：压暗 + 毛玻璃（模糊弹窗背后的应用界面） */}
+      <div className="absolute inset-0 bg-zinc-950/50 backdrop-blur-sm" onClick={onCancel} />
       <div className={cn(
-        "relative w-72 rounded-xl border shadow-2xl p-4",
-        isDarkMode ? "border-zinc-700 bg-zinc-800 text-zinc-100" : "border-zinc-200 bg-white text-zinc-800"
+        "relative w-72 rounded-xl border shadow-2xl backdrop-blur-md p-4",
+        isDarkMode ? "border-zinc-700/70 bg-zinc-800/70 text-zinc-100" : "border-zinc-200/80 bg-white/70 text-zinc-800"
       )}>
         <h3 className="text-sm font-semibold">{title}</h3>
         <p className={cn("mt-2 text-xs leading-relaxed", isDarkMode ? "text-zinc-400" : "text-zinc-500")}>
