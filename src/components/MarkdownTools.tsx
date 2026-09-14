@@ -5,33 +5,36 @@ import {
   List, ListOrdered, ListTodo, Braces, Link2,
   Minus, Undo2, Redo2,
   Layers, PanelTop, PanelBottom, Eraser,
+  Highlighter, Superscript, Subscript, Sigma, Footprints,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT, type MessageKey } from '../lib/i18nContext';
+import { MARK_COLORS } from '../lib/remarkExt';
 
-/* ---- markdown 快捷格式化：预览选区与源码编辑器选区共用的转换与菜单 ---- */
+/* ---- markdown 快捷格式化：预览/源码编辑器右键菜单共用的转换与菜单 ---- */
 
 export type MdOp =
   | { kind: 'heading'; level: number }
   | { kind: 'paragraph' }
   | { kind: 'bold' } | { kind: 'italic' } | { kind: 'strike' } | { kind: 'inlineCode' }
   | { kind: 'link' } | { kind: 'image' }
+  | { kind: 'mark'; color?: string } | { kind: 'sup' } | { kind: 'sub' } | { kind: 'math' }
   | { kind: 'quote' } | { kind: 'ul' } | { kind: 'ol' } | { kind: 'task' }
-  | { kind: 'codeBlock' } | { kind: 'table' } | { kind: 'hr' }
+  | { kind: 'codeBlock' } | { kind: 'table' } | { kind: 'hr' } | { kind: 'footnote' }
   | { kind: 'tabGroup' } | { kind: 'tabStart' } | { kind: 'tabEnd' } | { kind: 'tabClear' };
 
-/** tabGroup 逐段应用时携带段位：最后一段补页签结束标记 */
-export interface SliceCtx {
-  index: number;
-  total: number;
-}
-
-/* 行内标记 → 包裹符；链接/图片单独处理 */
+/* 行内标记 → 包裹符；链接/图片单独处理。
+   mark/sup/sub/math 为预览扩展语法（==高亮==/^上标^/~下标~/$公式$）；
+   mark 只用于「行内操作」判定，包裹/换色逻辑在 transformSlice 的专用分支 */
 export const INLINE_WRAPS: Partial<Record<MdOp['kind'], [string, string]>> = {
   bold: ['**', '**'],
   italic: ['*', '*'],
   strike: ['~~', '~~'],
   inlineCode: ['`', '`'],
+  mark: ['==', '=='],
+  sup: ['^', '^'],
+  sub: ['~', '~'],
+  math: ['$', '$'],
 };
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -67,10 +70,15 @@ function prefixLines(slice: string, toggleTest: RegExp, make: (lineIndex: number
 
 const TABLE_TEMPLATE_ZH = '| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n|  |  |  |';
 
-/* 对单个源码片段套用操作，返回替换后的文本；tableTemplate 供 i18n 覆盖（缺省中文表头）；
-   ctx 供 tabGroup 逐段应用（index 从 0 起，total 为段总数） */
-export function transformSlice(op: MdOp, slice: string, selectedText: string, tableTemplate = TABLE_TEMPLATE_ZH, ctx: SliceCtx = { index: 0, total: 1 }): string {
+/* 对单个源码片段套用操作，返回替换后的文本；tableTemplate 供 i18n 覆盖（缺省中文表头）
+   （tabGroup 不在此处理：整段选区→一个页签的变换见 lib/markdownTabs） */
+export function transformSlice(op: MdOp, slice: string, selectedText: string, tableTemplate = TABLE_TEMPLATE_ZH): string {
   switch (op.kind) {
+    case 'tabGroup':
+    case 'footnote':
+      /* tabGroup：调用方（预览/编辑器）改走 lib/markdownTabs 的整段选区→一个页签变换；
+         footnote：调用方用 footnoteEdit 插标记并在文末生成定义。均不应到达这里 */
+      return slice;
     case 'heading':
       return prefixLines(slice, new RegExp(`^${'#'.repeat(op.level)} `), () => `${'#'.repeat(op.level)} `);
     case 'paragraph':
@@ -96,23 +104,6 @@ export function transformSlice(op: MdOp, slice: string, selectedText: string, ta
       return slice.trimEnd() + '\n\n' + tableTemplate;
     case 'hr':
       return slice.trimEnd() + '\n\n---';
-    case 'tabGroup': {
-      const trimmed = slice.replace(/^\n+|\n+$/g, '');
-      if (!trimmed) return slice;
-      /* 标签取首个短文本行（纯文本，非图片/表格/标记行），并从内容中移除；
-         没有就用序号兜底（提取失败人工重建页签时图片组多为此情况） */
-      const lines = trimmed.split('\n');
-      const first = (lines[0] || '').trim();
-      const plain = first.length >= 1 && first.length <= 16
-        && !/^(!\[|\||<!--)/.test(first) && !/^[\s#*_-]+$/.test(first);
-      const label = plain
-        ? first.replace(/^#+\s*/, '').replace(/[*_`]/g, '').trim() || `页签${ctx.index + 1}`
-        : `页签${ctx.index + 1}`;
-      const body = plain ? lines.slice(1).join('\n').replace(/^\n+/, '') : trimmed;
-      const open = `<!-- tab:${label} -->\n\n`;
-      const close = ctx.index === ctx.total - 1 ? '\n\n<!-- /tab -->' : '';
-      return open + (body || trimmed) + close;
-    }
     case 'tabStart':
       return `<!-- tab:标签 -->\n\n` + slice.replace(/^\n+/, '');
     case 'tabEnd':
@@ -124,12 +115,39 @@ export function transformSlice(op: MdOp, slice: string, selectedText: string, ta
         .join('\n')
         .replace(/\n{3,}/g, '\n\n')
         .replace(/^\n+|\n+$/g, '');
+    case 'mark': {
+      /* 高亮：==文字== / ==色:文字==。紧贴选区的旧高亮（可带颜色前缀）整体吞掉——
+         换不同色直接换色，同色再点一次取消高亮 */
+      const color = op.color && (MARK_COLORS as readonly string[]).includes(op.color) ? op.color : '';
+      const prefix = color ? `${color}:` : '';
+      const found = findInSlice(slice, selectedText);
+      const start = found ? found.index : 0;
+      const end = start + (found ? found.length : slice.replace(/^\n+|\n+$/g, '').length);
+      const target = slice.slice(start, end);
+      if (!target.trim()) return slice;
+      const before = slice.slice(0, start);
+      const after = slice.slice(end);
+      const mb = /==(?:[a-z]+:)?$/.exec(before);
+      const ma = /^(?:[a-z]+:)?==/.exec(after);
+      if (mb && ma) {
+        const oldPrefix = mb[0].slice(2);
+        const head = before.slice(0, mb.index);
+        const tail = after.slice(ma[0].length);
+        return oldPrefix === prefix
+          ? head + target + tail
+          : head + `==${prefix}${target}==` + tail;
+      }
+      return before + `==${prefix}${target}==` + after;
+    }
     case 'link':
     case 'image':
     case 'bold':
     case 'italic':
     case 'strike':
-    case 'inlineCode': {
+    case 'inlineCode':
+    case 'sup':
+    case 'sub':
+    case 'math': {
       const found = findInSlice(slice, selectedText);
       const index = found ? found.index : 0;
       const length = found ? found.length : slice.replace(/^\n+|\n+$/g, '').length;
@@ -154,6 +172,26 @@ export function transformSlice(op: MdOp, slice: string, selectedText: string, ta
 
 /* ---- 右键格式菜单 ---- */
 
+/** 脚注：在选中文本之后插入 [^n] 标记，并在文末追加定义行。
+ *  返回两处插入点（全文坐标，defAt ≥ markerAt）与内容，调用方自行拼接/分发 */
+export function footnoteEdit(
+  content: string,
+  range: { start: number; end: number },
+  selectedText: string,
+): { markerAt: number; marker: string; def: string; defAt: number } {
+  const num = (content.match(/\[\^\d+\]:/g) || []).length + 1;
+  const found = findInSlice(content.slice(range.start, range.end), selectedText);
+  const marker = `[^${num}]`;
+  /* 文末定义追去掉尾随空行后追加，标记插入点不越过它 */
+  const tail = content.replace(/\n+$/, '');
+  return {
+    markerAt: Math.min(found ? range.start + found.index + found.length : range.end, tail.length),
+    marker,
+    def: `\n\n[^${num}]: `,
+    defAt: tail.length,
+  };
+}
+
 export interface MdMenuOp {
   op: MdOp;
   icon: React.ElementType;
@@ -163,9 +201,11 @@ export interface MdMenuOp {
   nameKey: MessageKey;
   /** 悬停标题附带的语法提示（如 ** / >） */
   syntax?: string;
+  /** 色块按钮：有值时用色点替代图标（高亮色板） */
+  swatch?: string;
 }
 
-export const MENU_SECTIONS: Array<{ labelKey: MessageKey; hint?: MessageKey; ops: MdMenuOp[] }> = [
+export const MENU_SECTIONS: Array<{ labelKey: MessageKey; ops: MdMenuOp[] }> = [
   {
     labelKey: 'md.sectionHeading',
     ops: [
@@ -185,6 +225,19 @@ export const MENU_SECTIONS: Array<{ labelKey: MessageKey; hint?: MessageKey; ops
       { op: { kind: 'italic' }, icon: Italic, textKey: 'md.italic', nameKey: 'md.italic', syntax: '*' },
       { op: { kind: 'strike' }, icon: Strikethrough, textKey: 'md.strike', nameKey: 'md.strike', syntax: '~~' },
       { op: { kind: 'inlineCode' }, icon: Code, textKey: 'md.inlineCode', nameKey: 'md.inlineCode', syntax: '`' },
+      { op: { kind: 'sup' }, icon: Superscript, textKey: 'md.sup', nameKey: 'md.supName', syntax: '^' },
+      { op: { kind: 'sub' }, icon: Subscript, textKey: 'md.sub', nameKey: 'md.subName', syntax: '~' },
+    ],
+  },
+  {
+    labelKey: 'md.sectionMark',
+    ops: [
+      { op: { kind: 'mark' }, icon: Highlighter, swatch: '#fde047', textKey: 'md.markYellow', nameKey: 'md.markYellowName', syntax: '==' },
+      { op: { kind: 'mark', color: 'red' }, icon: Highlighter, swatch: '#f87171', textKey: 'md.markRed', nameKey: 'md.markRedName', syntax: '==red:' },
+      { op: { kind: 'mark', color: 'orange' }, icon: Highlighter, swatch: '#fb923c', textKey: 'md.markOrange', nameKey: 'md.markOrangeName', syntax: '==orange:' },
+      { op: { kind: 'mark', color: 'green' }, icon: Highlighter, swatch: '#4ade80', textKey: 'md.markGreen', nameKey: 'md.markGreenName', syntax: '==green:' },
+      { op: { kind: 'mark', color: 'blue' }, icon: Highlighter, swatch: '#60a5fa', textKey: 'md.markBlue', nameKey: 'md.markBlueName', syntax: '==blue:' },
+      { op: { kind: 'mark', color: 'purple' }, icon: Highlighter, swatch: '#c084fc', textKey: 'md.markPurple', nameKey: 'md.markPurpleName', syntax: '==purple:' },
     ],
   },
   {
@@ -202,11 +255,12 @@ export const MENU_SECTIONS: Array<{ labelKey: MessageKey; hint?: MessageKey; ops
     ops: [
       { op: { kind: 'link' }, icon: Link2, textKey: 'md.link', nameKey: 'md.link', syntax: '[]()' },
       { op: { kind: 'hr' }, icon: Minus, textKey: 'md.hr', nameKey: 'md.hr', syntax: '---' },
+      { op: { kind: 'math' }, icon: Sigma, textKey: 'md.math', nameKey: 'md.mathName', syntax: '$' },
+      { op: { kind: 'footnote' }, icon: Footprints, textKey: 'md.footnote', nameKey: 'md.footnoteName' },
     ],
   },
   {
     labelKey: 'md.sectionTabs',
-    hint: 'md.sectionTabsHint',
     ops: [
       { op: { kind: 'tabGroup' }, icon: Layers, textKey: 'md.tabGroup', nameKey: 'md.tabGroupName' },
       { op: { kind: 'tabStart' }, icon: PanelTop, textKey: 'md.tabStart', nameKey: 'md.tabStartName', syntax: '<!-- tab: -->' },
@@ -259,13 +313,13 @@ export const FormatMenu = React.memo<{
   }, [onClose]);
 
   /* 视口内夹紧，避免菜单溢出屏幕；小屏（横屏手机）允许内部滚动 */
-  const MENU_W = 272;
-  const MENU_H = 500;
+  const MENU_W = 320;
+  const MENU_H = 560;
   const left = Math.max(4, Math.min(menu.x, window.innerWidth - MENU_W - 8));
   const top = Math.max(4, Math.min(menu.y, window.innerHeight - MENU_H - 8));
 
-  const itemBase = "flex flex-col items-center justify-center gap-0.5 rounded-md py-1.5 transition-colors";
-  const itemTone = isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600";
+  const itemBase = "flex flex-col items-center justify-center gap-1 rounded-md py-2 transition-colors";
+  const itemTone = isDarkMode ? "hover:bg-zinc-700 text-zinc-200" : "hover:bg-zinc-100 text-zinc-600";
 
   return (
     <div
@@ -279,18 +333,18 @@ export const FormatMenu = React.memo<{
     >
       {(onUndo || onRedo) && (
         <>
-          <div className={cn("text-[9px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+          <div className={cn("text-[10px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-400" : "text-zinc-500")}>
             {t('md.sectionEdit')}
           </div>
-          <div className="grid grid-cols-7 gap-0.5">
+          <div className="grid grid-cols-7 gap-1">
             <button
               onClick={onUndo}
               disabled={!canUndo}
               title={`${t('menu.undo')} (Ctrl+Z)`}
               className={cn(itemBase, itemTone, !canUndo && "opacity-40 pointer-events-none")}
             >
-              <Undo2 size={14} />
-              <span className="text-[9px] leading-none whitespace-nowrap">{t('menu.undo')}</span>
+              <Undo2 size={16} />
+              <span className="text-[11px] leading-none whitespace-nowrap">{t('menu.undo')}</span>
             </button>
             <button
               onClick={onRedo}
@@ -298,8 +352,8 @@ export const FormatMenu = React.memo<{
               title={`${t('menu.redo')} (Ctrl+Y)`}
               className={cn(itemBase, itemTone, !canRedo && "opacity-40 pointer-events-none")}
             >
-              <Redo2 size={14} />
-              <span className="text-[9px] leading-none whitespace-nowrap">{t('menu.redo')}</span>
+              <Redo2 size={16} />
+              <span className="text-[11px] leading-none whitespace-nowrap">{t('menu.redo')}</span>
             </button>
           </div>
           <div className={cn("h-px mx-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
@@ -308,16 +362,11 @@ export const FormatMenu = React.memo<{
       {MENU_SECTIONS.map((section, si) => (
         <React.Fragment key={section.labelKey}>
           {si > 0 && <div className={cn("h-px mx-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />}
-          <div className={cn("text-[9px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+          <div className={cn("text-[10px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-400" : "text-zinc-500")}>
             {t(section.labelKey)}
           </div>
-          {section.hint && (
-            <div className={cn("text-[9px] leading-snug px-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-              {t(section.hint)}
-            </div>
-          )}
-          <div className="grid grid-cols-7 gap-0.5">
-            {section.ops.map(({ op, icon: Icon, textKey, nameKey, syntax }) => (
+          <div className="grid grid-cols-7 gap-1">
+            {section.ops.map(({ op, icon: Icon, textKey, nameKey, syntax, swatch }) => (
               <button
                 key={nameKey}
                 onClick={() => onApply(op)}
@@ -327,8 +376,20 @@ export const FormatMenu = React.memo<{
                   itemTone
                 )}
               >
-                <Icon size={14} />
-                <span className="text-[9px] leading-none whitespace-nowrap">{t(textKey)}</span>
+                {swatch ? (
+                  <span
+                    className="w-4 h-4 rounded-full shrink-0"
+                    style={{
+                      backgroundColor: swatch,
+                      boxShadow: isDarkMode
+                        ? 'inset 0 0 0 1px rgba(255,255,255,0.22)'
+                        : 'inset 0 0 0 1px rgba(0,0,0,0.14)',
+                    }}
+                  />
+                ) : (
+                  <Icon size={16} />
+                )}
+                <span className="text-[11px] leading-none whitespace-nowrap">{t(textKey)}</span>
               </button>
             ))}
           </div>

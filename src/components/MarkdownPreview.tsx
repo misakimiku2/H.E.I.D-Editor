@@ -1,21 +1,30 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, createContext, useContext } from 'react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import remarkEmoji from 'remark-emoji';
+import { remarkGfmStrict, remarkInlineExt } from '../lib/remarkExt';
+import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, ghcolors } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP } from '../lib/platform';
-import { FormatMenu, transformSlice, type MdOp, type MenuState } from './MarkdownTools';
+import { FormatMenu, INLINE_WRAPS, transformSlice, footnoteEdit, type MdOp, type MenuState } from './MarkdownTools';
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { PreviewFindBar } from './PreviewFindBar';
 import type { PointerPos } from '../hooks/useLastPointer';
 import { useT } from '../lib/i18nContext';
 import { parseLangBlocks } from '../lib/markdownLangs';
-import { applyImageTab } from '../lib/markdownTabs';
+import { applyImageTab, applySelectionTab } from '../lib/markdownTabs';
 
 /** 页签文档按块渲染时，块 md 的全文起始偏移（右键选区映射回源码用） */
 const BlockBaseContext = createContext(0);
+
+/* markdown 渲染插件管线：组装版 GFM(~~删除线~~/表格/任务列表/脚注，单 ~ 让给下标)
+   + 公式($…$/$$…$$，KaTeX) + emoji 短代码 + ==高亮==/^上标^/~下标~ 行内扩展 */
+const remarkPlugins = [remarkGfmStrict, remarkMath, remarkEmoji, remarkInlineExt];
+const rehypePlugins = [rehypeKatex];
 
 /* 把源码偏移量写到 DOM 上，供右键时把选区映射回源码。
    页签文档按块渲染，remark 的偏移相对块字符串——用 context 注入块的
@@ -222,7 +231,10 @@ function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; alt: stri
   return (
     <div
       ref={wrapRef}
-      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 select-none"
+      className={cn(
+        'fixed inset-0 z-[200] flex items-center justify-center select-none backdrop-blur-2xl',
+        isDarkMode ? 'bg-zinc-900/60' : 'bg-white/60',
+      )}
       onClick={() => { if (!movedRef.current) onClose(); }}
       onContextMenu={(e) => e.preventDefault()}
       onMouseDown={startDrag}
@@ -252,7 +264,8 @@ function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; alt: stri
         }}
       />
       <div
-        className={cn('fixed top-3 right-3 flex items-center gap-1.5 rounded-lg p-1.5', isDarkMode ? 'bg-zinc-900/85' : 'bg-white/90')}
+        className={cn('fixed top-3 right-3 flex items-center gap-1.5 rounded-lg p-1.5 border shadow-xl',
+          isDarkMode ? 'bg-zinc-800 border-zinc-600/60' : 'bg-white border-zinc-200')}
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -267,7 +280,8 @@ function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; alt: stri
         <button className={btn} onClick={onClose} title={t('image.viewerClose')}>✕</button>
       </div>
       {alt && (
-        <div className={cn('fixed bottom-3 left-1/2 -translate-x-1/2 max-w-[80vw] truncate rounded-md px-2.5 py-1 text-xs', isDarkMode ? 'bg-zinc-900/85 text-zinc-300' : 'bg-white/90 text-zinc-600')}>
+        <div className={cn('fixed bottom-3 left-1/2 -translate-x-1/2 max-w-[80vw] truncate rounded-md px-2.5 py-1 text-xs border shadow-xl',
+          isDarkMode ? 'bg-zinc-800 border-zinc-600/60 text-zinc-300' : 'bg-white border-zinc-200 text-zinc-600')}>
           {alt}
         </div>
       )}
@@ -538,7 +552,7 @@ const InsertMenu = React.memo<{
       style={{ left, top }}
       onContextMenu={(e) => e.preventDefault()}
     >
-      <div className={cn("text-[9px] font-semibold tracking-wider px-2 pt-1 pb-0.5", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+      <div className={cn("text-[10px] font-semibold tracking-wider px-2 pt-1 pb-0.5", isDarkMode ? "text-zinc-400" : "text-zinc-500")}>
         {t('md.sectionInsert')}
       </div>
       <button
@@ -898,15 +912,16 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     });
   }, [langBlocks, tabSelections]);
 
-  /* ---- 空行/空列沿用相邻行/列的尺寸，输入内容后恢复按内容自适应 ---- */
+  /* ---- 表格行/列尺寸：只由表格源码内容决定（每次全量重算，不依赖 DOM 上的
+     历史内联样式——React 复用表格 DOM 时历史状态会让同源表格渲染不一致）。
+     有内容的行列按内容自适应；空行列在表格已有两行/列以上内容时参照相邻
+     内容格（网格图类表格的空列保持紧凑），否则用默认尺寸（全新/初填表格
+     的空格稳定可点，输入一格不会牵连全表缩放） ---- */
+  const BLANK_COL_W = 112;
+  const BLANK_ROW_H = 40;
   useLayoutEffect(() => {
     const root = contentRef.current;
     if (!root) return;
-    /* 先清除上一轮的临时尺寸，让浏览器按内容重新布局 */
-    root.querySelectorAll<HTMLElement>('td, th').forEach(c => {
-      c.style.minWidth = '';
-      c.style.height = '';
-    });
 
     root.querySelectorAll('table').forEach(tbl => {
       const trs = Array.from(tbl.querySelectorAll('tr'));
@@ -914,44 +929,57 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       const nCols = trs[0].querySelectorAll('td, th').length;
       if (nCols === 0) return;
 
-      const rowAllEmpty = trs.map(tr => {
-        const cs = Array.from(tr.querySelectorAll('td, th'));
-        return cs.length > 0 && cs.every(c => !c.textContent?.trim());
-      });
+      const rowCells = trs.map(tr => Array.from(tr.querySelectorAll('td, th')) as HTMLElement[]);
+      const rowAllEmpty = rowCells.map(cs => cs.length > 0 && cs.every(c => !c.textContent?.trim()));
+      const colCells: HTMLElement[][] = [];
       const colAllEmpty: boolean[] = [];
-      const colWidths: number[] = [];
       for (let j = 0; j < nCols; j++) {
-        const cs = trs.map(tr => tr.querySelectorAll('td, th')[j]).filter(Boolean) as HTMLElement[];
+        const cs = rowCells.map(rc => rc[j]).filter(Boolean) as HTMLElement[];
+        colCells.push(cs);
         colAllEmpty.push(cs.length > 0 && cs.every(c => !c.textContent?.trim()));
-        colWidths.push(cs.length ? Math.max(...cs.map(c => c.getBoundingClientRect().width)) : 0);
       }
+      const nonEmptyRows = rowAllEmpty.filter(e => !e).length;
+      const nonEmptyCols = colAllEmpty.filter(e => !e).length;
 
-      /* 整行为空：行高取最近的非空行 */
-      trs.forEach((tr, i) => {
-        if (!rowAllEmpty[i]) return;
-        let ni = i - 1;
-        while (ni >= 0 && rowAllEmpty[ni]) ni--;
-        if (ni < 0) { ni = i + 1; while (ni < trs.length && rowAllEmpty[ni]) ni++; }
-        if (ni < 0 || ni >= trs.length) return;
-        const h = trs[ni].getBoundingClientRect().height;
-        if (h <= 0) return;
-        tr.querySelectorAll('td, th').forEach(c => { (c as HTMLElement).style.height = `${h}px`; });
+      /* 先清非空行列的内联尺寸（保证后续测量到自然宽高），再统一为空行列定尺寸 */
+      rowCells.forEach((cs, i) => {
+        if (!rowAllEmpty[i]) cs.forEach(c => { c.style.height = ''; });
+      });
+      colCells.forEach((cs, j) => {
+        if (!colAllEmpty[j]) cs.forEach(c => { c.style.minWidth = ''; });
       });
 
-      /* 整列为空：列宽取最近的非空列 */
-      for (let j = 0; j < nCols; j++) {
-        if (!colAllEmpty[j]) continue;
-        let nj = j - 1;
-        while (nj >= 0 && colAllEmpty[nj]) nj--;
-        if (nj < 0) { nj = j + 1; while (nj < nCols && colAllEmpty[nj]) nj++; }
-        if (nj < 0 || nj >= nCols || colWidths[nj] <= 0) continue;
-        trs.forEach(tr => {
-          const c = tr.querySelectorAll('td, th')[j] as HTMLElement | undefined;
-          if (c) c.style.minWidth = `${colWidths[nj]}px`;
-        });
-      }
+      rowCells.forEach((cs, i) => {
+        if (!rowAllEmpty[i]) return;
+        let h = BLANK_ROW_H;
+        if (nonEmptyRows >= 2) {
+          let ni = i - 1;
+          while (ni >= 0 && rowAllEmpty[ni]) ni--;
+          if (ni < 0) { ni = i + 1; while (ni < trs.length && rowAllEmpty[ni]) ni++; }
+          const nh = ni >= 0 && ni < trs.length ? trs[ni].getBoundingClientRect().height : 0;
+          if (nh > 0) h = nh;
+        }
+        cs.forEach(c => { c.style.height = `${h}px`; });
+      });
+
+      const colWidths = colCells.map(cs =>
+        cs.length ? Math.max(...cs.map(c => c.getBoundingClientRect().width)) : 0);
+      colCells.forEach((cs, j) => {
+        if (!colAllEmpty[j]) return;
+        let w = BLANK_COL_W;
+        if (nonEmptyCols >= 2) {
+          let nj = j - 1;
+          while (nj >= 0 && colAllEmpty[nj]) nj--;
+          if (nj < 0) { nj = j + 1; while (nj < nCols && colAllEmpty[nj]) nj++; }
+          const nw = nj >= 0 && nj < nCols ? colWidths[nj] : 0;
+          if (nw > 0) w = nw;
+        }
+        cs.forEach(c => { c.style.minWidth = `${w}px`; });
+      });
     });
-  }, [processedBlocks, langBlocks, tabSelections, isDarkMode]);
+    /* content 必须入依赖：普通文档（无页签标记）下 processedBlocks/langBlocks
+       恒为 null，仅靠它们内容变化后不会重新测量（加行/列、输入后尺寸不更新） */
+  }, [content, processedBlocks, langBlocks, tabSelections, isDarkMode]);
 
   /* ---- 右键：有选区弹格式菜单；无选区弹插入菜单（表格/图片） ---- */
 
@@ -1004,22 +1032,35 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   /* 选区格式化：从后往前替换，保证偏移量不失效 */
   const handleApply = useCallback((op: MdOp) => {
     if (!menu || !onChange) return;
-    const inlineKinds: Array<MdOp['kind']> = ['link', 'image', 'bold', 'italic', 'strike', 'inlineCode'];
-    const targets = inlineKinds.includes(op.kind) ? menu.blocks.slice(0, 1) : menu.blocks;
-    const sorted = [...targets].sort((x, y) => y.start - x.start);
     withScrollRestore(() => {
       let next = content;
-      for (let d = 0; d < sorted.length; d++) {
-        const b = sorted[d];
-        const slice = content.slice(b.start, b.end);
-        next = next.slice(0, b.start)
-          + transformSlice(op, slice, menu.text, t('md.tableTemplate'), { index: sorted.length - 1 - d, total: sorted.length })
-          + next.slice(b.end);
+      if (op.kind === 'tabGroup') {
+        /* 整个选区（首块到末块）包成一个页签；紧邻上一个已关闭的组时并排追加为新区块 */
+        const first = menu.blocks[0];
+        const last = menu.blocks[menu.blocks.length - 1];
+        next = applySelectionTab(content, first.start, last.end);
+      } else if (op.kind === 'footnote') {
+        /* 选中文本后插 [^n] 标记，文末生成定义行 */
+        const fe = footnoteEdit(content, menu.blocks[0], menu.text);
+        next = content.slice(0, fe.markerAt) + fe.marker
+          + content.slice(fe.markerAt, fe.defAt) + fe.def + content.slice(fe.defAt);
+      } else {
+        const targets = (op.kind === 'link' || op.kind === 'image' || !!INLINE_WRAPS[op.kind])
+          ? menu.blocks.slice(0, 1)
+          : menu.blocks;
+        const sorted = [...targets].sort((x, y) => y.start - x.start);
+        for (let d = 0; d < sorted.length; d++) {
+          const b = sorted[d];
+          const slice = content.slice(b.start, b.end);
+          next = next.slice(0, b.start)
+            + transformSlice(op, slice, menu.text, t('md.tableTemplate'))
+            + next.slice(b.end);
+        }
       }
       onChangeRef.current!(next);
     });
     setMenu(null);
-  }, [menu, content, onChange, withScrollRestore]);
+  }, [menu, content, onChange, withScrollRestore, t]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
   const closeBlankMenu = useCallback(() => setBlankMenu(null), []);
@@ -1189,14 +1230,18 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     const parsed = parseTableSrc(content.slice(Number(table.dataset.mdStart), Number(table.dataset.mdEnd)));
     if (!parsed || !parsed.rows[rowIdx]) return;
     const rect = cell.getBoundingClientRect();
+    /* 记录为滚动容器内容系坐标（而非视口坐标）：编辑框 absolute 定位在容器内，
+       滚动页面时跟随单元格移动，而不是钉在屏幕上 */
+    const scroller = contentRef.current;
+    const sRect = scroller?.getBoundingClientRect();
     setTableAction(null);
     setCellEdit({
       range: { start: Number(table.dataset.mdStart), end: Number(table.dataset.mdEnd) },
       row: rowIdx,
       col: colIdx,
       value: parsed.rows[rowIdx][colIdx] ?? '',
-      left: rect.left,
-      top: rect.top,
+      left: rect.left - (sRect?.left ?? 0) + (scroller?.scrollLeft ?? 0),
+      top: rect.top - (sRect?.top ?? 0) + (scroller?.scrollTop ?? 0),
       width: rect.width,
       height: rect.height,
     });
@@ -1251,7 +1296,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         contentRef.current = el;
         onScroller?.(el);
       }}
-      className="h-full overflow-auto heid-scroll"
+      className="relative h-full overflow-auto heid-scroll"
       onContextMenu={handleContextMenu}
       onMouseMove={handleMouseMove}
       onClick={handleContainerClick}
@@ -1263,7 +1308,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
             processedBlocks.map((processed, i) => {
               const block = langBlocks[i];
               const content = (
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents as any}>
+                <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={mdComponents as any}>
                   {processed.md}
                 </ReactMarkdown>
               );
@@ -1285,12 +1330,10 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                         className={cn(
                           'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
                           j === selIdx
-                            ? isDarkMode
-                              ? 'bg-indigo-500/20 border-indigo-400/60 text-indigo-300'
-                              : 'bg-indigo-50 border-indigo-300 text-indigo-600'
+                            ? 'border-transparent bg-[#96A5EB] text-white'
                             : isDarkMode
-                              ? 'border-transparent text-zinc-400 hover:bg-zinc-800'
-                              : 'border-transparent text-zinc-500 hover:bg-zinc-100',
+                              ? 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                              : 'border-zinc-300 text-zinc-500 hover:bg-zinc-100',
                         )}
                       >
                         {s.label}
@@ -1304,7 +1347,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
               );
             })
           ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents as any}>
+            <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={mdComponents as any}>
               {content}
             </ReactMarkdown>
           )}
@@ -1346,10 +1389,10 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
             data-md-table-tools
             onPointerDown={(e) => e.preventDefault()}
             className={cn(
-              'fixed z-[96] flex items-center rounded-lg border shadow-lg overflow-hidden',
+              'absolute z-[96] flex items-center rounded-lg border shadow-lg overflow-hidden',
               isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
             )}
-            style={{ left: Math.max(4, cellEdit.left), top: Math.max(4, cellEdit.top - 38) }}
+            style={{ left: Math.max(0, cellEdit.left), top: Math.max(0, cellEdit.top - 38) }}
           >
             {actions.map(({ label, kind }) => (
               <button
@@ -1380,7 +1423,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
             if (e.key === 'Escape') setCellEdit(null);
           }}
           className={cn(
-            "fixed z-[95] box-border px-2 text-sm outline-none border-2 rounded-sm",
+            "absolute z-[95] box-border px-2 text-sm outline-none border-2 rounded-sm",
             isDarkMode ? "bg-zinc-800 border-indigo-400 text-zinc-100" : "bg-white border-indigo-400 text-zinc-800"
           )}
           style={{ left: cellEdit.left, top: cellEdit.top, width: cellEdit.width, height: cellEdit.height }}
@@ -1486,13 +1529,45 @@ const MarkdownStyles = React.memo<{ isDarkMode: boolean }>(({ isDarkMode }) => {
       .prose th { background-color: ${isDarkMode ? '#27272a' : '#f4f4f5'}; font-weight: 600; }
       .prose tr:nth-child(even) { background-color: ${isDarkMode ? 'rgba(39, 39, 42, 0.3)' : 'rgba(244, 244, 245, 0.5)'}; }
       .prose pre { background-color: transparent !important; padding: 0 !important; margin: 0 !important; border: none !important; box-shadow: none !important; }
-      .prose img { display: block !important; margin-left: auto !important; margin-right: auto !important; max-width: 100% !important; height: auto; border-radius: 0.5rem; }
+      /* 引用块：灰底圆角衬块，文字比正文降一档（导入文档的标题/来源注释走这里） */
+      .prose blockquote {
+        background-color: ${isDarkMode ? 'rgba(39, 39, 42, 0.5)' : 'rgba(244, 244, 245, 0.8)'};
+        color: ${isDarkMode ? '#a1a1aa' : '#71717a'};
+        border-radius: 0.5rem;
+        padding: 0.5rem 1rem;
+        font-weight: normal;
+      }
+      .prose blockquote strong { color: ${isDarkMode ? '#a1a1aa' : '#71717a'}; }
+      .prose img {
+        display: block !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        max-width: 100% !important;
+        height: auto;
+        /* 圆角矩形灰底衬框（无描边），透明立绘也可辨 */
+        background-color: ${isDarkMode ? '#27272a' : '#f4f4f5'};
+        padding: 0.5rem;
+        border-radius: 0.75rem;
+      }
       .prose :not(pre) > code {
         background-color: ${isDarkMode ? 'rgba(63, 63, 70, 0.5)' : 'rgba(244, 244, 245, 1)'};
         padding: 0.2em 0.4em;
         border-radius: 0.25rem;
         font-weight: normal;
       }
+      /* 扩展语法：==高亮== 与块级公式（KaTeX 输出沿用文字色，超宽横向滚动） */
+      .prose mark {
+        background-color: ${isDarkMode ? 'rgba(250, 204, 21, 0.30)' : '#fef08a'};
+        color: inherit;
+        padding: 0 0.15em;
+        border-radius: 0.25rem;
+      }
+      .prose mark.md-mark-red { background-color: ${isDarkMode ? 'rgba(248, 113, 113, 0.32)' : '#fecaca'}; }
+      .prose mark.md-mark-orange { background-color: ${isDarkMode ? 'rgba(251, 146, 60, 0.32)' : '#ffedd5'}; }
+      .prose mark.md-mark-green { background-color: ${isDarkMode ? 'rgba(74, 222, 128, 0.30)' : '#bbf7d0'}; }
+      .prose mark.md-mark-blue { background-color: ${isDarkMode ? 'rgba(96, 165, 250, 0.32)' : '#bfdbfe'}; }
+      .prose mark.md-mark-purple { background-color: ${isDarkMode ? 'rgba(192, 132, 252, 0.32)' : '#e9d5ff'}; }
+      .prose .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0; }
     `}</style>
   );
 });

@@ -112,9 +112,10 @@ body {
 .heid-fade-in {
   animation: heid-fade-in 0.15s ease-out;
 }
-/* ---- Markdown 预览查找高亮（CSS Custom Highlight API，浅深主题通用）---- */
+/* ---- Markdown 预览查找高亮（CSS Custom Highlight API，浅深主题通用）----
+   黄绿 #B0D700，与笔记高亮的黄色区分开 */
 ::highlight(heid-find) {
-  background-color: rgba(250, 204, 21, 0.45);
+  background-color: rgba(176, 215, 0, 0.45);
   color: inherit;
 }
 ::highlight(heid-find-current) {

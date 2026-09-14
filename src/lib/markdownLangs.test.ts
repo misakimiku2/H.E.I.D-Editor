@@ -124,11 +124,15 @@ describe('parseLangBlocks', () => {
     expect(startsRoundTrip(md, blocks)).toBe(true);
   });
 
-  it('无标记返回 null；单区块组降级为普通块', () => {
+  it('无标记返回 null；单区块组按页签渲染（转换首个选区后有可见反馈），空区块组丢弃', () => {
     expect(parseLangBlocks('普通文档')).toBeNull();
     expect(parseLangBlocks('只有结束标记 <!-- /tab -->')).toBeNull();
-    expect(parseLangBlocks('<!-- lang:中文 -->\n只有一个标记')).toEqual([
-      { type: 'md', md: '只有一个标记', start: '<!-- lang:中文 -->\n'.length },
+    const md = '<!-- lang:中文 -->\n只有一个标记';
+    const blocks = parseLangBlocks(md)!;
+    expect(plain(blocks)).toEqual([
+      { type: 'tabs', sections: [{ label: '中文', md: '只有一个标记' }] },
     ]);
+    expect(startsRoundTrip(md, blocks)).toBe(true);
+    expect(parseLangBlocks('<!-- tab:空 -->\n\n<!-- /tab -->')).toEqual([]);
   });
 });

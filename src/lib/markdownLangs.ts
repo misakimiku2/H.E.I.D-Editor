@@ -24,7 +24,7 @@ const LANG_END_MARKER = /<!--\s*\/\s*(?:lang|tab)\s*-->/gi;
 /**
  * 把文档解析为块序列：普通内容块与页签组块交替。组内每个标记开启一个区块，
  * 结束标记收组；结束标记之后的内容恢复普通块，后续标记开启新的组。
- * 无任何标记返回 null（普通文档）；只有单个区块的组按普通内容降级。
+ * 无任何标记返回 null（普通文档）；只有单个空区块的组丢弃。
  */
 export function parseLangBlocks(content: string): LangBlock[] | null {
   interface Ev {
@@ -65,11 +65,8 @@ export function parseLangBlocks(content: string): LangBlock[] | null {
   };
   const closeGroup = (to: number) => {
     flushSection(to);
-    if (group && group.length >= 2) blocks.push({ type: 'tabs', sections: group });
-    else if (group && group.length === 1 && group[0].md) {
-      /* 单区块组无切换意义，按普通内容降级（保留原文偏移） */
-      blocks.push({ type: 'md', md: group[0].md, start: group[0].start });
-    }
+    /* 单区块组也按页签渲染（预览转页签的中间态要有可见反馈）；空内容区块丢弃 */
+    if (group && (group.length >= 2 || group[0].md)) blocks.push({ type: 'tabs', sections: group });
     group = null;
   };
 

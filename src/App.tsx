@@ -1268,9 +1268,20 @@ export default function App() {
       if (result.ok) {
         const savedPath = result.savedPath ?? tab.path;
         const savedTitle = savedPath ? displayNameFromPath(savedPath) : tab.title;
+        /* 保存会改变文件名（untitled.txt → xx.md）：按新扩展名重判语言，
+           否则新建文本存成 .md 后仍是 plaintext，永远没有预览/分屏入口；
+           首次成为 markdown 时切到分屏，编辑内容与预览同屏可见 */
+        const savedLang = detectLanguageFromPath(savedTitle);
+        const becameMarkdown = savedLang === 'markdown' && tab.language !== 'markdown';
         /* encoding/bom 从传入的 tab（可能已带新编码）回写，编码转换保存后状态栏即时生效 */
         setTabs(prev => prev.map(t => t.id === tab.id
-          ? { ...t, originalContent: t.content, isDirty: false, path: savedPath, title: savedTitle, originalEol: t.eol, encoding: tab.encoding, bom: tab.bom }
+          ? {
+              ...t,
+              originalContent: t.content, isDirty: false, path: savedPath, title: savedTitle,
+              originalEol: t.eol, encoding: tab.encoding, bom: tab.bom,
+              language: savedLang,
+              mdView: becameMarkdown ? 'split' : t.mdView,
+            }
           : t
         ));
         // 自写识别：更新已知磁盘内容，后续 watch 事件比对无差异，不产生 diff

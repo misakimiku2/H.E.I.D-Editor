@@ -10,7 +10,8 @@ import { EditorState, Extension, StateEffect } from '@codemirror/state';
 import { Type } from 'lucide-react';
 import { useT } from '../lib/i18nContext';
 import { cn } from '../lib/utils';
-import { FormatMenu, INLINE_WRAPS, transformSlice, type MdOp } from './MarkdownTools';
+import { FormatMenu, INLINE_WRAPS, transformSlice, footnoteEdit, type MdOp } from './MarkdownTools';
+import { spliceSelectionTab } from '../lib/markdownTabs';
 import { FindReplaceBar } from './FindReplaceBar';
 import { findHighlightExtension } from '../lib/editorSearch';
 import { loadLanguageExtension } from '../lib/codemirror';
@@ -998,18 +999,34 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       }
     }
 
-    /* 选区转页签组：按空行拆段，逐段插页签标记，末段补结束标记 */
+    /* 选区转页签：整段选区包成一个页签区块；紧邻上一个已关闭的组时并排追加为新区块 */
     if (op.kind === 'tabGroup') {
-      const raw = doc.sliceString(from, to);
-      const parts = raw.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-      const grouped = parts
-        .map((p, i) => transformSlice(op, p, mdMenu.text, tr('md.tableTemplate'), { index: i, total: parts.length }))
-        .join('\n\n');
+      const head = doc.sliceString(0, from);
+      const slice = doc.sliceString(from, to);
+      const tail = doc.sliceString(to);
+      const r = spliceSelectionTab(head, slice, tail);
+      const changes = [];
+      if (r.head !== head) changes.push({ from: 0, to: from, insert: r.head });
+      changes.push({ from, to, insert: r.slice });
+      if (r.tail !== tail) changes.push({ from, to: doc.length, insert: r.tail });
+      const selAt = r.head.length;
       majorNextRef.current = true;
       view.dispatch({
-        changes: { from, to, insert: grouped },
-        selection: { anchor: from, head: from + grouped.length },
+        changes,
+        selection: { anchor: selAt, head: selAt + r.slice.length },
       });
+      setMdMenu(null);
+      return;
+    }
+
+    /* 脚注：选中文本后插 [^n] 标记，文末生成定义行 */
+    if (op.kind === 'footnote') {
+      const fe = footnoteEdit(doc.toString(), { start: from, end: to }, mdMenu.text);
+      const changes = fe.defAt > fe.markerAt
+        ? [{ from: fe.markerAt, insert: fe.marker }, { from: fe.defAt, insert: fe.def }]
+        : [{ from: fe.markerAt, insert: fe.marker + fe.def }];
+      majorNextRef.current = true;
+      view.dispatch({ changes, selection: { anchor: fe.markerAt + fe.marker.length } });
       setMdMenu(null);
       return;
     }
@@ -1118,8 +1135,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const extensions = useMemo(() => {
     const lineCount = value.split('\n').length;
     const isLargeFile = lowPerf || lineCount > 1000;
+    /* 默认模式（'markdown'）覆盖 markdown 与纯文本：纯文本没有语法结构，
+       不换行会产生横向长行；代码类语言仍需用户手动选"总是换行" */
     const wrapEnabled = settings.lineWrapMode === 'always'
-      || (settings.lineWrapMode === 'markdown' && language === 'markdown');
+      || (settings.lineWrapMode === 'markdown' && (language === 'markdown' || language === 'plaintext'));
     const exts: Extension[] = [
       syntaxHighlighting(isDarkMode ? vsCodeDarkHighlightStyle : vsCodeLightHighlightStyle),
       highlightSpecialChars(),
