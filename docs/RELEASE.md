@@ -55,7 +55,17 @@ Windows NSIS 构建（**关闭** `createUpdaterArtifacts`，无需 secrets）、
 ## 本地验证
 
 ```bash
-# 本地带签名构建（验证 updater 产物能生成）：
-TAURI_SIGNING_PRIVATE_KEY=$(cat src-tauri/keys/heid.key) npx tauri build
-# 产物：src-tauri/target/release/bundle/nsis/ 下含 .exe / .nsis.zip / .nsis.zip.sig
+# 本地带签名构建（验证 updater 产物能生成）。
+# 注意：密钥为加密容器格式，PASSWORD 必须显式置空，否则签名步骤会交互式挂起等待输入：
+TAURI_SIGNING_PRIVATE_KEY=$(cat src-tauri/keys/heid.key) \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+npx tauri build
+# 产物：src-tauri/target/release/bundle/nsis/ 下含安装包 .exe 与更新签名 .exe.sig
 ```
+
+## 安装包外观
+
+NSIS 向导配置在 `tauri.conf.json` 的 `bundle.windows.nsis`：`languages: ["SimpChinese"]`
+（简体中文向导，卸载向导同步生效），`headerImage`（150×57）/ `sidebarImage`（164×314）
+为品牌图 BMP，源文件 `src-tauri/icons/installer-header.bmp` / `installer-sidebar.bmp`
+（由 `icon.png` 经脚本生成：取主体深色为底、居中/左置粘贴品牌图标）。

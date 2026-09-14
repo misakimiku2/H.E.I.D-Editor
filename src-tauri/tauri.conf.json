@@ -40,6 +40,13 @@
     "active": true,
     "targets": ["nsis"],
     "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "languages": ["SimpChinese"],
+        "headerImage": "./icons/installer-header.bmp",
+        "sidebarImage": "./icons/installer-sidebar.bmp"
+      }
+    },
     "fileAssociations": [
       {
         "ext": [
