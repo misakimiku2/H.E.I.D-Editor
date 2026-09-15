@@ -10,7 +10,7 @@ export const LATEST_JSON_URL =
   'https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest/download/latest.json';
 
 /** 版本号兜底（浏览器模式无 getVersion API；与 package.json / tauri.conf.json 同步维护） */
-export const FALLBACK_APP_VERSION = '1.0.0';
+export const FALLBACK_APP_VERSION = '1.1.0';
 
 /** 自动检查间隔：24h（localStorage 记录上次检查时间） */
 export const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
