@@ -1,0 +1,107 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>canvas limit probe</title></head>
+<body>
+<pre id="out">RUNNING</pre>
+<script>
+/* 开发用一次性探针：实测当前内核下 2D canvas 的最大可用尺寸（设备像素）。
+   运行方式见同目录 canvas-limit-probe.ps1（headless 浏览器 + dump-dom 取回输出）。
+
+   2026-09-15 本机 Edge 152（Blink，与 Tauri WebView2 同内核）实测结论：
+   - 单边上限 65535 设备像素：65535 可正常绘制，65536 起静默失效（画不出内容）；
+     宽度 60 / 158 / 316 / 1000、面积至 6555 万像素均不影响该上限；
+   - 越界后的 canvas 元素「永久失效」：缩回合法尺寸依然画不出内容，只有新建元素才恢复；
+     因此每帧重设尺寸的写法（本编辑器小地图旧实现）一旦越界，该标签页小地图就永久空白；
+   - 判定必须「填充后读回像素」，因为超限时 c.width / c.height 仍会返回请求值，
+     且每次测试必须用全新元素，否则一个已损坏的元素会污染后续全部结果。
+
+   该探针服务于 ROADMAP v1.2 第 30 项（小地图大文件适配）：结论是画布高度必须与文档行数解耦。 */
+(function () {
+  const lines = [];
+  const log = (s) => lines.push(s);
+
+  log('UA=' + navigator.userAgent);
+  log('devicePixelRatio=' + window.devicePixelRatio);
+
+  function testSize(w, h) {
+    const c = document.createElement('canvas');
+    c.style.position = 'absolute';
+    c.style.left = '-20000px';
+    c.style.top = '0';
+    document.body.appendChild(c);
+    let ok = false, px = 'n/a', err = '';
+    try {
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      if (!ctx) { err = 'no-2d-context'; }
+      else {
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, w, h);
+        const a = ctx.getImageData(0, 0, 1, 1).data;
+        const b = ctx.getImageData(Math.max(0, w - 1), Math.max(0, h - 1), 1, 1).data;
+        px = `p00=${a[0]}/${a[3]} pbr=${b[0]}/${b[3]}`;
+        ok = a[3] === 255 && a[0] === 255 && b[3] === 255 && b[0] === 255;
+      }
+    } catch (e) {
+      err = String(e).slice(0, 60);
+    }
+    c.remove();
+    return { w, h, ok, px, err };
+  }
+
+  const label = (r) => `w=${r.w} h=${r.h} ok=${r.ok} ${r.px}${r.err ? ' err=' + r.err : ''}`;
+
+  /* 1) 粗扫：覆盖小地图可能用到的宽度区间（dpr1→158、dpr2→316） */
+  for (const w of [60, 158, 316, 1000]) {
+    for (const h of [4096, 16384, 32767, 32768, 65535, 65536, 131072]) {
+      log('SCAN ' + label(testSize(w, h)));
+    }
+  }
+
+  /* 2) 二分：定位首个失败高度 */
+  for (const w of [60, 158, 316]) {
+    let lo = 512, hi = 131072, steps = 0;
+    if (!testSize(w, hi).ok) {
+      while (hi - lo > 1 && steps++ < 24) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (testSize(w, mid).ok) lo = mid; else hi = mid;
+      }
+    } else {
+      lo = '>' + hi;
+    }
+    log(`BSEARCH w=${w} maxOk=${lo} firstBad=${hi} steps=${steps}`);
+  }
+
+  /* 3) 面积上限：宽度放大后高度仍能到 65535 */
+  log('AREA ' + label(testSize(1000, 65535)) + ' area=' + (1000 * 65535));
+  log('AREA ' + label(testSize(2048, 16384)) + ' area=' + (2048 * 16384));
+
+  /* 4) 同一元素超限后能否自愈（现网曾每帧重设尺寸） */
+  const c2 = document.createElement('canvas');
+  document.body.appendChild(c2);
+  let broken = null, recovered = null;
+  try {
+    c2.width = 158; c2.height = 262144;
+    const ctx = c2.getContext('2d');
+    ctx.fillStyle = '#f00'; ctx.fillRect(0, 0, 158, 262144);
+    broken = ctx.getImageData(0, 0, 1, 1).data[3] === 255;
+    c2.width = 158; c2.height = 8192;
+    ctx.fillStyle = '#f00'; ctx.fillRect(0, 0, 158, 8192);
+    recovered = ctx.getImageData(0, 0, 1, 1).data[3] === 255;
+  } catch (e) { recovered = 'err:' + e; }
+  c2.remove();
+  log(`SAME-ELEMENT oversizeDrawOk=${broken} afterShrinkOk=${recovered}`);
+  log('FRESH-ELEMENT after-bad ' + label(testSize(158, 8192)));
+
+  /* 5) 由画布上限反推行数上限：行距 5px、上下 padding 6px（小地图几何） */
+  const PITCH = 5, PAD = 6, MAX_DEV_H = 65535;
+  for (const dpr of [1, 1.5, 2]) {
+    const cssH = Math.floor(MAX_DEV_H / dpr);
+    log(`LINES dpr=${dpr} cssH=${cssH} => ${Math.floor((cssH - PAD * 2) / PITCH)} lines`);
+  }
+
+  document.getElementById('out').textContent = 'CANVAS-PROBE-START\n' + lines.join('\n') + '\nCANVAS-PROBE-END';
+})();
+</script>
+</body>
+</html>

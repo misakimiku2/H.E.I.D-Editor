@@ -139,7 +139,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
 
   const toggles: Array<{ key: keyof EditorSettings; label: string; hint?: string }> = [
     { key: 'showWhitespace', label: t('settings.showWhitespace') },
-    { key: 'minimap', label: t('settings.minimap'), hint: t('settings.hintUnavailable') },
+    { key: 'minimap', label: t('settings.minimap'), hint: t('settings.hintPhoneOnly') },
     { key: 'stickyScroll', label: t('settings.stickyScroll'), hint: t('settings.hintUnavailable') },
   ];
 

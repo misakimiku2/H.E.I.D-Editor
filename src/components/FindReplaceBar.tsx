@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { EditorView } from '@codemirror/view';
-import { StateEffect } from '@codemirror/state';
+import { EditorView, type ViewUpdate } from '@codemirror/view';
 import {
   ArrowDown, ArrowUp, CaseSensitive, ChevronDown, Regex, Replace, ReplaceAll,
   WholeWord, X, Hash,
@@ -28,6 +27,8 @@ export interface FindReplaceBarProps {
   canReplace: boolean;
   /** 弹出定位：打开瞬间的指针位置（不跟随） */
   getPointer?: () => PointerPos;
+  /** 订阅编辑器视图更新；返回退订函数。由 CodeEditor 提供（挂在根配置里，reconfigure 后依然有效） */
+  subscribeViewUpdate?: (fn: (update: ViewUpdate) => void) => () => void;
   onClose: () => void;
 }
 
@@ -43,7 +44,7 @@ interface MatchState {
  * - 导航在匹配列表上循环回绕，替换支持正则 $1 引用；
  * - 手机端为近全宽紧凑布局，触控目标 ≥28px。
  */
-export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, canReplace, getPointer, onClose }: FindReplaceBarProps) {
+export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, canReplace, getPointer, subscribeViewUpdate, onClose }: FindReplaceBarProps) {
   const t = useT();
   const [query, setQuery] = useState('');
   const [replaceText, setReplaceText] = useState('');
@@ -116,13 +117,11 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   }, []);
 
   /* 文档与选区变化跟随：文档变化重扫，纯选区移动仅更新当前下标。
-     updateListener 经 StateEffect.appendConfig 运行时挂载（与 minimap 同一模式） */
-  const listenerAttachedRef = useRef(false);
+     订阅经 CodeEditor 的视图更新分发（挂在根配置里）——早先用 StateEffect.appendConfig 追加监听器，
+     会被 CM6 的 reconfigure 丢弃（本组件的 extensions 每次编辑都会重建），导致查找栏不再跟随文档。 */
   useEffect(() => {
-    const view = getView();
-    if (!view || listenerAttachedRef.current) return;
-    listenerAttachedRef.current = true;
-    const listener = EditorView.updateListener.of((u) => {
+    if (!subscribeViewUpdate) return;
+    return subscribeViewUpdate((u) => {
       if (u.docChanged) {
         if (u.state.doc.length <= RESCAN_DOC_LIMIT) rescan();
         return;
@@ -133,8 +132,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
         u.view.dispatch({ effects: setFindMatchesEffect.of({ matches: matchStateRef.current.matches, current: cur }) });
       }
     });
-    view.dispatch({ effects: StateEffect.appendConfig.of([listener]) });
-  }, [rescan, computeCurrent, getView]);
+  }, [rescan, computeCurrent, subscribeViewUpdate]);
 
   /** 把匹配列表选中并滚动到视野中央（保持查找栏焦点） */
   const goToMatch = useCallback((idx: number) => {

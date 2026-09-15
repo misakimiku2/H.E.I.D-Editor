@@ -1,12 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
-import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, highlightWhitespace, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine } from '@codemirror/view';
-import { history as historyExtension, indentWithTab, toggleComment, selectAll, deleteLine, moveLineUp, moveLineDown, copyLineDown } from '@codemirror/commands';import { syntaxTree, ensureSyntaxTree, indentUnit, foldGutter, bracketMatching, indentOnInput, syntaxHighlighting, foldKeymap, HighlightStyle, defaultHighlightStyle, foldAll, unfoldAll, language as languageFacet } from '@codemirror/language';
+import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, highlightWhitespace, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, gutterLineClass, GutterMarker, type ViewUpdate } from '@codemirror/view';
+import { history as historyExtension, indentWithTab, toggleComment, selectAll, deleteLine, moveLineUp, moveLineDown, copyLineDown } from '@codemirror/commands';import { syntaxTree, indentUnit, foldGutter, bracketMatching, indentOnInput, syntaxHighlighting, foldKeymap, HighlightStyle, defaultHighlightStyle, foldAll, unfoldAll, language as languageFacet } from '@codemirror/language';
 import { highlightSelectionMatches, selectSelectionMatches } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { Tag, tags as t, highlightTree, type Highlighter } from '@lezer/highlight';
-import type { Tree } from '@lezer/common';
-import { EditorState, Extension, StateEffect } from '@codemirror/state';
+import { EditorState, Extension, StateEffect, StateField, RangeSet } from '@codemirror/state';
 import {
   Type,
   Undo2, Redo2, Scissors, Copy, ClipboardPaste, TextSelect, Search, MessageSquareQuote,
@@ -28,6 +27,10 @@ import {
   vsCodeDarkHighlightStyle, vsCodeLightHighlightStyle,
 } from '../lib/codemirror';
 import { IS_ANDROID_APP } from '../lib/platform';
+import {
+  computeMinimapMetrics, minimapCanvasDeviceSize, minimapLineY, minimapWidthFor,
+  MINIMAP_BLOCK_HEIGHT, MINIMAP_CHAR_WIDTH, MINIMAP_LINE_PITCH, MINIMAP_PADDING,
+} from '../lib/minimap';
 import type { PointerPos } from '../hooks/useLastPointer';
 
 const CODE_FONT = '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace';
@@ -227,6 +230,38 @@ function hasCommentTokens(view: EditorView): boolean {
   }
 }
 
+/* ---------- 行号悬停高亮 ----------
+   走 CodeMirror 自己的 gutterLineClass（和 highlightActiveLineGutter 同一套机制）：
+   类名会打到「该行在**所有** gutter 里的格子」上 —— 行号栏 + 折叠栏，
+   所以悬停条的宽度与「当前行」的选中条完全一致（早先用 :hover 只覆盖行号栏那一格，短一截）。 */
+
+class HoverGutterMarker extends GutterMarker {
+  elementClass = 'cm-gutterHoverLine';
+}
+const hoverGutterMarker = new HoverGutterMarker();
+
+/** 悬停行（行首位置）；null = 没有悬停 */
+const setHoveredGutterLine = StateEffect.define<number | null>();
+
+const hoveredGutterLineField = StateField.define<number | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setHoveredGutterLine)) return e.value;
+    /* 文档改动后位置可能失效，先清掉（指针再动会重新设置） */
+    if (value !== null && tr.docChanged) return null;
+    return value;
+  },
+});
+
+const hoveredGutterLineHighlight = gutterLineClass.compute([hoveredGutterLineField], state => {
+  const pos = state.field(hoveredGutterLineField);
+  if (pos === null) return RangeSet.empty;
+  const line = state.doc.lineAt(Math.min(Math.max(0, pos), state.doc.length));
+  return RangeSet.of([hoverGutterMarker.range(line.from)]);
+});
+
+const gutterHoverExtensions: Extension = [hoveredGutterLineField, hoveredGutterLineHighlight];
+
 /* ---------- CodeEditor component ---------- */
 
 export interface CodeEditorProps {
@@ -236,7 +271,7 @@ export interface CodeEditorProps {
   editable?: boolean;
   /** 编辑器设置（字体/缩进/换行/minimap 等），缺省用 DEFAULT_SETTINGS */
   editorSettings?: EditorSettings;
-  /** 大文件降级：关闭语法高亮/补全/选区匹配/小地图/粘性滚动 */
+  /** 大文件降级：关闭补全/选区匹配/自动缩进与粘性滚动（语法高亮与小地图保留，按视口惰性着色） */
   lowPerf?: boolean;
   /** meta.major = true 表示这是离散操作（如 markdown 格式化），撤销历史独立成条 */
   onChange?: (value: string, meta?: { major?: boolean }) => void;
@@ -302,17 +337,30 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   /* view 创建即置位：跳转 effect 依赖 state 才能在挂载时机触发 */
   const [viewReady, setViewReady] = useState(false);
   const cleanupFns = useRef<(() => void)[]>([]);
-  /* 语言扩展懒加载：语言切换时先清空再异步载入（chunk 已缓存时几乎无感） */
+  /**
+   * 视图更新订阅中心：命令式功能（小地图、查找栏）按需订阅，避免各自用 StateEffect.appendConfig
+   * 往编辑器上挂监听器 —— CM6 的 reconfigure 会**丢弃 appendConfig 追加的扩展**，而本组件的
+   * extensions 依赖 value，每次编辑/语言加载/设置变更都会 reconfigure。监听器一旦被静默丢掉：
+   * 小地图会停在单色（只画不更新，直到 DOM scroll 监听器再触发一次），查找栏不再跟随文档与选区。
+   * 订阅本身挂在 extensions 数组里（根配置），随 reconfigure 重建，订阅者集合则放在 ref 里保持不变。
+   */
+  const viewUpdateSubsRef = useRef<Set<(update: ViewUpdate) => void>>(new Set());
+  const subscribeViewUpdate = useCallback((fn: (update: ViewUpdate) => void) => {
+    viewUpdateSubsRef.current.add(fn);
+    return () => { viewUpdateSubsRef.current.delete(fn); };
+  }, []);
+  /* 语言扩展懒加载：语言切换时先清空再异步载入（chunk 已缓存时几乎无感）。
+     大文件同样加载：CM6 的高亮是视口级惰性解析，成本随「实际浏览过的区域」增长而非文件大小
+     （实测：13.3M 字符文件打开时语法树只覆盖 0.8%，整篇解析滞留约 2.3 字节/字符，见 lib/minimap.ts）。 */
   const [langExtension, setLangExtension] = useState<Extension | null>(null);
   useEffect(() => {
     let cancelled = false;
     setLangExtension(null);
-    if (lowPerf) return;
     void loadLanguageExtension(language).then(ext => {
       if (!cancelled) setLangExtension(ext);
     });
     return () => { cancelled = true; };
-  }, [language, lowPerf]);
+  }, [language]);
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
   const onChangeRef = useRef(onChange);
@@ -349,24 +397,66 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   /* 触屏：选区非空时浮出「格式化」入口（长按 contextmenu 在安卓上不可靠） */
   const [touchFmtBtn, setTouchFmtBtn] = useState<{ x: number; y: number; from: number; to: number } | null>(null);
 
-  /* line-number click & drag selection */
-  const setupLineNumberClick = useCallback((view: EditorView) => {
-    const gutters = view.dom.querySelector('.cm-gutters') as HTMLElement | null;
-    if (!gutters) return;
+  /* line-number click / drag selection + hover highlight */
+  const setupLineNumberInteractions = useCallback((view: EditorView) => {
+    /* 监听挂在 view.dom（.cm-editor）而不是 .cm-gutters：行号栏节点会被 reconfigure 重建
+       （实测每次编辑后 .cm-lineNumbers 都是新节点），挂旧节点/一次性缓存都有彻底失灵的风险；
+       editor 根节点随视图存活，行号栏每次事件现查，查不到也不直接放弃。 */
+    const root: HTMLElement = view.dom;
 
     let isDragging = false;
     let startLineNum = 0;
 
-    const getLineAtY = (clientY: number): number | null => {
-      const editorRect = view.dom.getBoundingClientRect();
-      const y = clientY - editorRect.top + view.scrollDOM.scrollTop;
+    /** 指针下的行号格子 → 行号：格子文本就是屏幕上显示的那个数字 */
+    const lineFromCellAt = (clientX: number, clientY: number): number | null => {
       try {
-        const block = view.lineBlockAtHeight(y);
-        if (block && block.from !== undefined) {
-          return view.state.doc.lineAt(block.from).number;
-        }
-      } catch {}
-      return null;
+        const hit = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+        const cell = hit?.closest?.('.cm-lineNumbers .cm-gutterElement') as HTMLElement | null;
+        if (!cell) return null;
+        const n = parseInt((cell.textContent || '').trim(), 10);
+        return Number.isFinite(n) && n >= 1 && n <= view.state.doc.lines ? n : null;
+      } catch {
+        return null;
+      }
+    };
+
+    /**
+     * 几何换算：height 基准是「文档顶部」= view.documentTop（contentDOM 顶部 + paddingTop；
+     * 本主题 .cm-content 有 12px 上内边距 → paddingTop=12），这也是 CM 自己 posAtCoords 的基准。
+     * 旧实现用 view.dom 顶部 + scrollTop 近似，漏掉了 paddingTop：命中点整体下移 12px
+     * （默认行高 19.6px 的 61%），于是点某行号的下半格会选中下一行。
+     */
+    const lineFromHeight = (clientY: number): number | null => {
+      try {
+        const y = clientY - view.documentTop;
+        if (!Number.isFinite(y)) return null;
+        const block = view.lineBlockAtHeight(Math.max(0, y));
+        if (!block || typeof block.from !== 'number' || !Number.isFinite(block.from)) return null;
+        return view.state.doc.lineAt(block.from).number;
+      } catch {
+        return null;
+      }
+    };
+
+    /** 最后兜底：旧版近似算法，只在上面两条路都拿不到行号时用，避免点击毫无反应 */
+    const lineFromFallbackMath = (clientY: number): number | null => {
+      try {
+        const rect = root.getBoundingClientRect();
+        const block = view.lineBlockAtHeight(clientY - rect.top + view.scrollDOM.scrollTop);
+        if (!block || typeof block.from !== 'number' || !Number.isFinite(block.from)) return null;
+        return view.state.doc.lineAt(block.from).number;
+      } catch {
+        return null;
+      }
+    };
+
+    /** 点击以指针下的格子为准（与看到的数字一致）；拖动每帧都算，用几何换算更省 */
+    const lineAtPointer = (clientX: number, clientY: number, preferCell: boolean): number | null => {
+      if (preferCell) {
+        const byCell = lineFromCellAt(clientX, clientY);
+        if (byCell !== null) return byCell;
+      }
+      return lineFromHeight(clientY) ?? lineFromFallbackMath(clientY);
     };
 
     const selectLines = (fromLine: number, toLine: number) => {
@@ -383,11 +473,20 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     };
 
     const handleMouseDown = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('.cm-lineNumbers')) return;
-      e.preventDefault();
-      const lineNum = getLineAtY(e.clientY);
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement | null;
+      /* 粘性作用域条盖在行号栏上方，它有自己的一套点击行为（跳到作用域首行），不抢它 */
+      if (target?.closest?.('.cm-sticky-header') || target?.closest?.('.cm-panels')) return;
+      const gutter = view.dom.querySelector('.cm-lineNumbers') as HTMLElement | null;
+      if (!gutter) return;
+      /* 事件目标在行号栏内即接管；被别的层盖住时退化为按行号栏矩形判定，避免点上去毫无反应 */
+      const rect = gutter.getBoundingClientRect();
+      const onGutter = !!target?.closest?.('.cm-lineNumbers')
+        || (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom);
+      if (!onGutter) return;
+      const lineNum = lineAtPointer(e.clientX, e.clientY, true);
       if (lineNum === null) return;
+      e.preventDefault();
       isDragging = true;
       startLineNum = lineNum;
       selectLines(lineNum, lineNum);
@@ -395,7 +494,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
     const handleMouseMove = (e: MouseEvent) => {
       if (!isDragging) return;
-      const lineNum = getLineAtY(e.clientY);
+      const lineNum = lineAtPointer(e.clientX, e.clientY, false);
       if (lineNum === null) return;
       selectLines(startLineNum, lineNum);
     };
@@ -404,11 +503,50 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       isDragging = false;
     };
 
-    gutters.addEventListener('mousedown', handleMouseDown);
+    /* ---- 悬停：把「指针下的那一行」写进状态，由 gutterLineClass 打到所有 gutter 格子上 ---- */
+
+    const setHoveredLine = (pos: number | null) => {
+      const current = view.state.field(hoveredGutterLineField, false) ?? null;
+      if (current === pos) return;
+      view.dispatch({ effects: setHoveredGutterLine.of(pos) });
+    };
+
+    /** 行号格子 → 该行的行首位置（格子文本就是屏幕上的数字） */
+    const hoveredCellLinePos = (e: MouseEvent): number | null => {
+      const cell = (e.target as HTMLElement | null)?.closest?.('.cm-lineNumbers .cm-gutterElement') as HTMLElement | null;
+      if (!cell) return null;
+      const n = parseInt((cell.textContent || '').trim(), 10);
+      if (!Number.isFinite(n) || n < 1 || n > view.state.doc.lines) return null;
+      return view.state.doc.line(n).from;
+    };
+
+    const handleMouseOver = (e: MouseEvent) => {
+      const pos = hoveredCellLinePos(e);
+      if (pos !== null) setHoveredLine(pos);
+    };
+
+    const handleMouseOut = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest?.('.cm-lineNumbers .cm-gutterElement')) return;
+      /* 在同一格内部移动不清除，离开行号栏才收掉 */
+      const to = e.relatedTarget as HTMLElement | null;
+      if (to && to.closest?.('.cm-lineNumbers .cm-gutterElement') === target) return;
+      setHoveredLine(null);
+    };
+
+    const handleMouseLeave = () => setHoveredLine(null);
+
+    root.addEventListener('mousedown', handleMouseDown);
+    root.addEventListener('mouseover', handleMouseOver);
+    root.addEventListener('mouseout', handleMouseOut);
+    root.addEventListener('mouseleave', handleMouseLeave);
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     cleanupFns.current.push(() => {
-      gutters.removeEventListener('mousedown', handleMouseDown);
+      root.removeEventListener('mousedown', handleMouseDown);
+      root.removeEventListener('mouseover', handleMouseOver);
+      root.removeEventListener('mouseout', handleMouseOut);
+      root.removeEventListener('mouseleave', handleMouseLeave);
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     });
@@ -423,6 +561,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     const lineColor = isDarkMode ? '#d4d4d4' : '#1e1e1e';
 
     const container = document.createElement('div');
+    /* 类名供行号点击识别（它盖在行号栏上方，有自己的点击行为） */
+    container.className = 'cm-sticky-header';
     Object.assign(container.style, {
       position: 'absolute',
       top: '0',
@@ -540,14 +680,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     const viewportColor = isDarkMode ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)';
     const viewportBorderColor = isDarkMode ? 'rgba(255, 255, 255, 0.25)' : 'rgba(0, 0, 0, 0.18)';
     const selectionColor = isDarkMode ? 'rgba(100, 150, 255, 0.3)' : 'rgba(50, 100, 255, 0.25)';
-    const MINIMAP_WIDTH_MIN = 60;
-    const MINIMAP_WIDTH_MAX = 170;
-    let minimapWidth = Math.min(MINIMAP_WIDTH_MAX, Math.max(MINIMAP_WIDTH_MIN, Math.round(view.dom.clientWidth * 0.08)));
-    const BLOCK_HEIGHT = 3;
-    const LINE_GAP = 2;
-    const LINE_PITCH = BLOCK_HEIGHT + LINE_GAP;
-    const CHAR_WIDTH = 1.15;
-    const PADDING = 6;
+    /* 几何常量统一由 src/lib/minimap（含画布尺寸上限实测结论）提供 */
+    let minimapWidth = minimapWidthFor(view.dom.clientWidth);
+    const BLOCK_HEIGHT = MINIMAP_BLOCK_HEIGHT;
+    const LINE_PITCH = MINIMAP_LINE_PITCH;
+    const CHAR_WIDTH = MINIMAP_CHAR_WIDTH;
+    const PADDING = MINIMAP_PADDING;
 
     const existingContainer = view.dom.querySelector('.cm-minimap-container') as HTMLElement | null;
     if (existingContainer) existingContainer.remove();
@@ -567,18 +705,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       zIndex: '25',
     });
 
-    const innerWrapper = document.createElement('div');
-    Object.assign(innerWrapper.style, {
-      position: 'absolute',
-      top: '0',
-      left: '0',
-      willChange: 'transform',
-    });
-    container.appendChild(innerWrapper);
-
+    /* 画布固定为容器可见高度（不再随行数增长）：超限的 canvas 元素会永久失效，见 lib/minimap.ts */
     const contentCanvas = document.createElement('canvas');
     contentCanvas.style.display = 'block';
-    innerWrapper.appendChild(contentCanvas);
+    container.appendChild(contentCanvas);
 
     const selectionDiv = document.createElement('div');
     Object.assign(selectionDiv.style, {
@@ -589,7 +719,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       pointerEvents: 'none',
       display: 'none',
     });
-    innerWrapper.appendChild(selectionDiv);
+    container.appendChild(selectionDiv);
 
     const viewportDiv = document.createElement('div');
     Object.assign(viewportDiv.style, {
@@ -608,15 +738,22 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
     minimapRef.current = { canvas: contentCanvas, container };
 
+    const ctx = contentCanvas.getContext('2d');
+    /* 滚动状态 → 小地图几何（可见行窗口 + 滑块位置），纯函数在 lib/minimap 内 */
+    const currentMetrics = () => computeMinimapMetrics({
+      lineCount: view.state.doc.lines,
+      boxHeight: container.clientHeight,
+      scrollerHeight: view.scrollDOM.clientHeight,
+      scrollHeight: view.scrollDOM.scrollHeight,
+      scrollTop: view.scrollDOM.scrollTop,
+    });
+
     let isDragging = false;
     let isDraggingViewport = false;
     let dragStartClientY = 0;
     let dragStartScrollTop = 0;
     let currentMinimapScrollTop = 0;
     let dragRafId = 0;
-    let fullParseScheduled = false;
-    let forcedTree: Tree | null = null;
-    const MIN_VP_HEIGHT = 30;
 
     const defaultColor = isDarkMode ? '#3d3d42' : '#d8d8db';
     const commentColor = isDarkMode ? '#6a9955' : '#008000';
@@ -714,84 +851,67 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
     const renderContent = () => {
       const doc = view.state.doc;
-      const lineCount = typeof doc.lines === 'number' ? doc.lines : 1;
+      const boxH = container.clientHeight;
+      if (boxH <= 0 || !ctx) return;
       const displayWidth = minimapWidth - PADDING * 2;
-      const contentH = Math.max(lineCount * LINE_PITCH + PADDING * 2, container.clientHeight);
-      const containerH = container.clientHeight;
+      const m = currentMetrics();
+      currentMinimapScrollTop = m.windowScrollTop;
+
+      /* 画布尺寸只与容器有关（固定画布高度）：尺寸不变则复用后端存储，避免每帧重分配 */
       const dpr = window.devicePixelRatio || 1;
-
-      const scrollH = view.scrollDOM.scrollHeight;
-      const scrollTop = view.scrollDOM.scrollTop;
-      const scrollerH = view.scrollDOM.clientHeight;
-      const maxScroll = Math.max(0, scrollH - scrollerH);
-
-      const naturalVpH = scrollH > 0
-        ? (scrollerH / scrollH) * containerH
-        : containerH;
-      const minVpH = Math.max(MIN_VP_HEIGHT, containerH * 0.08);
-      const logicalVpH = Math.max(naturalVpH, minVpH);
-      const vpY = maxScroll > 0
-        ? (scrollTop / maxScroll) * (containerH - logicalVpH)
-        : 0;
-      const vpYInContent = scrollH > 0
-        ? (scrollTop / scrollH) * contentH
-        : 0;
-      const maxMinimapScroll = Math.max(0, contentH - containerH);
-      const minimapScrollTop = maxMinimapScroll > 0
-        ? Math.max(0, Math.min(maxMinimapScroll, vpYInContent - vpY))
-        : 0;
-      currentMinimapScrollTop = minimapScrollTop;
-
-      const BUFFER_LINES = 15;
-      const highlightFirstLine = Math.max(1, Math.floor((minimapScrollTop - PADDING) / LINE_PITCH) + 1 - BUFFER_LINES);
-      const highlightLastLine = Math.min(lineCount, Math.ceil((minimapScrollTop + containerH - PADDING) / LINE_PITCH) + BUFFER_LINES);
-
-      contentCanvas.width = displayWidth * dpr;
-      contentCanvas.height = contentH * dpr;
+      const { width: deviceW, height: deviceH } = minimapCanvasDeviceSize(displayWidth, boxH, dpr);
+      if (contentCanvas.width !== deviceW || contentCanvas.height !== deviceH) {
+        contentCanvas.width = deviceW;
+        contentCanvas.height = deviceH;
+      }
       contentCanvas.style.width = `${displayWidth}px`;
-      contentCanvas.style.height = `${contentH}px`;
+      contentCanvas.style.height = `${boxH}px`;
       contentCanvas.style.marginLeft = `${PADDING}px`;
-      const ctx = contentCanvas.getContext('2d');
-      if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = bgColor;
-      ctx.fillRect(0, 0, displayWidth, contentH);
+      ctx.fillRect(0, 0, displayWidth, boxH);
 
-      const tree = forcedTree || syntaxTree(view.state);
-      const rangeFrom = doc.line(highlightFirstLine).from;
-      const rangeTo = doc.line(highlightLastLine).to;
+      /* 有语法树就按可见窗口着色（大文件同样适用：树是视口级惰性解析出来的，成本随浏览区域增长）；
+         尚未解析到的窗口先画单色行条，解析推进时由 updateListener 补一次重绘——先单色、后着色 */
+      let lineTokenMap: Map<number, { from: number; to: number; color: string }[]> | null = null;
+      const tree = syntaxTree(view.state);
+      if (tree.length > 0) {
+        const rangeFrom = doc.line(m.firstLine).from;
+        const rangeTo = doc.line(m.lastLine).to;
 
-      const colorRanges: { from: number; to: number; color: string }[] = [];
-      highlightTree(tree, minimapHighlighter, (from, to, color) => {
-        if (color && from < rangeTo && to > rangeFrom) {
-          colorRanges.push({ from, to, color });
-        }
-      }, rangeFrom, rangeTo);
-      colorRanges.sort((a, b) => a.from - b.from || a.to - b.to);
+        const colorRanges: { from: number; to: number; color: string }[] = [];
+        highlightTree(tree, minimapHighlighter, (from, to, color) => {
+          if (color && from < rangeTo && to > rangeFrom) {
+            colorRanges.push({ from, to, color });
+          }
+        }, rangeFrom, rangeTo);
+        colorRanges.sort((a, b) => a.from - b.from || a.to - b.to);
 
-      const lineTokenMap = new Map<number, { from: number; to: number; color: string }[]>();
-      for (const range of colorRanges) {
-        const fromLine = doc.lineAt(range.from).number;
-        const toLine = doc.lineAt(Math.max(range.from, range.to - 1)).number;
-        for (let ln = fromLine; ln <= toLine; ln++) {
-          if (ln < highlightFirstLine || ln > highlightLastLine) continue;
-          if (!lineTokenMap.has(ln)) lineTokenMap.set(ln, []);
-          const ls = doc.line(ln).from;
-          const le = doc.line(ln).to;
-          lineTokenMap.get(ln)!.push({
-            from: Math.max(range.from, ls),
-            to: Math.min(range.to, le),
-            color: range.color
-          });
+        lineTokenMap = new Map();
+        for (const range of colorRanges) {
+          const fromLine = doc.lineAt(range.from).number;
+          const toLine = doc.lineAt(Math.max(range.from, range.to - 1)).number;
+          for (let ln = fromLine; ln <= toLine; ln++) {
+            if (ln < m.firstLine || ln > m.lastLine) continue;
+            if (!lineTokenMap.has(ln)) lineTokenMap.set(ln, []);
+            const ls = doc.line(ln).from;
+            const le = doc.line(ln).to;
+            lineTokenMap.get(ln)!.push({
+              from: Math.max(range.from, ls),
+              to: Math.min(range.to, le),
+              color: range.color
+            });
+          }
         }
       }
 
-      for (let i = 1; i <= lineCount; i++) {
+      /* 只绘制可见行窗口（+ 缓冲）：行数与文档规模无关，恒为容器高度 / 行距 */
+      for (let i = m.firstLine; i <= m.lastLine; i++) {
         const line = doc.line(i);
-        const y = PADDING + (i - 1) * LINE_PITCH;
+        const y = minimapLineY(i, m.windowScrollTop);
         const lineLen = line.text.length;
         if (lineLen === 0) continue;
-        const ranges = lineTokenMap.get(i);
+        const ranges = lineTokenMap?.get(i);
         if (!ranges || ranges.length === 0) {
           ctx.fillStyle = defaultColor;
           ctx.fillRect(0, y, Math.min(lineLen * CHAR_WIDTH, displayWidth), BLOCK_HEIGHT);
@@ -820,101 +940,25 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           ctx.fillRect(x, y, len * CHAR_WIDTH, BLOCK_HEIGHT);
         }
       }
-
-      const treeAfterRender = forcedTree || syntaxTree(view.state);
-      if (treeAfterRender.length < doc.length * 0.98 && !fullParseScheduled) {
-        fullParseScheduled = true;
-        const syncTree = ensureSyntaxTree(view.state, doc.length, 100);
-        if (syncTree) {
-          forcedTree = syncTree;
-          renderContent();
-          updateOverlay();
-          fullParseScheduled = false;
-        } else {
-          requestAnimationFrame(() => {
-            scheduleProgressiveParse();
-          });
-        }
-      }
-      return contentH;
-
-      function scheduleProgressiveParse() {
-        const TIMEOUTS = [50, 100, 200, 500, 1000, 2000, 5000];
-        let step = 0;
-
-        function parseStep() {
-          if (step >= TIMEOUTS.length) {
-            renderContent();
-            updateOverlay();
-            fullParseScheduled = false;
-            return;
-          }
-
-          const timeout = TIMEOUTS[step++];
-          const forced = ensureSyntaxTree(view.state, doc.length, timeout);
-
-          if (forced) {
-            forcedTree = forced;
-          }
-
-          renderContent();
-          updateOverlay();
-
-          if (forcedTree && forcedTree.length >= doc.length * 0.98) {
-            fullParseScheduled = false;
-            return;
-          }
-
-          requestAnimationFrame(parseStep);
-        }
-        requestAnimationFrame(parseStep);
-      }
     };
 
     const updateOverlay = () => {
-      const doc = view.state.doc;
-      const lineCount = typeof doc.lines === 'number' ? doc.lines : 1;
-      const contentH = Math.max(lineCount * LINE_PITCH + PADDING * 2, container.clientHeight);
-      const containerH = container.clientHeight;
-      const scrollerH = view.scrollDOM.clientHeight;
-      const scrollH = view.scrollDOM.scrollHeight;
-      const scrollTop = view.scrollDOM.scrollTop;
-      const maxScroll = Math.max(0, scrollH - scrollerH);
-
-      const naturalVpH = scrollH > 0
-        ? (scrollerH / scrollH) * containerH
-        : containerH;
-
-      const vpW = minimapWidth - PADDING * 2;
-      const minVpH = Math.max(MIN_VP_HEIGHT, containerH * 0.08);
-      const vpH = Math.max(naturalVpH, minVpH);
-
-      const logicalVpH = Math.max(naturalVpH, minVpH);
-      const vpY = maxScroll > 0
-        ? (scrollTop / maxScroll) * (containerH - logicalVpH)
-        : 0;
+      const boxH = container.clientHeight;
+      if (boxH <= 0) return;
+      const m = currentMetrics();
+      currentMinimapScrollTop = m.windowScrollTop;
 
       viewportDiv.style.left = `${PADDING}px`;
-      viewportDiv.style.width = `${vpW}px`;
-      viewportDiv.style.top = `${vpY}px`;
-      viewportDiv.style.height = `${vpH}px`;
-
-      const vpYInContent = scrollH > 0
-        ? (scrollTop / scrollH) * contentH
-        : 0;
-      const maxMinimapScroll = Math.max(0, contentH - containerH);
-      const minimapScrollTop = maxMinimapScroll > 0
-        ? Math.max(0, Math.min(maxMinimapScroll, vpYInContent - vpY))
-        : 0;
-      innerWrapper.style.transform = `translateY(${-minimapScrollTop}px)`;
-      currentMinimapScrollTop = minimapScrollTop;
+      viewportDiv.style.width = `${minimapWidth - PADDING * 2}px`;
+      viewportDiv.style.top = `${m.viewportTop}px`;
+      viewportDiv.style.height = `${m.viewportHeight}px`;
 
       const sel = view.state.selection.main;
       if (!sel.empty) {
-        const startLine = doc.lineAt(sel.from).number;
-        const endLine = doc.lineAt(sel.to).number;
+        const startLine = view.state.doc.lineAt(sel.from).number;
+        const endLine = view.state.doc.lineAt(sel.to).number;
         selectionDiv.style.display = 'block';
-        selectionDiv.style.top = `${PADDING + (startLine - 1) * LINE_PITCH}px`;
+        selectionDiv.style.top = `${minimapLineY(startLine, m.windowScrollTop)}px`;
         selectionDiv.style.height = `${(endLine - startLine + 1) * LINE_PITCH}px`;
       } else {
         selectionDiv.style.display = 'none';
@@ -942,7 +986,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     const scrollToY = (clientY: number) => {
       const rect = container.getBoundingClientRect();
       const relY = clientY - rect.top;
-      const contentH = parseFloat(contentCanvas.style.height) || container.clientHeight;
+      /* 映射用逻辑总高度（画布只有可见窗口那么大，取不到整篇高度） */
+      const contentH = currentMetrics().contentHeight;
       const scrollH = view.scrollDOM.scrollHeight;
       const contentY = relY + currentMinimapScrollTop;
       const targetScrollTop = contentH > 0 ? (contentY / contentH) * scrollH : 0;
@@ -975,13 +1020,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         if (isDraggingViewport) {
           const deltaY = currentClientY - dragStartClientY;
           const containerH = container.clientHeight;
-          const scrollerH = view.scrollDOM.clientHeight;
-          const scrollH = view.scrollDOM.scrollHeight;
-          const maxScroll = Math.max(0, scrollH - scrollerH);
-          const naturalVpH = scrollH > 0 ? (scrollerH / scrollH) * containerH : containerH;
-          const minVpH = Math.max(MIN_VP_HEIGHT, containerH * 0.08);
-          const logicalVpH = Math.max(naturalVpH, minVpH);
-          const scrollRange = containerH - logicalVpH;
+          const maxScroll = Math.max(0, view.scrollDOM.scrollHeight - view.scrollDOM.clientHeight);
+          const scrollRange = Math.max(0, containerH - currentMetrics().viewportHeight);
           if (scrollRange > 0 && maxScroll > 0) {
             const scrollDelta = (deltaY / scrollRange) * maxScroll;
             view.scrollDOM.scrollTop = Math.max(0, Math.min(maxScroll, dragStartScrollTop + scrollDelta));
@@ -1001,36 +1041,46 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       }
     };
 
-    const updateListener = EditorView.updateListener.of((update) => {
+    /* 订阅视图更新（见 viewUpdateSubsRef 说明）：
+       编辑 / 尺寸变化 → 整体重绘；纯选区变化 → 只更新滑块与选区块；
+       懒解析推进（文档/选区/几何都没变，只有语法树变）→ 补一次重绘，让窗口内迟到的着色显示出来 */
+    const unsubscribeViewUpdate = subscribeViewUpdate((update) => {
       if (update.docChanged || update.geometryChanged) {
         scheduleFullRender();
       } else if (update.selectionSet) {
         updateOverlay();
+      } else if (syntaxTree(update.state) !== syntaxTree(update.startState)) {
+        scheduleFullRender();
       }
     });
+    cleanupFns.current.push(unsubscribeViewUpdate);
 
     renderContent();
     updateOverlay();
 
-    view.dispatch({ effects: StateEffect.appendConfig.of([updateListener]) });
     view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
     container.addEventListener('mousedown', handleMinimapMouseDown);
     window.addEventListener('mousemove', handleMinimapMouseMove);
     window.addEventListener('mouseup', handleMinimapMouseUp);
 
     let resizeRafId = 0;
+    let lastBoxH = container.clientHeight;
     const resizeObserver = new ResizeObserver(() => {
-      const newWidth = Math.min(MINIMAP_WIDTH_MAX, Math.max(MINIMAP_WIDTH_MIN, Math.round(view.dom.clientWidth * 0.08)));
-      if (newWidth === minimapWidth) return;
+      const newWidth = minimapWidthFor(view.dom.clientWidth);
+      const boxH = container.clientHeight;
+      if (newWidth === minimapWidth && boxH === lastBoxH) return;
       if (resizeRafId) return;
       resizeRafId = requestAnimationFrame(() => {
         resizeRafId = 0;
-        if (newWidth === minimapWidth) return;
-        minimapWidth = newWidth;
-        container.style.width = `${minimapWidth}px`;
-        selectionDiv.style.width = `${minimapWidth - PADDING * 2}px`;
-        viewportDiv.style.width = `${minimapWidth - PADDING * 2}px`;
-        view.scrollDOM.style.paddingRight = `${minimapWidth}px`;
+        lastBoxH = container.clientHeight;
+        if (newWidth !== minimapWidth) {
+          minimapWidth = newWidth;
+          container.style.width = `${minimapWidth}px`;
+          selectionDiv.style.width = `${minimapWidth - PADDING * 2}px`;
+          viewportDiv.style.width = `${minimapWidth - PADDING * 2}px`;
+          view.scrollDOM.style.paddingRight = `${minimapWidth}px`;
+        }
+        /* 高度变化同样要重画：画布高度跟容器走（旋转 / 分屏 / 窗口缩放） */
         scheduleFullRender();
       });
     });
@@ -1049,7 +1099,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       view.scrollDOM.style.paddingRight = '';
       minimapRef.current = null;
     });
-  }, [isDarkMode]);
+  }, [isDarkMode, subscribeViewUpdate]);
 
   const fixSelectionLayer = useCallback((view: EditorView) => {
     const selectionLayer = view.scrollDOM.querySelector('.cm-selectionLayer') as HTMLElement | null;
@@ -1257,13 +1307,15 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
     minimapRef.current = null;
     fixSelectionLayer(view);
-    if (!IS_ANDROID_APP) setupLineNumberClick(view);
-    if (!lowPerf && platformCodeMapOk()) {
-      if (settings.stickyScroll) setupStickyScroll(view);
+    if (!IS_ANDROID_APP) setupLineNumberInteractions(view);
+    if (platformCodeMapOk()) {
+      /* 粘性滚动每帧要回扫到光标行（成本随行数增长），大文件继续关闭；
+         小地图只画可视窗口（v1.2 第 30 项），大文件保留——只是没有语法树，画单色行条 */
+      if (settings.stickyScroll && !lowPerf) setupStickyScroll(view);
       if (settings.minimap) setupMinimap(view);
     }
     onCreateEditor?.(view);
-  }, [fixSelectionLayer, setupLineNumberClick, setupStickyScroll, setupMinimap, onCreateEditor, lowPerf, settings.stickyScroll, settings.minimap]);
+  }, [fixSelectionLayer, setupLineNumberInteractions, setupStickyScroll, setupMinimap, onCreateEditor, lowPerf, settings.stickyScroll, settings.minimap]);
 
   /* 跳转请求消费：view 就绪后选中目标位置并居中（挂载时机与已挂载的连续请求共用） */
   useEffect(() => {
@@ -1300,8 +1352,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       minimapRafRef.current = null;
     }
     fixSelectionLayer(view);
-    if (!lowPerf && platformCodeMapOk()) {
-      if (settings.stickyScroll) setupStickyScroll(view);
+    if (platformCodeMapOk()) {
+      if (settings.stickyScroll && !lowPerf) setupStickyScroll(view);
       if (settings.minimap) setupMinimap(view);
     }
   }, [fixSelectionLayer, setupStickyScroll, setupMinimap, lowPerf, settings.stickyScroll, settings.minimap]);
@@ -1392,6 +1444,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         ...foldKeymap,
       ]),
       findHighlightExtension(),
+      gutterHoverExtensions,
+      /* 命令式功能的视图更新分发：必须随根配置一起重建，见 viewUpdateSubsRef 说明 */
+      EditorView.updateListener.of((u) => {
+        if (viewUpdateSubsRef.current.size === 0) return;
+        for (const fn of Array.from(viewUpdateSubsRef.current)) fn(u);
+      }),
     ];
     if (wrapEnabled) {
       exts.push(EditorView.lineWrapping);
@@ -1468,6 +1526,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           gotoMode={find.goto}
           canReplace={!!editable}
           getPointer={getPointer}
+          subscribeViewUpdate={subscribeViewUpdate}
           onClose={() => onFindCloseRef.current?.()}
         />
       )}

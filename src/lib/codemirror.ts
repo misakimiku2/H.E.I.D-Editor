@@ -49,11 +49,20 @@ export const vsCodeDarkTheme = EditorView.theme({
   '.cm-gutterElement': {
     fontFamily: CODE_FONT,
     cursor: 'pointer',
+    /* 这里刻意不加 transition：折叠栏的高亮格子是按需创建/销毁的（悬停时才临时生成一格），
+       新建/移除没有动画而行号栏那一格有动画 —— 两半会先后来回，看起来是「撕裂」；
+       悬停高亮统一做成瞬间生效（和 VS Code 的 gutter hover 一致）。 */
   },
   '.cm-lineNumbers .cm-gutterElement': {
     padding: '0 10px',
     display: 'flex',
     justifyContent: 'flex-end',
+  },
+  /* 行号悬停反馈：与「当前行」同宽 —— 类名由 CodeEditor 的悬停行状态经 gutterLineClass
+     打到该行在所有 gutter（行号栏 + 折叠栏）里的格子上（当前行用 !important 底色，悬停不盖它） */
+  '.cm-gutterHoverLine': {
+    backgroundColor: '#2d2d2d',
+    color: '#cccccc',
   },
   '.cm-activeLine': {
     backgroundColor: '#2a2d2e !important',
@@ -153,11 +162,20 @@ export const vsCodeLightTheme = EditorView.theme({
   '.cm-gutterElement': {
     fontFamily: CODE_FONT,
     cursor: 'pointer',
+    /* 这里刻意不加 transition：折叠栏的高亮格子是按需创建/销毁的（悬停时才临时生成一格），
+       新建/移除没有动画而行号栏那一格有动画 —— 两半会先后来回，看起来是「撕裂」；
+       悬停高亮统一做成瞬间生效（和 VS Code 的 gutter hover 一致）。 */
   },
   '.cm-lineNumbers .cm-gutterElement': {
     padding: '0 10px',
     display: 'flex',
     justifyContent: 'flex-end',
+  },
+  /* 行号悬停反馈：与「当前行」同宽 —— 类名由 CodeEditor 的悬停行状态经 gutterLineClass
+     打到该行在所有 gutter（行号栏 + 折叠栏）里的格子上（当前行用 !important 底色，悬停不盖它） */
+  '.cm-gutterHoverLine': {
+    backgroundColor: '#e8e8e8',
+    color: '#3b3b3b',
   },
   '.cm-activeLine': {
     backgroundColor: '#f0f0f0 !important',
