@@ -406,28 +406,32 @@ pub async fn render_page(app: tauri::AppHandle, url: String) -> Result<(String, 
         app_for_run
             .run_on_main_thread(move || {
                 let final_url_cb = final_url_for_build.clone();
-                let built = tauri::webview::WebviewWindowBuilder::new(
-                    &app_for_build,
-                    SCRAPER_LABEL,
-                    tauri::WebviewUrl::External(url_for_build.clone()),
-                )
-                .title("H.E.I.D 渲染抓取")
-                .visible(false)
-                .skip_taskbar(true)
-                .focused(false)
-                .initialization_script(INIT_JS)
-                .on_navigation(move |u| {
-                    if let Ok(mut f) = final_url_cb.lock() {
-                        *f = u.clone();
-                    }
-                    true
-                })
-                .on_page_load(|window, payload| {
-                    if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                        let _ = window.eval(SETTLE_JS);
-                    }
-                })
-                .build();
+                let built = {
+                    let builder = tauri::webview::WebviewWindowBuilder::new(
+                        &app_for_build,
+                        SCRAPER_LABEL,
+                        tauri::WebviewUrl::External(url_for_build.clone()),
+                    )
+                    .title("H.E.I.D 渲染抓取")
+                    .visible(false);
+                    /* 焦点与任务栏隐藏是 WebviewWindowBuilder 的桌面专属 API，移动端无对应方法 */
+                    #[cfg(desktop)]
+                    let builder = builder.focused(false).skip_taskbar(true);
+                    builder
+                        .initialization_script(INIT_JS)
+                        .on_navigation(move |u| {
+                            if let Ok(mut f) = final_url_cb.lock() {
+                                *f = u.clone();
+                            }
+                            true
+                        })
+                        .on_page_load(|window, payload| {
+                            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                                let _ = window.eval(SETTLE_JS);
+                            }
+                        })
+                        .build()
+                };
                 if let Err(e) = built {
                     if let Some(tx) = pending().lock().unwrap().remove(SCRAPER_LABEL) {
                         let _ = tx.send(Err(format!("创建渲染窗口失败：{e}")));
