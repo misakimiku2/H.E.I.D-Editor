@@ -141,6 +141,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
     { key: 'showWhitespace', label: t('settings.showWhitespace') },
     { key: 'minimap', label: t('settings.minimap'), hint: t('settings.hintPhoneOnly') },
     { key: 'stickyScroll', label: t('settings.stickyScroll'), hint: t('settings.hintUnavailable') },
+    { key: 'colorDecorations', label: t('settings.colorDecorations') },
   ];
 
   return (

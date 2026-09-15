@@ -21,6 +21,10 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { findHighlightExtension } from '../lib/editorSearch';
 import { readClipboardText, writeClipboardText } from '../lib/fileOps';
 import { loadLanguageExtension } from '../lib/codemirror';
+import { parseColorLiteral, serializeColorLiteral } from '../lib/colorLiteral';
+import type { Rgba } from '../lib/colorMath';
+import { colorDotExtension } from './colorDotExtension';
+import { ColorPickerPopover } from './ColorPickerPopover';
 import { DEFAULT_SETTINGS, type EditorSettings } from '../lib/settings';
 import {
   vsCodeDarkTheme, vsCodeLightTheme,
@@ -396,6 +400,74 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const lastCursorRef = useRef<{ line: number; col: number; selChars: number } | null>(null);
   /* 触屏：选区非空时浮出「格式化」入口（长按 contextmenu 在安卓上不可靠） */
   const [touchFmtBtn, setTouchFmtBtn] = useState<{ x: number; y: number; from: number; to: number } | null>(null);
+  /* 颜色取色会话：seq 为会话 id（key），from/to 随文档编辑重映射；anchor 是圆点视口坐标。
+     majorSent：本会话首次写入已标记 major（撤销历史独立成条，避免并进此前的打字条目） */
+  const [colorSession, setColorSession] = useState<{ seq: number; from: number; to: number; majorSent: boolean } | null>(null);
+  const [colorAnchor, setColorAnchor] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const colorSessionRef = useRef(colorSession);
+  colorSessionRef.current = colorSession;
+
+  const closeColorPicker = useCallback(() => setColorSession(null), []);
+
+  const openColorPicker = useCallback((view: EditorView, range: { from: number; to: number }) => {
+    if (!editable) return; /* 只读：圆点仅展示 */
+    if (!parseColorLiteral(view.state.sliceDoc(range.from, range.to))) return;
+    const coords = view.coordsAtPos(range.from);
+    setColorSession(s => ({ seq: (s?.seq ?? 0) + 1, from: range.from, to: range.to, majorSent: false }));
+    if (coords) setColorAnchor({ x: coords.left, y: coords.bottom });
+  }, [editable]);
+  const openColorPickerRef = useRef(openColorPicker);
+  openColorPickerRef.current = openColorPicker;
+
+  /* 取色器拖动 → 序列化保格式回写。撤销分组走应用层 tabHistory 的 800ms 连击合并：
+     首帧标记 major 独立成条，后续帧（<800ms 间隔）自然并入同一条 Ctrl+Z */
+  const applyColorChange = useCallback((rgba: Rgba) => {
+    const view = viewReadyRef.current;
+    const session = colorSessionRef.current;
+    if (!view || !session) return;
+    const parsed = parseColorLiteral(view.state.sliceDoc(session.from, session.to));
+    if (!parsed) { setColorSession(null); return; }
+    if (!session.majorSent) majorNextRef.current = true;
+    const insert = serializeColorLiteral(rgba, parsed.style);
+    view.dispatch({
+      changes: { from: session.from, to: session.to, insert },
+      userEvent: 'input.color',
+    });
+    const next = { ...session, majorSent: true, to: session.from + insert.length };
+    colorSessionRef.current = next;
+    setColorSession(next);
+    const coords = view.coordsAtPos(next.from);
+    if (coords) setColorAnchor({ x: coords.left, y: coords.bottom });
+  }, []);
+
+  /* 会话期间跟随文档：外部编辑重映射区间（颜色失效即关闭），滚动/几何变化重新贴靠 */
+  useEffect(() => {
+    if (!colorSession) return;
+    return subscribeViewUpdate((u) => {
+      const session = colorSessionRef.current;
+      const view = viewReadyRef.current;
+      if (!session || !view) return;
+      if (!u.docChanged) {
+        if (u.geometryChanged) {
+          const coords = view.coordsAtPos(session.from);
+          if (coords) setColorAnchor({ x: coords.left, y: coords.bottom });
+        }
+        return;
+      }
+      const from = u.changes.mapPos(session.from);
+      const to = u.changes.mapPos(session.to);
+      if (!parseColorLiteral(u.state.sliceDoc(from, to))) {
+        colorSessionRef.current = null;
+        setColorSession(null);
+        return;
+      }
+      const next = { ...session, from, to };
+      colorSessionRef.current = next;
+      setColorSession(next);
+      const coords = view.coordsAtPos(from);
+      if (coords) setColorAnchor({ x: coords.left, y: coords.bottom });
+    });
+  }, [colorSession?.seq, subscribeViewUpdate]);
 
   /* line-number click / drag selection + hover highlight */
   const setupLineNumberInteractions = useCallback((view: EditorView) => {
@@ -1445,6 +1517,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       ]),
       findHighlightExtension(),
       gutterHoverExtensions,
+      /* 颜色圆点：设置开关控制（extensions 依赖 settings，切换即重建） */
+      ...(settings.colorDecorations
+        ? [colorDotExtension({ onOpen: (v, r) => openColorPickerRef.current(v, r) })]
+        : []),
       /* 命令式功能的视图更新分发：必须随根配置一起重建，见 viewUpdateSubsRef 说明 */
       EditorView.updateListener.of((u) => {
         if (viewUpdateSubsRef.current.size === 0) return;
@@ -1518,6 +1594,22 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           fontSize: IS_ANDROID_APP ? '14px' : '13px',
         }}
       />
+      {colorSession && (() => {
+        const view = viewReadyRef.current;
+        if (!view) return null;
+        const parsed = parseColorLiteral(view.state.sliceDoc(colorSession.from, colorSession.to));
+        if (!parsed) return null;
+        return (
+          <ColorPickerPopover
+            key={colorSession.seq}
+            color={parsed.rgba}
+            anchor={colorAnchor}
+            isDarkMode={isDarkMode}
+            onChange={applyColorChange}
+            onClose={closeColorPicker}
+          />
+        );
+      })()}
       {find?.open && (
         <FindReplaceBar
           getView={getView}

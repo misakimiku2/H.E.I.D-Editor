@@ -31,6 +31,8 @@ export interface EditorSettings {
   showWhitespace: boolean;
   minimap: boolean;
   stickyScroll: boolean;
+  /** 代码内颜色字面量前显示色样圆点（点击可调色） */
+  colorDecorations: boolean;
   /** 定时把脏文件落盘（无路径标签走草稿，不受此项控制） */
   autosaveEnabled: boolean;
   autosaveIntervalSec: number;
@@ -48,6 +50,7 @@ export const DEFAULT_SETTINGS: EditorSettings = {
   showWhitespace: false,
   minimap: true,
   stickyScroll: true,
+  colorDecorations: true,
   autosaveEnabled: false,
   autosaveIntervalSec: 30,
   language: 'system',
@@ -91,6 +94,7 @@ export function normalizeSettings(input: unknown): EditorSettings {
     showWhitespace: typeof rec.showWhitespace === 'boolean' ? rec.showWhitespace : DEFAULT_SETTINGS.showWhitespace,
     minimap: typeof rec.minimap === 'boolean' ? rec.minimap : DEFAULT_SETTINGS.minimap,
     stickyScroll: typeof rec.stickyScroll === 'boolean' ? rec.stickyScroll : DEFAULT_SETTINGS.stickyScroll,
+    colorDecorations: typeof rec.colorDecorations === 'boolean' ? rec.colorDecorations : DEFAULT_SETTINGS.colorDecorations,
     autosaveEnabled: typeof rec.autosaveEnabled === 'boolean' ? rec.autosaveEnabled : DEFAULT_SETTINGS.autosaveEnabled,
     autosaveIntervalSec: clampInt(rec.autosaveIntervalSec, 5, 300, DEFAULT_SETTINGS.autosaveIntervalSec),
     language: pickEnum(rec.language, ['system', 'zh', 'en'] as const, DEFAULT_SETTINGS.language),

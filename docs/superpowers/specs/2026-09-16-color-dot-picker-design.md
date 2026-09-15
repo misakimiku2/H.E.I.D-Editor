@@ -59,7 +59,7 @@ view.dispatch({ changes: {from, to, insert} })  → 文档 → 重扫描 → 圆
   - hex 位数：原 3/4 位且新颜色恰好可表达为 3/4 位时保持短写，否则就近扩为 6/8 位；原 6/8 位保持位数。
   - alpha 规则：原值不带 alpha 且新 alpha = 1 → 原样位数；原值不带 alpha 但 alpha 调至 < 1 → 升级为带 alpha 的同家族写法（`#rrggbb`→`#rrggbbaa`、`rgb()`→`rgba()`、`hsl()`→`hsla()`）；原值带 alpha 则始终保留 alpha 槽（= 1 时写 `1` / `ff`）。
   - 数字用规范间距（`rgb(12, 34, 56)`、现代写法 `rgb(12 34 56 / 0.5)`），原有奇葩空格被规范化（VS Code 同款行为）。
-- **实时写入 + 撤销合并**：拖动中的每次 `onChange` 都 dispatch 文档事务（`userEvent: 'input.color'`），拖动首帧附带 `isolateHistory.of('full')`，连续事务由 CM history 合并为一条撤销记录。
+- **实时写入 + 撤销合并**：拖动中的每次 `onChange` 都 dispatch 文档事务（`userEvent: 'input.color'`）。撤销分组走应用层 `tabHistory` 的 800ms 连击合并（实现期确认：应用撤销不走 CM 内置 history，而是自管内容快照栈）——拖动首帧经由 markdown 格式化同一套 `majorNextRef` 标记 `major` 强制独立成条（避免并进此前的打字条目），后续帧间隔远小于 800ms，自然并入同一条 Ctrl+Z。
 - **浮层定位与跟随**：打开时用 `view.coordsAtPos(from)` 定位（贴圆点下方，边缘翻转）；通过既有 `subscribeViewUpdate` 订阅几何变化重新定位；浮层打开期间编辑器内 Escape / 点击浮层外关闭。
 - **区间失效防护**：浮层持有 `{from, to}`，文档事务后经 `tr.changes.mapPos` 重映射；重映射后内容不再是可解析颜色 → 自动关闭浮层。
 - **只读模式**：`editable=false` 或 `readOnly` 时圆点照常展示（纯信息），点击不弹取色器。
