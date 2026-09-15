@@ -54,3 +54,17 @@ export async function readClipboardText(): Promise<string> {
   }
   return navigator.clipboard.readText();
 }
+
+/**
+ * 浏览器剪贴板读取权限的只读查询（不触发授权弹窗）。
+ * navigator.clipboard.readText 在权限为 prompt 时必然弹「查看剪贴板」授权框，
+ * 探测/降级判断一律走本查询；Firefox 等不支持该查询名时返回 'unknown'。
+ */
+export async function clipboardReadPermissionState(): Promise<'granted' | 'prompt' | 'denied' | 'unknown'> {
+  try {
+    const st = await navigator.permissions?.query({ name: 'clipboard-read' as PermissionName });
+    return (st?.state as 'granted' | 'prompt' | 'denied') ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}

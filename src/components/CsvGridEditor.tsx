@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
+import { clipboardReadPermissionState } from '../lib/fileOps';
 import { ContextMenu, type ContextMenuItem, type ContextMenuState } from './ContextMenu';
 import {
   clearCells, deleteCols, deleteRows, estimateColumnWidths, fillInto,
@@ -218,17 +219,26 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     commitGrid(setCells(grid, rectRef.current, block));
   }, [readOnly, grid, commitGrid]);
 
+  /* 键盘 Ctrl+V 不在此拦截（那要走 readText，浏览器必弹授权框）：
+     放行给原生 paste 事件，由 onWrapperPaste 免权限接住 */
   const doPaste = useCallback(() => {
     if (readOnly) return;
-    if (navigator.clipboard?.readText) {
-      navigator.clipboard.readText().then(applyPasteText).catch(() => {
-        /* 读取被拒 → 聚焦隐藏代理，让下一次原生 Ctrl+V 落进来 */
-        proxyRef.current?.focus();
-      });
-    } else {
-      proxyRef.current?.focus();
-    }
+    const viaProxy = () => proxyRef.current?.focus();
+    clipboardReadPermissionState().then((state) => {
+      if (state === 'granted') navigator.clipboard.readText().then(applyPasteText).catch(viaProxy);
+      else viaProxy();
+    });
   }, [readOnly, applyPasteText]);
+
+  /* 原生 paste 事件（Ctrl+V 落在网格上时浏览器派发，clipboardData 免权限） */
+  const onWrapperPaste = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
+    /* 编辑态：粘贴交给单元格输入框/编辑栏的默认行为 */
+    if (editing || readOnly) return;
+    const text = e.clipboardData.getData('text/plain');
+    if (!text) return;
+    e.preventDefault();
+    applyPasteText(text);
+  }, [editing, readOnly, applyPasteText]);
 
   const onProxyPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     e.preventDefault();
@@ -458,7 +468,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     }
     if (meta && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); doCopy(); return; }
     if (meta && (e.key === 'x' || e.key === 'X')) { e.preventDefault(); doCut(); return; }
-    if (meta && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); doPaste(); return; }
+    /* Ctrl+V 不拦截：交给原生 paste 事件 → onWrapperPaste（readText 会弹授权框） */
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); clearSelection(); return; }
     if (e.key === 'Enter') { e.preventDefault(); moveFocus(1, 0); return; }
     if (e.key === 'Tab') { e.preventDefault(); moveFocus(0, e.shiftKey ? -1 : 1); return; }
@@ -470,7 +480,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       startEdit(focus.r, focus.c, e.key);
     }
   }, [editing, moveFocus, viewH, focus, anchor, totalCols, dataRows, dataCols,
-    doCopy, doCut, doPaste, clearSelection, startEdit]);
+    doCopy, doCut, clearSelection, startEdit]);
 
   const onEditInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (!editing) return;
@@ -612,6 +622,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           className={cn('relative outline-none', dark ? 'bg-zinc-900 text-zinc-200' : 'bg-white text-zinc-800')}
           style={{ width: Math.max(gridWidth + ROW_NUM_W, 200), height: contentH }}
           onKeyDown={onKeyDown}
+          onPaste={onWrapperPaste}
           onContextMenu={(e) => e.preventDefault()}
         >
           {/* 列标行（sticky 顶） */}
@@ -720,7 +731,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         </div>
       </div>
 
-      {/* 剪贴板代理：readText 被拒时聚焦它，让下一次原生 Ctrl+V 落进来 */}
+      {/* 剪贴板代理：右键菜单粘贴在未授权时聚焦它，下一次原生 Ctrl+V 免权限落进来 */}
       <textarea
         ref={proxyRef}
         data-testid="csv-clipboard-proxy"
