@@ -1,9 +1,13 @@
 buildscript {
-    // 国内网络环境：阿里云镜像优先，google()/mavenCentral() 作为回退
+    /* 国内本地构建走阿里云镜像加速；CI（GitHub Actions 注入 CI=true）直连官方源——
+       镜像在美国节点会间歇性 502，Gradle 对服务器错误不做仓库回退，直接判定解析失败 */
+    val useAliyunMirror = System.getenv("CI") == null
     repositories {
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/central") }
-        maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+        if (useAliyunMirror) {
+            maven { url = uri("https://maven.aliyun.com/repository/google") }
+            maven { url = uri("https://maven.aliyun.com/repository/central") }
+            maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+        }
         google()
         mavenCentral()
     }
@@ -14,9 +18,12 @@ buildscript {
 }
 
 allprojects {
+    val useAliyunMirror = System.getenv("CI") == null
     repositories {
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/central") }
+        if (useAliyunMirror) {
+            maven { url = uri("https://maven.aliyun.com/repository/google") }
+            maven { url = uri("https://maven.aliyun.com/repository/central") }
+        }
         google()
         mavenCentral()
     }
