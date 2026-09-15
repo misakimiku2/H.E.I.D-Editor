@@ -53,6 +53,7 @@ import {
   INITIAL_WELCOME_ID, makeUntitledTab, makeWelcomeTab,
   type FileTab, type MdViewMode,
 } from './lib/tabModel';
+import { LARGE_HISTORY_CHARS } from './lib/tabHistory';
 import { useTheme } from './hooks/useTheme';
 import { useEditorState } from './hooks/useEditorState';
 import { useDiffTimelines } from './hooks/useDiffTimelines';
@@ -1308,6 +1309,9 @@ export default function App() {
               )}
               {!activeTab.binary && activeTab.large && (
                 <span className="shrink-0" title={t('status.largeTip')}>{t('status.large')}</span>
+              )}
+              {!activeTab.binary && activeTab.content.length > LARGE_HISTORY_CHARS && (
+                <span className="shrink-0" title={t('status.historyReducedTip')}>{t('status.historyReduced')}</span>
               )}
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{formatFileSize(activeTab.content)}</span>

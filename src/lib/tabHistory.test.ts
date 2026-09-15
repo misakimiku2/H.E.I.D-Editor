@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   ensureHistory, recordStep, undoStep, redoStep,
   canUndoHistory, canRedoHistory, MAX_HISTORY, HISTORY_COALESCE_MS,
+  LARGE_HISTORY_CHARS, historyLimitFor,
   type TabHistory,
 } from './tabHistory';
 
@@ -112,5 +113,49 @@ describe('undo / redo', () => {
     expect(redoStep(undefined, 0)).toBe(null);
     expect(canUndoHistory(undefined)).toBe(false);
     expect(canRedoHistory(undefined)).toBe(false);
+  });
+});
+
+describe('大文件历史降档', () => {
+  it('historyLimitFor：常规内容取满额，超大内容降到 5 条', () => {
+    expect(historyLimitFor(1000)).toBe(MAX_HISTORY);
+    expect(historyLimitFor(LARGE_HISTORY_CHARS)).toBe(MAX_HISTORY);
+    expect(historyLimitFor(LARGE_HISTORY_CHARS + 1)).toBe(5);
+  });
+
+  it('超大内容连续成条时栈压到 5 条', () => {
+    const { h } = setup('a');
+    const big = 'x'.repeat(LARGE_HISTORY_CHARS + 1);
+    for (let i = 0; i < 12; i++) {
+      recordStep(h, i === 0 ? 'a' : big + (i - 1), big + i, true, T0 + i * (HISTORY_COALESCE_MS + 1));
+    }
+    expect(h.stack.length).toBe(5);
+    expect(h.index).toBe(4);
+    expect(h.stack[h.index]).toBe(big + 11);
+  });
+
+  it('合并路径的内容暴涨同样触发压缩（内存防护）', () => {
+    const { h } = setup('v0');
+    for (let i = 1; i <= MAX_HISTORY; i++) {
+      recordStep(h, `v${i - 1}`, `v${i}`, true, T0 + i * (HISTORY_COALESCE_MS + 1));
+    }
+    expect(h.stack.length).toBe(MAX_HISTORY);
+    const big = 'y'.repeat(LARGE_HISTORY_CHARS + 2);
+    const lastAt = T0 + MAX_HISTORY * (HISTORY_COALESCE_MS + 1);
+    recordStep(h, `v${MAX_HISTORY}`, big, false, lastAt + 1);
+    expect(h.stack.length).toBe(5);
+    expect(h.stack[h.index]).toBe(big);
+  });
+
+  it('内容回落后上限恢复满额', () => {
+    const { h } = setup('a');
+    const big = 'z'.repeat(LARGE_HISTORY_CHARS + 1);
+    recordStep(h, 'a', big, true, T0);
+    recordStep(h, big, 'small', true, T0 + HISTORY_COALESCE_MS + 1);
+    for (let i = 0; i < 8; i++) {
+      recordStep(h, `s${i}`, `s${i + 1}`, true, T0 + (i + 2) * (HISTORY_COALESCE_MS + 1));
+    }
+    /* a + big + small + 8 次追加 = 11 条，未再触发压缩 */
+    expect(h.stack.length).toBe(11);
   });
 });

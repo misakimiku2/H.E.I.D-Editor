@@ -14,6 +14,24 @@ export const MAX_HISTORY = 200;
 /** 间隔小于该值的连续修改（连续输入）合并为同一条历史 */
 export const HISTORY_COALESCE_MS = 800;
 
+/** 内容超过该字符数时撤销历史自动降档（快照模型的内存防护） */
+export const LARGE_HISTORY_CHARS = 4_000_000;
+/** 超大内容的历史条数上限（保住「误删整段可撤回」的底线即可） */
+export const LARGE_HISTORY_LIMIT = 5;
+
+/** 按内容长度取历史条数上限（UI 状态栏提示复用同一判定） */
+export function historyLimitFor(contentLength: number): number {
+  return contentLength > LARGE_HISTORY_CHARS ? LARGE_HISTORY_LIMIT : MAX_HISTORY;
+}
+
+/** 把栈压到上限内（保留以 index 结尾的窗口，重做分支一并丢弃） */
+function enforceLimit(h: TabHistory, limit: number): void {
+  if (h.stack.length <= limit) return;
+  const start = Math.max(0, h.index - (limit - 1));
+  h.stack = h.stack.slice(start, h.index + 1);
+  h.index = h.stack.length - 1;
+}
+
 /** 懒初始化历史（stack[0] 为初始内容）；已存在则原样返回 */
 export function ensureHistory(map: Map<string, TabHistory>, tabId: string, initialContent: string): TabHistory {
   let h = map.get(tabId);
@@ -38,13 +56,15 @@ export function recordStep(
   if (prevContent === nextContent) return { recorded: false, newStep: false };
   if (nextContent === h.stack[h.index]) return { recorded: false, newStep: false };
   const newStep = !!major || now - h.lastAt > HISTORY_COALESCE_MS;
+  const limit = historyLimitFor(nextContent.length);
   if (newStep) {
     h.stack = h.stack.slice(0, h.index + 1);
     h.stack.push(nextContent);
-    if (h.stack.length > MAX_HISTORY) h.stack.shift();
     h.index = h.stack.length - 1;
+    enforceLimit(h, limit);
   } else {
     h.stack[h.index] = nextContent;
+    enforceLimit(h, limit);
   }
   h.lastAt = now;
   return { recorded: true, newStep };
