@@ -302,3 +302,69 @@ describe('fillInto（负方向泛化：向上/向左填充）', () => {
     expect(fillInto([['1'], ['2']], 0, 0, 0, 0, 5, 1)).toEqual(computeFill([['1'], ['2']], 5, 1));
   });
 });
+
+/* ---------- 只读态排序 / 筛选 ---------- */
+import { compareCells, computeRowOrder, type CsvSortState } from './csv';
+
+describe('compareCells', () => {
+  it('纯数值按数值比较（10 排在 9 后）', () => {
+    expect(compareCells('9', '10')).toBeLessThan(0);
+    expect(compareCells('10', '9')).toBeGreaterThan(0);
+    expect(compareCells('-1.5', '2')).toBeLessThan(0);
+  });
+
+  it('文本 localeCompare 数字感知', () => {
+    expect(compareCells('a2', 'a10')).toBeLessThan(0);
+  });
+
+  it('空串恒排最后（与方向无关由调用方翻转）', () => {
+    expect(compareCells('', 'x')).toBeGreaterThan(0);
+    expect(compareCells('x', '')).toBeLessThan(0);
+    expect(compareCells('', '')).toBe(0);
+  });
+});
+
+describe('computeRowOrder', () => {
+  const grid = [
+    ['name', 'score'],
+    ['b', '10'],
+    ['a', '9'],
+    ['c', ''],
+    ['d', '2'],
+  ];
+
+  it('无排序筛选：恒等映射（含表头置前）', () => {
+    expect(computeRowOrder(grid, { headerOn: true })).toEqual([0, 1, 2, 3, 4]);
+    expect(computeRowOrder(grid, {})).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('按列排序：数值列、空值恒最后（升降序一致）、等值稳定', () => {
+    const order = computeRowOrder(grid, { headerOn: true, sort: { col: 1, dir: 'asc' } });
+    expect(order).toEqual([0, 4, 2, 1, 3]);
+    const desc = computeRowOrder(grid, { headerOn: true, sort: { col: 1, dir: 'desc' } });
+    expect(desc).toEqual([0, 1, 2, 4, 3]);
+  });
+
+  it('文本列排序', () => {
+    const order = computeRowOrder(grid, { headerOn: true, sort: { col: 0, dir: 'asc' } });
+    expect(order).toEqual([0, 2, 1, 3, 4]);
+  });
+
+  it('筛选：子串不区分大小写，命中任一列保留；表头恒在', () => {
+    const order = computeRowOrder(grid, { headerOn: true, filter: 'A' });
+    expect(order).toEqual([0, 2]); // 'a' 行
+    expect(computeRowOrder(grid, { filter: 'score' })).toEqual([0]);
+    expect(computeRowOrder(grid, { headerOn: true, filter: '  ' })).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('排序与筛选叠加（先筛后排）', () => {
+    const two = [
+      ['h'],
+      ['b10'],
+      ['a9'],
+      ['c2'],
+    ];
+    const order = computeRowOrder(two, { headerOn: true, filter: '', sort: { col: 0, dir: 'asc' } });
+    expect(order).toEqual([0, 2, 1, 3]); // a9 < b10 < c2（数字感知）
+  });
+});

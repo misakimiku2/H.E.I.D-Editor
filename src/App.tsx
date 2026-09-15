@@ -688,10 +688,11 @@ export default function App() {
     ? (activeTab.csvView ?? (isLargeCsv ? 'text' : 'grid'))
     : 'grid';
   const csvGridActive = !!isCsv && !!activeTab && !activeTab.binary && effectiveCsvView === 'grid';
-  const [csvShape, setCsvShape] = useState({ rows: 0, cols: 0 });
-  useEffect(() => { setCsvShape({ rows: 0, cols: 0 }); }, [editor.activeTabId]);
-  const handleCsvShape = useCallback((rows: number, cols: number) => {
-    setCsvShape(s => (s.rows === rows && s.cols === cols ? s : { rows, cols }));
+  const [csvShape, setCsvShape] = useState({ rows: 0, cols: 0, visible: 0 });
+  useEffect(() => { setCsvShape({ rows: 0, cols: 0, visible: 0 }); }, [editor.activeTabId]);
+  const handleCsvShape = useCallback((rows: number, cols: number, visibleRows?: number) => {
+    const visible = visibleRows ?? rows;
+    setCsvShape(s => (s.rows === rows && s.cols === cols && s.visible === visible ? s : { rows, cols, visible }));
   }, []);
   /* 网格视图下无光标概念：Ctrl+F 打开查找时自动落到文本视图（查找栏挂在 CodeEditor 上） */
   const [gateBannerClosedId, setGateBannerClosedId] = useState<string | null>(null);
@@ -1621,6 +1622,14 @@ export default function App() {
                 <>
                   <span className="shrink-0 opacity-50">|</span>
                   <span className="shrink-0 tabular-nums">{t('csv.shape', { rows: csvShape.rows, cols: csvShape.cols })}</span>
+                  {csvShape.visible < csvShape.rows && (
+                    <span
+                      className="shrink-0 tabular-nums text-blue-400 font-medium"
+                      title={t('csv.sortFilterLockTip')}
+                    >
+                      {t('csv.filteredShape', { shown: csvShape.visible, total: csvShape.rows })}
+                    </span>
+                  )}
                   <span className="shrink-0 opacity-50">|</span>
                   <span className="shrink-0">{t('csv.delimiter')} {delimiterLabel(csvDelimiter)}</span>
                 </>

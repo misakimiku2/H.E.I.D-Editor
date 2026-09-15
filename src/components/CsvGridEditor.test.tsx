@@ -147,3 +147,98 @@ describe('CsvGridEditor 粘贴通道', () => {
     expect(latest).toBe('p,q\n7,8\n');
   });
 });
+
+/* ---------- 只读态排序 / 筛选 ---------- */
+
+/* React 19 受控输入：直接赋 value 不触发 onChange，需经原生 setter 派发 */
+const setInputValue = (input: HTMLInputElement, value: string) => {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+  setter.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+};
+
+describe('CsvGridEditor 排序筛选视图', () => {
+  let host: HTMLElement;
+  let root: Root;
+  let latest: string;
+
+  const renderGrid = (content: string) => {
+    act(() => {
+      root.render(
+        <CsvGridEditor
+          content={content}
+          delimiter=","
+          isDarkMode={false}
+          headerOn={false}
+          onChange={(v) => { latest = v; renderGrid(v); }}
+          onHeaderToggle={() => {}}
+          onWidthsChange={() => {}}
+        />,
+      );
+    });
+  };
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    latest = '';
+    renderGrid('name,score\nbeta,10\nalpha,9\ngamma,2\n');
+  });
+
+  it('筛选：只保留命中行，行号显示原始行号', async () => {
+    const input = host.querySelector('[data-testid="csv-filter-input"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    act(() => { setInputValue(input, 'alpha'); });
+    await frame();
+    /* 4 行数据（含表头行）只留 表头 + alpha 行 */
+    expect(host.querySelector('[data-testid="csv-cell-2-0"]')).toBeNull();
+    expect(host.textContent).toContain('alpha');
+    /* 原始行号：alpha 是数据第 3 行（1 起计），行号紧邻内容 */
+    expect(host.textContent).toContain('3alpha');
+  });
+
+  it('排序与筛选叠加时单元格编辑写回原始行', async () => {
+    const input = host.querySelector('[data-testid="csv-filter-input"]') as HTMLInputElement;
+    act(() => { setInputValue(input, 'lph'); });
+    await frame();
+    /* 命中 alpha（原始数据行 2，显示行 0）；双击其首格进入编辑并提交 */
+    act(() => {
+      (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    const edit = host.querySelector('[data-testid="csv-edit-input"]') as HTMLInputElement;
+    act(() => {
+      setInputValue(edit, 'ALPHA');
+      edit.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await frame();
+    /* 写回的是原始第 2 数据行，其余行原样 */
+    expect(latest).toBe('name,score\nbeta,10\nALPHA,9\ngamma,2\n');
+  });
+
+  it('筛选态下原生粘贴不改数据（结构操作降级）', async () => {
+    const input = host.querySelector('[data-testid="csv-filter-input"]') as HTMLInputElement;
+    act(() => { setInputValue(input, 'alpha'); });
+    await frame();
+    const grid = host.querySelector('[role="grid"]') as HTMLElement;
+    grid.focus();
+    act(() => { firePaste(grid, 'x\ty'); });
+    await frame();
+    expect(latest).toBe('');
+  });
+
+  it('清空筛选恢复全部行', async () => {
+    const input = host.querySelector('[data-testid="csv-filter-input"]') as HTMLInputElement;
+    act(() => { setInputValue(input, 'zzz-no-match'); });
+    await frame();
+    /* 无命中：仅剩表头行（headerOn=false 时 0 行数据） */
+    expect(host.querySelectorAll('.csv-row').length).toBe(0);
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    });
+    await frame();
+    expect(host.querySelectorAll('.csv-row').length).toBeGreaterThan(0);
+  });
+});

@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Filter, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { clipboardReadPermissionState } from '../lib/fileOps';
 import { ContextMenu, type ContextMenuItem, type ContextMenuState } from './ContextMenu';
 import {
-  clearCells, deleteCols, deleteRows, estimateColumnWidths, fillInto,
+  clearCells, computeRowOrder, deleteCols, deleteRows, estimateColumnWidths, fillInto,
   insertColAfter, insertColBefore, insertRowAbove, insertRowBelow, parseClipboardTable,
   parseCsv, selectionToTsv, serializeCsv, setCells,
-  type CsvDelimiter, type GridRect,
+  type CsvDelimiter, type CsvSortState, type GridRect,
 } from '../lib/csv';
 
 /**
@@ -41,8 +42,8 @@ export interface CsvGridEditorProps {
   onChange: (content: string) => void;
   onHeaderToggle: (on: boolean) => void;
   onWidthsChange: (w: number[]) => void;
-  /** 数据区行列数（供状态栏展示） */
-  onShape?: (rows: number, cols: number) => void;
+  /** 数据区行列数（供状态栏展示）；第三参为排序/筛选下的可见行数（缺省同 rows） */
+  onShape?: (rows: number, cols: number, visibleRows?: number) => void;
 }
 
 type CellPos = { r: number; c: number };
@@ -84,10 +85,25 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   const grid = useMemo(() => parseCsv(content, delimiter), [content, delimiter]);
   const dataRows = grid.length;
   const dataCols = useMemo(() => grid.reduce((m, r) => Math.max(m, r.length), 0), [grid]);
-  const totalRows = Math.max(dataRows + 1, GHOST_ROWS);
+
+  /* ---- 只读态排序 / 筛选（视图变换，不改写数据） ---- */
+  const [sort, setSort] = useState<CsvSortState | null>(null);
+  const [filter, setFilter] = useState('');
+  const viewOrder = useMemo(
+    () => computeRowOrder(grid, { sort, filter, headerOn }),
+    [grid, sort, filter, headerOn],
+  );
+  const viewTransformed = !!sort || filter.trim() !== '';
+  /* 显示行 → 原始行（未变换时恒等） */
+  const origRow = useCallback((r: number): number =>
+    viewTransformed ? (viewOrder[r] ?? r) : r, [viewTransformed, viewOrder]);
+
+  const totalRows = viewTransformed ? viewOrder.length : Math.max(dataRows + 1, GHOST_ROWS);
   const totalCols = Math.max(dataCols + 1, GHOST_COLS);
 
-  useEffect(() => { onShape?.(dataRows, dataCols); }, [dataRows, dataCols, onShape]);
+  useEffect(() => {
+    onShape?.(dataRows, dataCols, viewTransformed ? viewOrder.length - (headerOn ? 1 : 0) : dataRows);
+  }, [dataRows, dataCols, viewTransformed, viewOrder, headerOn, onShape]);
 
   const autoUnits = useMemo(() => estimateColumnWidths(grid), [grid]);
   const colUnits = useMemo(
@@ -130,9 +146,10 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   }, [onChange, delimiter]);
 
   const setCell = useCallback((r: number, c: number, value: string) => {
-    if ((grid[r]?.[c] ?? '') === value) return;
-    commitGrid(setCells(grid, { r1: r, c1: c, r2: r, c2: c }, [[value]]));
-  }, [grid, commitGrid]);
+    const or = origRow(r); // 排序/筛选态：显示行 → 原始行
+    if ((grid[or]?.[c] ?? '') === value) return;
+    commitGrid(setCells(grid, { r1: or, c1: c, r2: or, c2: c }, [[value]]));
+  }, [grid, commitGrid, origRow]);
 
   const ensureVisible = useCallback((p: CellPos) => {
     const vp = viewportRef.current;
@@ -208,16 +225,16 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   const doCopy = useCallback(() => writeClipboard(selectionToTsv(grid, rectRef.current)), [writeClipboard, grid]);
 
   const doCut = useCallback(() => {
-    if (readOnly) return;
+    if (readOnly || viewTransformed) return;
     writeClipboard(selectionToTsv(grid, rectRef.current));
     commitGrid(clearCells(grid, rectRef.current));
-  }, [readOnly, writeClipboard, grid, commitGrid]);
+  }, [readOnly, viewTransformed, writeClipboard, grid, commitGrid]);
 
   const applyPasteText = useCallback((text: string) => {
-    if (readOnly || !text) return;
+    if (readOnly || viewTransformed || !text) return;
     const block = parseClipboardTable(text.replace(/\r\n?/g, '\n'));
     commitGrid(setCells(grid, rectRef.current, block));
-  }, [readOnly, grid, commitGrid]);
+  }, [readOnly, viewTransformed, grid, commitGrid]);
 
   /* 键盘 Ctrl+V 不在此拦截（那要走 readText，浏览器必弹授权框）：
      放行给原生 paste 事件，由 onWrapperPaste 免权限接住 */
@@ -228,7 +245,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       if (state === 'granted') navigator.clipboard.readText().then(applyPasteText).catch(viaProxy);
       else viaProxy();
     });
-  }, [readOnly, applyPasteText]);
+  }, [readOnly, viewTransformed, applyPasteText]);
 
   /* 原生 paste 事件（Ctrl+V 落在网格上时浏览器派发，clipboardData 免权限） */
   const onWrapperPaste = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
@@ -248,16 +265,18 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
 
   /* ---- 清空选区 / Ctrl+Enter 铺满 ---- */
   const clearSelection = useCallback(() => {
+    if (viewTransformed) return; // 排序/筛选态禁用结构操作（单元格内容编辑仍可用）
     const cur = rectRef.current;
     if (cur.r1 === cur.r2 && cur.c1 === cur.c2) { setCell(cur.r1, cur.c1, ''); return; }
     commitGrid(clearCells(grid, cur));
-  }, [grid, commitGrid, setCell]);
+  }, [viewTransformed, grid, commitGrid, setCell]);
 
   const fillSelectionWithValue = useCallback((value: string) => {
+    if (viewTransformed) return;
     const rows = rect.r2 - rect.r1 + 1;
     const cols = rect.c2 - rect.c1 + 1;
     commitGrid(setCells(grid, rect, Array.from({ length: rows }, () => Array<string>(cols).fill(value))));
-  }, [rect, grid, commitGrid]);
+  }, [viewTransformed, rect, grid, commitGrid]);
 
   /* ---- 填充手柄（向下/向上/向右/向左均可；fillInto 支持负方向） ---- */
   const cellFromPoint = useCallback((clientX: number, clientY: number): CellPos => {
@@ -277,7 +296,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   const beginFillDrag = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    if (readOnly) return;
+    if (readOnly || viewTransformed) return;
     const sourceRect = rect;
     fillRectRef.current = sourceRect;
     setFillDrag(sourceRect);
@@ -311,7 +330,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
-  }, [readOnly, rect, grid, cellFromPoint, commitGrid]);
+  }, [readOnly, viewTransformed, rect, grid, cellFromPoint, commitGrid]);
 
   /* ---- 拖拽框选：单元格上按下后按住移动扩展选区（Excel 习惯） ---- */
   const beginDragSelect = useCallback((start: CellPos, extend: boolean) => {
@@ -369,18 +388,18 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
 
   /* ---- 行列操作（右键行号/列标/单元格） ---- */
   const rowOp = useCallback((kind: 'above' | 'below' | 'delete', r: number) => {
-    if (readOnly) return;
+    if (readOnly || viewTransformed) return;
     if (kind === 'above') commitGrid(insertRowAbove(grid, r));
     else if (kind === 'below') commitGrid(insertRowBelow(grid, r));
     else commitGrid(deleteRows(grid, Math.min(rectRef.current.r1, r), Math.max(rectRef.current.r2, r)));
-  }, [readOnly, grid, commitGrid]);
+  }, [readOnly, viewTransformed, grid, commitGrid]);
 
   const colOp = useCallback((kind: 'left' | 'right' | 'delete', c: number) => {
-    if (readOnly) return;
+    if (readOnly || viewTransformed) return;
     if (kind === 'left') commitGrid(insertColBefore(grid, c));
     else if (kind === 'right') commitGrid(insertColAfter(grid, c));
     else commitGrid(deleteCols(grid, Math.min(rectRef.current.c1, c), Math.max(rectRef.current.c2, c)));
-  }, [readOnly, grid, commitGrid]);
+  }, [readOnly, viewTransformed, grid, commitGrid]);
 
   const openRowMenu = useCallback((r: number, e: React.MouseEvent) => {
     e.preventDefault();
@@ -390,12 +409,12 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     setMenu({
       x: e.clientX, y: e.clientY,
       items: [
-        { label: t('csv.insertRowAbove'), onSelect: () => rowOp('above', r) },
-        { label: t('csv.insertRowBelow'), onSelect: () => rowOp('below', r) },
-        { label: t('csv.deleteRows'), danger: true, disabled: readOnly, separatorBefore: true, onSelect: () => rowOp('delete', r) },
+        { label: t('csv.insertRowAbove'), disabled: readOnly || viewTransformed, onSelect: () => rowOp('above', r) },
+        { label: t('csv.insertRowBelow'), disabled: readOnly || viewTransformed, onSelect: () => rowOp('below', r) },
+        { label: t('csv.deleteRows'), danger: true, disabled: readOnly || viewTransformed, separatorBefore: true, onSelect: () => rowOp('delete', r) },
       ],
     });
-  }, [t, rowOp, readOnly, dataCols]);
+  }, [t, rowOp, readOnly, viewTransformed, dataCols]);
 
   const openColMenu = useCallback((c: number, e: React.MouseEvent) => {
     e.preventDefault();
@@ -405,13 +424,16 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     setMenu({
       x: e.clientX, y: e.clientY,
       items: [
-        { label: t('csv.insertColLeft'), onSelect: () => colOp('left', c) },
-        { label: t('csv.insertColRight'), onSelect: () => colOp('right', c) },
+        { label: sort?.col === c && sort.dir === 'asc' ? t('csv.sortAsc') + ' ✓' : t('csv.sortAsc'), onSelect: () => setSort({ col: c, dir: 'asc' }) },
+        { label: sort?.col === c && sort.dir === 'desc' ? t('csv.sortDesc') + ' ✓' : t('csv.sortDesc'), onSelect: () => setSort({ col: c, dir: 'desc' }) },
+        { label: t('csv.sortClear'), disabled: !sort, onSelect: () => setSort(null) },
+        { label: t('csv.insertColLeft'), separatorBefore: true, disabled: readOnly || viewTransformed, onSelect: () => colOp('left', c) },
+        { label: t('csv.insertColRight'), disabled: readOnly || viewTransformed, onSelect: () => colOp('right', c) },
         { label: t('csv.resetColWidth'), disabled: !(manualWidths && manualWidths[c] > 0), onSelect: () => resetColWidth(c) },
-        { label: t('csv.deleteCols'), danger: true, disabled: readOnly, separatorBefore: true, onSelect: () => colOp('delete', c) },
+        { label: t('csv.deleteCols'), danger: true, disabled: readOnly || viewTransformed, onSelect: () => colOp('delete', c) },
       ],
     });
-  }, [t, colOp, readOnly, dataRows, manualWidths, resetColWidth]);
+  }, [t, colOp, readOnly, viewTransformed, dataRows, manualWidths, resetColWidth, sort]);
 
   /* 单元格右键：剪贴板 + 清空 + 行列操作；点在选区外先把选区收拢到该格 */
   const openCellMenu = useCallback((r: number, c: number, e: React.MouseEvent) => {
@@ -426,19 +448,19 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     setMenu({
       x: e.clientX, y: e.clientY,
       items: [
-        { label: t('csv.menuCut'), disabled: readOnly, onSelect: () => doCut() },
+        { label: t('csv.menuCut'), disabled: readOnly || viewTransformed, onSelect: () => doCut() },
         { label: t('csv.menuCopy'), onSelect: () => doCopy() },
-        { label: t('csv.menuPaste'), disabled: readOnly, onSelect: () => doPaste() },
-        { label: t('csv.menuClear'), disabled: readOnly, separatorBefore: true, onSelect: () => clearSelection() },
-        { label: t('csv.insertRowAbove'), separatorBefore: true, onSelect: () => rowOp('above', r) },
-        { label: t('csv.insertRowBelow'), onSelect: () => rowOp('below', r) },
-        { label: t('csv.deleteRows'), danger: true, disabled: readOnly, onSelect: () => rowOp('delete', r) },
-        { label: t('csv.insertColLeft'), separatorBefore: true, onSelect: () => colOp('left', c) },
-        { label: t('csv.insertColRight'), onSelect: () => colOp('right', c) },
-        { label: t('csv.deleteCols'), danger: true, disabled: readOnly, onSelect: () => colOp('delete', c) },
+        { label: t('csv.menuPaste'), disabled: readOnly || viewTransformed, onSelect: () => doPaste() },
+        { label: t('csv.menuClear'), disabled: readOnly || viewTransformed, separatorBefore: true, onSelect: () => clearSelection() },
+        { label: t('csv.insertRowAbove'), separatorBefore: true, disabled: readOnly || viewTransformed, onSelect: () => rowOp('above', r) },
+        { label: t('csv.insertRowBelow'), disabled: readOnly || viewTransformed, onSelect: () => rowOp('below', r) },
+        { label: t('csv.deleteRows'), danger: true, disabled: readOnly || viewTransformed, onSelect: () => rowOp('delete', r) },
+        { label: t('csv.insertColLeft'), separatorBefore: true, disabled: readOnly || viewTransformed, onSelect: () => colOp('left', c) },
+        { label: t('csv.insertColRight'), disabled: readOnly || viewTransformed, onSelect: () => colOp('right', c) },
+        { label: t('csv.deleteCols'), danger: true, disabled: readOnly || viewTransformed, onSelect: () => colOp('delete', c) },
       ],
     });
-  }, [t, editing, rect, commitEdit, readOnly, doCut, doCopy, doPaste, clearSelection, rowOp, colOp]);
+  }, [t, editing, rect, commitEdit, readOnly, viewTransformed, doCut, doCopy, doPaste, clearSelection, rowOp, colOp]);
 
   /* ---- 键盘 ---- */
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -463,7 +485,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     if (meta && (e.key === 'a' || e.key === 'A')) {
       e.preventDefault();
       setAnchor({ r: 0, c: 0 });
-      setFocus({ r: Math.max(dataRows - 1, 0), c: Math.max(dataCols - 1, 0) });
+      setFocus({ r: Math.max(totalRows - 1, 0), c: Math.max(dataCols - 1, 0) });
       return;
     }
     if (meta && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); doCopy(); return; }
@@ -505,12 +527,13 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   const last = clamp(first + Math.ceil(viewH / ROW_H) + OVERSCAN * 2, 0, totalRows - 1);
   const rowsToRender = useMemo(() => {
     const arr: number[] = [];
+    if (totalRows === 0) return arr; // 筛选零命中：无表头行也无数据行
     for (let r = first; r <= last; r++) {
       if (headerOn && r === 0) continue;
       arr.push(r);
     }
     return arr;
-  }, [first, last, headerOn]);
+  }, [first, last, headerOn, totalRows]);
 
   useEffect(() => {
     const vp = viewportRef.current;
@@ -523,7 +546,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
 
   /* ---- 渲染 ---- */
   const dark = isDarkMode;
-  const cellValue = (r: number, c: number) => grid[r]?.[c] ?? '';
+  const cellValue = (r: number, c: number) => grid[origRow(r)]?.[c] ?? '';
   const displayText = (v: string) => v.replaceAll('\n', '⏎');
   const px = (c: number) => (widthDrag?.c === c ? widthDrag.units : colUnits[c]) * PX_PER_UNIT + CELL_PAD_X * 2;
   const previewRect = fillDrag;
@@ -596,6 +619,37 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           onKeyDown={onEditInputKeyDown}
           onBlur={() => { if (editing && editing.r === focus.r && editing.c === focus.c) commitEdit('none'); }}
         />
+        {/* 行筛选（视图态，不改数据；生效期间结构操作降级为禁用） */}
+        <div
+          className={cn('flex items-center gap-1 pl-2 pr-1 shrink-0 border-l',
+            dark ? 'border-zinc-700' : 'border-zinc-200')}
+          title={viewTransformed ? t('csv.sortFilterLockTip') : undefined}
+        >
+          <Filter size={11} className={filter ? 'text-blue-400' : (dark ? 'text-zinc-500' : 'text-zinc-400')} />
+          <input
+            data-testid="csv-filter-input"
+            aria-label={t('csv.filterAria')}
+            className={cn('w-24 bg-transparent outline-none text-[11px]',
+              dark ? 'placeholder:text-zinc-600' : 'placeholder:text-zinc-400')}
+            value={filter}
+            placeholder={t('csv.filterPlaceholder')}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setFilter('');
+              e.stopPropagation(); // 不进网格键盘导航（方向键留在输入框内）
+            }}
+          />
+          {(filter || sort) && (
+            <button
+              data-testid="csv-view-reset"
+              className={cn('p-0.5 rounded', dark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
+              title={t('csv.sortClear')}
+              onClick={() => { setFilter(''); setSort(null); }}
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
         <button
           className={cn('px-2.5 shrink-0 border-l text-[11px] transition-colors',
             headerOn
@@ -643,12 +697,15 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
                 onMouseDown={(e) => {
                   if (e.button === 0 && !(e.target as HTMLElement).classList.contains('cursor-col-resize')) {
                     setAnchor({ r: 0, c });
-                    setFocus({ r: Math.max(dataRows - 1, 0), c });
+                    setFocus({ r: Math.max(totalRows - 1, 0), c });
                   }
                 }}
                 onContextMenu={(e) => openColMenu(c, e)}
               >
                 {colLabel(c)}
+                {sort?.col === c && (
+                  <span className="ml-0.5 text-[8px] leading-none">{sort.dir === 'asc' ? '▲' : '▼'}</span>
+                )}
                 <span
                   className={cn('absolute right-0 top-0 h-full w-[5px] cursor-col-resize',
                     dark ? 'hover:bg-blue-500/50' : 'hover:bg-blue-500/40')}
@@ -688,9 +745,10 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
                 onMouseDown={(e) => {
                   if (e.button === 0) { setAnchor({ r, c: 0 }); setFocus({ r, c: Math.max(dataCols - 1, 0) }); }
                 }}
-                onContextMenu={(e) => openRowMenu(r, e)}
+                onContextMenu={(e) => openRowMenu(origRow(r), e)}
+                title={viewTransformed ? t('csv.filteredShape', { shown: viewOrder.length - (headerOn ? 1 : 0), total: dataRows - (headerOn ? 1 : 0) }) : undefined}
               >
-                {r + 1}
+                {origRow(r) + 1}
               </div>
               {Array.from({ length: totalCols }, (_, c) => renderCell(r, c))}
             </div>
@@ -712,8 +770,8 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
             />
           )}
 
-          {/* 填充手柄：选区右下角（视觉 8px 方块，外层 14px 透明命中区方便抓取） */}
-          {!readOnly && (
+          {/* 填充手柄：选区右下角（视觉 8px 方块，外层 14px 透明命中区方便抓取）；排序/筛选态隐藏 */}
+          {!readOnly && !viewTransformed && (
             <span
               data-testid="csv-fill-handle"
               className="absolute z-[26] cursor-crosshair"

@@ -285,6 +285,62 @@ export function applyFill(grid: string[][], sel: GridRect, targetRows: number, t
   return setCells(grid, sel, values);
 }
 
+/* ---- 只读态排序 / 筛选（视图变换：不改写数据，仅产出显示行 → 原始行的映射） ---- */
+
+export interface CsvSortState {
+  col: number;
+  dir: 'asc' | 'desc';
+}
+
+/** 单元格比较：数值（NUMERIC_RE 口径）按数值比较，其余 localeCompare 数字感知；空串恒排最后 */
+export function compareCells(a: string, b: string): number {
+  const at = a.trim();
+  const bt = b.trim();
+  if (at === '' && bt === '') return 0;
+  if (at === '') return 1;
+  if (bt === '') return -1;
+  if (NUMERIC_RE.test(at) && NUMERIC_RE.test(bt)) {
+    const an = Number(at);
+    const bn = Number(bt);
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  }
+  return at.localeCompare(bt, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * 计算「显示行 → 原始数据行」映射：
+ * - filter 非空：子串匹配（大小写不敏感）任一列命中即保留；
+ * - sort 指定列与方向：稳定排序（等值保持原序），数值 / 文本按 compareCells；
+ * - headerOn：第 0 行（表头）恒在最前，不参与筛选与排序；
+ * - 幽灵行列（编辑余量）不在数据 grid 内，天然不参与。
+ */
+export function computeRowOrder(
+  grid: string[][],
+  opts: { sort?: CsvSortState | null; filter?: string; headerOn?: boolean } = {},
+): number[] {
+  const { sort, filter, headerOn } = opts;
+  const start = headerOn ? 1 : 0;
+  const rows: number[] = [];
+  for (let r = start; r < grid.length; r++) rows.push(r);
+  const filtered = filter && filter.trim() !== ''
+    ? rows.filter(r => grid[r].some(cell => cell.toLowerCase().includes(filter.toLowerCase())))
+    : rows;
+  if (!sort) return start > 0 ? [0, ...filtered] : filtered;
+  const { col, dir } = sort;
+  const sign = dir === 'desc' ? -1 : 1;
+  /* 空值恒排最后（升降序一致，表格软件口径）；其余按 compareCells 翻转 */
+  const isBlank = (v: string) => v.trim() === '';
+  const sorted = filtered.slice().sort((r1, r2) => {
+    const a = grid[r1]?.[col] ?? '';
+    const b = grid[r2]?.[col] ?? '';
+    const ab = isBlank(a);
+    const bb = isBlank(b);
+    if (ab !== bb) return ab ? 1 : -1;
+    return sign * compareCells(a, b);
+  });
+  return start > 0 ? [0, ...sorted] : sorted;
+}
+
 /* ---- 列宽估算 ---- */
 
 /** 显示宽度：CJK/全角区按 2，其余按 1；多行单元格取最长行 */
