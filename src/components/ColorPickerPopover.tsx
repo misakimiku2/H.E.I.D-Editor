@@ -133,7 +133,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
       data-color-picker=""
       className={cn(
         'fixed z-[90] rounded-xl border p-2.5 select-none shadow-xl backdrop-blur-md',
-        isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
+        isDarkMode ? 'border-zinc-700/70 bg-zinc-800/50' : 'border-zinc-200/80 bg-white/50',
       )}
       style={{ left: pos.x, top: pos.y, width: POPOVER_WIDTH }}
       onPointerDown={e => e.stopPropagation()}
