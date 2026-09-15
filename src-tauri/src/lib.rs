@@ -142,7 +142,8 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(launch::on_second_instance))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(launch::LaunchPaths::default());
+        .manage(launch::LaunchPaths::default())
+        .manage(large_file::LargeFileIndex::default());
 
     builder
         .invoke_handler(tauri::generate_handler![
@@ -158,7 +159,15 @@ pub fn run() {
             fsops::fs_delete,
             fsops::fs_reveal,
             #[cfg(desktop)]
-            take_launch_paths
+            take_launch_paths,
+            #[cfg(desktop)]
+            large_file::probe_large_file,
+            #[cfg(desktop)]
+            large_file::read_line_window,
+            #[cfg(desktop)]
+            large_file::read_byte_window,
+            #[cfg(desktop)]
+            large_file::file_size
         ])
         .setup(|app| {
             #[cfg(desktop)]
