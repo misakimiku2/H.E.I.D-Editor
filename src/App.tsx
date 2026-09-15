@@ -13,7 +13,7 @@ import { CodeEditor } from './components/CodeEditor';
 import { CsvGridEditor } from './components/CsvGridEditor';
 import { JsonTreeViewer } from './components/JsonTreeViewer';
 import { LargeFileViewer } from './components/LargeFileViewer';
-import { detectDelimiter, delimiterLabel, CSV_GRID_MAX_CHARS, CSV_GRID_MAX_ROWS, type CsvDelimiter } from './lib/csv';
+import { detectDelimiter, delimiterLabel, parseCsv, CSV_GRID_MAX_CHARS, CSV_GRID_MAX_ROWS, type CsvDelimiter } from './lib/csv';
 import { kindFromPath, formatStructured, indentFromSettings, TREE_MAX_CHARS, type StructKind } from './lib/jsonTree';
 import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
 import { MarkdownOutline } from './components/MarkdownOutline';
@@ -31,6 +31,7 @@ import { appAlert, registerAppAlert } from './lib/appAlert';
 import { showNotification } from './lib/notifications';
 import { savePastedImage, blobToDataUrl, DATA_URI_MAX_BYTES } from './lib/markdownImagePaste';
 import { localizeRemoteImages, type LocalizeIo } from './lib/imageLocalize';
+import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDoc';
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
@@ -430,6 +431,7 @@ export default function App() {
   useAppShortcuts({
     save: file.handleSave,
     saveAs: file.handleSaveAs,
+    print: !IS_ANDROID_APP ? () => void handlePrint() : undefined,
     openFile: file.handleOpenFile,
     newFile: file.handleNewFile,
     undo: editor.handleUndo,
@@ -652,6 +654,33 @@ export default function App() {
       showNotification({ kind: 'error', title: t('md.localizeTitle'), message: t('md.localizeErr', { msg: e?.message ?? String(e) }) });
     }
   }, [editor, t]);
+
+  /* ---- 打印 / 导出 PDF：隐藏 iframe 调起系统打印（安卓无打印对话框，不提供入口） ---- */
+  const canPrint = !IS_ANDROID_APP;
+  const handlePrint = useCallback(async () => {
+    const tab = editor.activeTab;
+    if (!tab || tab.binary || tab.largePreview) return;
+    try {
+      let html: string;
+      if (tab.language === 'markdown') {
+        const { renderMarkdownToHtml } = await import('./lib/markdownHtml');
+        html = await renderMarkdownToHtml(tab.content, {
+          title: tab.title.replace(/\.md$/i, '') || tab.title,
+          dark: isDarkMode,
+        });
+      } else if (tab.language === 'csv') {
+        html = buildCsvPrintHtml(tab.title, parseCsv(tab.content, detectDelimiter(tab.content)), {
+          headerOn: tab.csvHeaderOn ?? true,
+          dark: isDarkMode,
+        });
+      } else {
+        html = buildPlainPrintHtml(tab.title, tab.content, isDarkMode);
+      }
+      await printHtml(html);
+    } catch (e: any) {
+      appAlert(t('print.errGeneric', { msg: e?.message ?? String(e) }));
+    }
+  }, [editor.activeTab, isDarkMode, t]);
 
   /* ---- 状态栏弹出菜单（编码 / 换行符）---- */
   type StatusMenu = null | 'encoding-root' | 'encoding-reopen' | 'encoding-save' | 'eol';
@@ -1408,6 +1437,20 @@ export default function App() {
               >
                 <ImageDown size={14} />
                 {t('md.localize')}
+              </button>
+            )}
+            {canPrint && (
+              <button
+                onClick={() => { setMenuOpen(false); void handlePrint(); }}
+                disabled={!activeTab || !!activeTab.binary || !!activeTab.largePreview}
+                className={cn(
+                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                )}
+              >
+                <Printer size={14} />
+                {t('menu.print')}
+                <span className="ml-auto text-[10px] opacity-50">Ctrl+P</span>
               </button>
             )}
             {isTauri && (

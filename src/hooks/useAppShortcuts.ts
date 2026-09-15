@@ -17,6 +17,8 @@ export interface ShortcutHandlers {
   closeActiveTab: () => void;
   switchTab: (delta: 1 | -1) => void;
   hasTab: () => boolean;
+  /** 打印当前标签页（Ctrl+P；安卓无打印对话框，调用方不注册） */
+  print?: () => void;
 }
 
 export function useAppShortcuts(handlers: ShortcutHandlers) {
@@ -54,6 +56,9 @@ export function useAppShortcuts(handlers: ShortcutHandlers) {
       } else if (e.ctrlKey && e.key === 'Tab') {
         e.preventDefault();
         handlers.switchTab(e.shiftKey ? -1 : 1);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p' && handlers.print) {
+        e.preventDefault();
+        handlers.print();
       }
     };
     window.addEventListener('keydown', handler);
