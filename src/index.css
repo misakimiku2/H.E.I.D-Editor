@@ -113,6 +113,22 @@ body {
   animation: heid-fade-in 0.15s ease-out;
 }
 
+/* 弹窗入场：轻微上浮 + 缩放（设置弹窗等居中面板共用） */
+@keyframes heid-pop-in {
+  from { opacity: 0; transform: scale(0.96) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.heid-pop-in {
+  animation: heid-pop-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* 主题预览卡片悬停：预览块轻微提亮 */
+.heid-theme-card .heid-theme-preview {
+  transition: filter 0.15s ease;
+}
+.heid-theme-card:hover .heid-theme-preview {
+  filter: brightness(1.12);
+}
+
 /* ---- 文件树长文件名悬停循环滚动 ----
    位移量由行内 mouseenter 测量溢出后写入 --name-shift（无溢出时为 0，动画静止）；
    起点稍作停留 → 匀速滚到末尾 → 末尾稍作停留 → 瞬间回到起点再循环（非往返） */

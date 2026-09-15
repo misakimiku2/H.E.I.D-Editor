@@ -69,6 +69,14 @@ describe('mermaidModel round-trip', () => {
     expect(r.model.nodes.find((n) => n.id === 'H')?.text).toBe('H');
   });
 
+  it('TB 方向归一为 TD（TD/TB 同义，选项只保留 TD）', () => {
+    const r = parseMermaid(`flowchart TB
+    A --> B`);
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.model.kind !== 'flowchart') return;
+    expect(r.model.direction).toBe('TD');
+  });
+
   it('流程图：形状与文本转义', () => {
     const r = parseMermaid(`flowchart TD
     A([胶囊]) --> B[(数据库)]

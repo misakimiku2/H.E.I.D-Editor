@@ -51,7 +51,8 @@ export type ParseResult =
 
 /* ============================ 流程图 ============================ */
 
-export const FLOW_DIRECTIONS = ['TD', 'TB', 'LR', 'RL', 'BT'] as const;
+/* TB 与 TD 在 Mermaid 里同为「从上到下」，选项只保留 TD；解析到 TB 时归一为 TD（parseDirection） */
+export const FLOW_DIRECTIONS = ['TD', 'LR', 'RL', 'BT'] as const;
 export type FlowDirection = (typeof FLOW_DIRECTIONS)[number];
 
 export const FLOW_SHAPES = [
@@ -467,7 +468,10 @@ function parseFlowchart(lines: string[]): Parsed<{ model: FlowModel; extras: str
       const m = /^(?:flowchart|graph)\b\s*([A-Za-z]{2})?/.exec(line);
       if (m) {
         const d = (m[1] || 'TD').toUpperCase();
-        direction = (FLOW_DIRECTIONS as readonly string[]).includes(d) ? (d as FlowDirection) : 'TD';
+        /* TB 是 TD 的旧同义词：归一为 TD，避免模型里出现不在选项里的方向 */
+        direction = d === 'TB' ? 'TD'
+          : (FLOW_DIRECTIONS as readonly string[]).includes(d) ? (d as FlowDirection)
+          : 'TD';
         headSeen = true;
         continue;
       }

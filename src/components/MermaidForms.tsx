@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { Plus, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { Dropdown } from './Dropdown';
 import { useT, type MessageKey } from '../lib/i18nContext';
 import {
   FLOW_DIRECTIONS,
@@ -90,19 +91,17 @@ export function Select<T extends string>({
   className?: string;
   title?: string;
 }) {
+  /* 自定义下拉（与设置弹窗同一组件）：原生 select 的选项列表无法定制样式 */
   return (
-    <select
+    <Dropdown<T>
       value={value}
+      onChange={onChange}
+      options={options}
+      dark={isDark}
+      label={title}
       title={title}
-      onChange={(e) => onChange(e.target.value as T)}
-      className={cn(inputCls(isDark), 'cursor-pointer', className)}
-    >
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </select>
+      className={cn('min-w-0', className)}
+    />
   );
 }
 

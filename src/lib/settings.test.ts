@@ -71,4 +71,13 @@ describe('settings', () => {
     saveSettings(next, s);
     expect(loadSettings(s).language).toBe('en');
   });
+
+  it('代码主题：合法 id 保留、非法 id 回退、默认深浅各一份', () => {
+    expect(DEFAULT_SETTINGS.codeThemeDark).toBe('vs-dark');
+    expect(DEFAULT_SETTINGS.codeThemeLight).toBe('vs-light');
+    expect(normalizeSettings({ codeThemeDark: 'dracula', codeThemeLight: 'solarized-light' }))
+      .toMatchObject({ codeThemeDark: 'dracula', codeThemeLight: 'solarized-light' });
+    expect(normalizeSettings({ codeThemeDark: 'removed-theme', codeThemeLight: 42 }))
+      .toMatchObject({ codeThemeDark: 'vs-dark', codeThemeLight: 'vs-light' });
+  });
 });

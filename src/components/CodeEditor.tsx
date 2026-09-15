@@ -27,9 +27,8 @@ import { colorDotExtension } from './colorDotExtension';
 import { ColorPickerPopover } from './ColorPickerPopover';
 import { DEFAULT_SETTINGS, type EditorSettings } from '../lib/settings';
 import {
-  vsCodeDarkTheme, vsCodeLightTheme,
-  vsCodeDarkHighlightStyle, vsCodeLightHighlightStyle,
-} from '../lib/codemirror';
+  resolveCodeTheme, type CodeTheme,
+} from '../lib/editorThemes';
 import { IS_ANDROID_APP } from '../lib/platform';
 import {
   computeMinimapMetrics, minimapCanvasDeviceSize, minimapLineY, minimapWidthFor,
@@ -344,6 +343,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   /* tags 以 t 导入（@lezer/highlight），翻译函数让位使用别名 tr */
   const tr = useT();
   const settings = editorSettings ?? DEFAULT_SETTINGS;
+  /* 当前高亮主题：按界面深浅读设置里对应槽位的主题 id（未知 id 回退默认），
+     外观/高亮/小地图/粘性滚动统一取同一份主题，设置里换主题即全局换肤 */
+  const codeTheme = useMemo(
+    () => resolveCodeTheme(isDarkMode ? settings.codeThemeDark : settings.codeThemeLight, isDarkMode),
+    [isDarkMode, settings.codeThemeDark, settings.codeThemeLight]
+  );
+  const palette = codeTheme.palette;
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const stickyRef = useRef<HTMLElement | null>(null);
   const minimapRef = useRef<{ canvas: HTMLCanvasElement; container: HTMLElement } | null>(null);
@@ -646,11 +652,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
   /* sticky scope headers */
   const setupStickyScroll = useCallback((view: EditorView) => {
-    const highlightStyle = isDarkMode ? vsCodeDarkHighlightStyle : vsCodeLightHighlightStyle;
-    const bgColor = isDarkMode ? '#1e1e1e' : '#ffffff';
-    const bgColorHover = isDarkMode ? '#2d2d2d' : '#f0f0f0';
-    const borderColor = isDarkMode ? '#3f3f46' : '#e1e4e8';
-    const lineColor = isDarkMode ? '#d4d4d4' : '#1e1e1e';
+    const highlightStyle = codeTheme.highlight;
+    const bgColor = palette.background;
+    const bgColorHover = palette.stickyHoverBg;
+    const borderColor = palette.chromeBorder;
+    const lineColor = palette.foreground;
 
     const container = document.createElement('div');
     /* 类名供行号点击识别（它盖在行号栏上方，有自己的点击行为） */
@@ -764,14 +770,14 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       if (container.parentNode) container.parentNode.removeChild(container);
       stickyRef.current = null;
     });
-  }, [isDarkMode]);
+  }, [codeTheme, palette]);
 
   /* canvas minimap */
   const setupMinimap = useCallback((view: EditorView) => {
-    const bgColor = isDarkMode ? '#1e1e1e' : '#ffffff';
-    const viewportColor = isDarkMode ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)';
-    const viewportBorderColor = isDarkMode ? 'rgba(255, 255, 255, 0.25)' : 'rgba(0, 0, 0, 0.18)';
-    const selectionColor = isDarkMode ? 'rgba(100, 150, 255, 0.3)' : 'rgba(50, 100, 255, 0.25)';
+    const bgColor = palette.background;
+    const viewportColor = palette.minimapViewport;
+    const viewportBorderColor = palette.minimapViewportBorder;
+    const selectionColor = palette.minimapSelection;
     /* 几何常量统一由 src/lib/minimap（含画布尺寸上限实测结论）提供 */
     let minimapWidth = minimapWidthFor(view.dom.clientWidth);
     const BLOCK_HEIGHT = MINIMAP_BLOCK_HEIGHT;
@@ -791,7 +797,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       bottom: '0',
       width: `${minimapWidth}px`,
       backgroundColor: bgColor,
-      borderLeft: isDarkMode ? '1px solid #3f3f46' : '1px solid #e1e4e8',
+      borderLeft: `1px solid ${palette.chromeBorder}`,
       overflow: 'hidden',
       cursor: 'default',
       zIndex: '25',
@@ -847,25 +853,26 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     let currentMinimapScrollTop = 0;
     let dragRafId = 0;
 
-    const defaultColor = isDarkMode ? '#3d3d42' : '#d8d8db';
-    const commentColor = isDarkMode ? '#6a9955' : '#008000';
-    const variableColor = isDarkMode ? '#9cdcfe' : '#001080';
-    const stringColor = isDarkMode ? '#ce9178' : '#a31515';
-    const keywordColor = isDarkMode ? '#569cd6' : '#0000ff';
-    const typeColor = isDarkMode ? '#4ec9b0' : '#267f99';
-    const funcColor = isDarkMode ? '#dcdcaa' : '#795e26';
-    const numberColor = isDarkMode ? '#b5cea8' : '#098658';
-    const regexpColor = isDarkMode ? '#d16969' : '#800000';
-    const escapeColor = isDarkMode ? '#d7ba7d' : '#098658';
-    const operatorColor = isDarkMode ? '#d4d4d4' : '#000000';
-    const punctuationColor = isDarkMode ? '#d4d4d4' : '#000000';
-    const tagNameColor = isDarkMode ? '#569cd6' : '#800000';
-    const attributeNameColor = isDarkMode ? '#9cdcfe' : '#0000ff';
-    const attributeValueColor = isDarkMode ? '#ce9178' : '#a31515';
-    const metaColor = isDarkMode ? '#d4d4d4' : '#000000';
-    const invalidColor = isDarkMode ? '#f44747' : '#ff0000';
-    const deletedColor = isDarkMode ? '#ce9178' : '#a31515';
-    const insertedColor = isDarkMode ? '#b5cea8' : '#098658';
+    const k = palette.tokens;
+    const defaultColor = k.default;
+    const commentColor = k.comment;
+    const variableColor = k.variable;
+    const stringColor = k.string;
+    const keywordColor = k.keyword;
+    const typeColor = k.type;
+    const funcColor = k.func;
+    const numberColor = k.number;
+    const regexpColor = k.regexp;
+    const escapeColor = k.escape;
+    const operatorColor = k.operator;
+    const punctuationColor = k.punctuation;
+    const tagNameColor = k.tag;
+    const attributeNameColor = k.attr;
+    const attributeValueColor = k.attrValue;
+    const metaColor = k.meta;
+    const invalidColor = k.invalid;
+    const deletedColor = k.deleted;
+    const insertedColor = k.inserted;
 
     const tagColorMap = new Map<string, string>();
     const addTag = (tag: Tag, color: string) => { if (tag) tagColorMap.set(tag.toString(), color); };
@@ -1191,7 +1198,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       view.scrollDOM.style.paddingRight = '';
       minimapRef.current = null;
     });
-  }, [isDarkMode, subscribeViewUpdate]);
+  }, [codeTheme, palette, subscribeViewUpdate]);
 
   const fixSelectionLayer = useCallback((view: EditorView) => {
     const selectionLayer = view.scrollDOM.querySelector('.cm-selectionLayer') as HTMLElement | null;
@@ -1450,10 +1457,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
   }, [fixSelectionLayer, setupStickyScroll, setupMinimap, lowPerf, settings.stickyScroll, settings.minimap]);
 
-  /* re-setup features on theme change */
+  /* re-setup features on theme change（界面深浅切换或设置里换高亮主题都会走到这里） */
   useEffect(() => {
     reinstallCodeMapFeatures();
-  }, [isDarkMode, reinstallCodeMapFeatures]);
+  }, [codeTheme, reinstallCodeMapFeatures]);
 
   /* 安卓平板旋转/分屏跨越 1024px 断点时重建小地图与粘性滚动 */
   useEffect(() => {
@@ -1495,7 +1502,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     const wrapEnabled = settings.lineWrapMode === 'always'
       || (settings.lineWrapMode === 'markdown' && (language === 'markdown' || language === 'plaintext'));
     const exts: Extension[] = [
-      syntaxHighlighting(isDarkMode ? vsCodeDarkHighlightStyle : vsCodeLightHighlightStyle),
+      syntaxHighlighting(codeTheme.highlight),
       highlightSpecialChars(),
       historyExtension(),
       drawSelection(),
@@ -1517,7 +1524,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         markerDOM: (open) => {
           const span = document.createElement('span');
           span.textContent = open ? '▾' : '▸';
-          span.style.color = isDarkMode ? '#858585' : '#6e6e6e';
+          span.style.color = palette.foldMarker;
           span.style.fontSize = '12px';
           span.style.cursor = 'pointer';
           return span;
@@ -1586,7 +1593,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       exts.push(indentOnInput());
     }
     return exts;
-  }, [language, value, isDarkMode, settings, fontTheme, langExtension, lowPerf]);
+  }, [language, value, codeTheme, settings, fontTheme, langExtension, lowPerf]);
 
   /* onChange 统一经此中转：markdown 格式化等离散操作附带 major 标记 */
   const handleValueChange = useCallback((val: string) => {
@@ -1605,7 +1612,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         readOnly={!editable}
         editable={editable}
         basicSetup={false}
-        theme={isDarkMode ? vsCodeDarkTheme : vsCodeLightTheme}
+        theme={codeTheme.theme}
         onCreateEditor={handleCreateEditor}
         className="h-full w-full"
         style={{

@@ -3,6 +3,7 @@
  * 收敛此前散落各处的用户偏好；所有字段经 clamp/枚举校验，
  * 损坏或缺失的字段逐项回退默认值，设置损坏不影响编辑功能。
  */
+import { CODE_THEME_IDS } from './editorThemes';
 
 /** 可选等宽字体栈（value 即 CSS font-family，直接内联） */
 export const FONT_OPTIONS: Array<{ id: string; label: string; stack: string }> = [
@@ -38,6 +39,9 @@ export interface EditorSettings {
   autosaveIntervalSec: number;
   /** 'system' 按 navigator.language 解析（zh* → 中文，其余英文） */
   language: LanguagePref;
+  /** 代码高亮主题 id（深/浅界面各一份），注册表见 lib/editorThemes */
+  codeThemeDark: string;
+  codeThemeLight: string;
 }
 
 export const DEFAULT_SETTINGS: EditorSettings = {
@@ -54,6 +58,8 @@ export const DEFAULT_SETTINGS: EditorSettings = {
   autosaveEnabled: false,
   autosaveIntervalSec: 30,
   language: 'system',
+  codeThemeDark: 'vs-dark',
+  codeThemeLight: 'vs-light',
 };
 
 const STORAGE_KEY = 'heid-settings';
@@ -98,6 +104,8 @@ export function normalizeSettings(input: unknown): EditorSettings {
     autosaveEnabled: typeof rec.autosaveEnabled === 'boolean' ? rec.autosaveEnabled : DEFAULT_SETTINGS.autosaveEnabled,
     autosaveIntervalSec: clampInt(rec.autosaveIntervalSec, 5, 300, DEFAULT_SETTINGS.autosaveIntervalSec),
     language: pickEnum(rec.language, ['system', 'zh', 'en'] as const, DEFAULT_SETTINGS.language),
+    codeThemeDark: pickEnum(rec.codeThemeDark, CODE_THEME_IDS, DEFAULT_SETTINGS.codeThemeDark),
+    codeThemeLight: pickEnum(rec.codeThemeLight, CODE_THEME_IDS, DEFAULT_SETTINGS.codeThemeLight),
   };
 }
 
