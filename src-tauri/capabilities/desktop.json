@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "桌面专属权限：应用内更新（updater）与更新后重启（process）。这两个插件仅在桌面注册，移动端构建无对应权限定义，混入通用 capability 会导致移动端 tauri-build 失败",
+  "platforms": ["windows", "macOS", "linux"],
+  "windows": ["main"],
+  "permissions": ["updater:default", "process:allow-restart"]
+}
