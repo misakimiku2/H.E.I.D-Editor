@@ -11,8 +11,10 @@ import type { RefObject } from 'react';
 import { loadSessionState, saveSessionState, dedupeVirtualByTitle, type SessionTab } from '../lib/session';
 import { readLocalPath, isTauri } from '../lib/fileIO';
 import { detectLanguageFromPath } from '../lib/codemirror';
+import { displayNameFromPath } from '../lib/platform';
+import { classifyBySize, fileSize } from '../lib/largeFile';
 import {
-  INITIAL_WELCOME_ID, LARGE_FILE_CHARS, makeUntitledTab, makeWelcomeTab, nextTabId,
+  INITIAL_WELCOME_ID, LARGE_FILE_CHARS, makeLargePreviewTab, makeUntitledTab, makeWelcomeTab, nextTabId,
   type FileTab,
 } from '../lib/tabModel';
 import { getDraft, draftKeyForTab } from '../lib/drafts';
@@ -60,6 +62,17 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
           continue;
         }
         try {
+          /* 尺寸分层与打开路由同判定：超限跳过（视为失效条目），大文件恢复为分块预览标签 */
+          const size = await fileSize(st.path);
+          if (size != null) {
+            const cls = classifyBySize(size);
+            if (cls === 'reject') continue;
+            if (cls === 'preview') {
+              const name = displayNameFromPath(st.path);
+              restored.push(makeLargePreviewTab(st.path, name, detectLanguageFromPath(name)));
+              continue;
+            }
+          }
           const file = await readLocalPath(st.path);
           const language = detectLanguageFromPath(file.name);
           /* 草稿叠加：上次退出时该文件有未保存内容，恢复并标脏 */

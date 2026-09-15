@@ -11,6 +11,7 @@ import heidIconDark from './assets/heid-icon-dark.svg';
 import { cn } from './lib/utils';
 import { CodeEditor } from './components/CodeEditor';
 import { CsvGridEditor } from './components/CsvGridEditor';
+import { LargeFileViewer } from './components/LargeFileViewer';
 import { detectDelimiter, delimiterLabel, CSV_GRID_MAX_CHARS, CSV_GRID_MAX_ROWS, type CsvDelimiter } from './lib/csv';
 import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
 import { WindowControls } from './components/WindowControls';
@@ -241,8 +242,10 @@ export default function App() {
   /* ---- 查找 / 替换 / 跳转到行（编辑器内浮层 + 预览查找，弹出在指针位置）---- */
   const [findState, setFindState] = useState({ open: false, showReplace: false, goto: false });
   const openFind = useCallback((showReplace = false, goto = false) => {
+    /* 查找栏挂在 CodeEditor 上；大文件分块预览标签无编辑器，窗口流式查找未在范围 */
+    if (editor.activeTab?.largePreview) return;
     setFindState({ open: true, showReplace, goto });
-  }, []);
+  }, [editor.activeTab]);
   const closeFind = useCallback(() => {
     setFindState(s => ({ ...s, open: false }));
   }, []);
@@ -619,6 +622,22 @@ export default function App() {
     if (findState.open && csvGridActive) editor.setCsvState({ csvView: 'text' });
   }, [findState.open, csvGridActive]);
 
+  /* ---- 大文件只读分块预览（第二层）：无编辑器/网格/预览概念，主区域整块让给 LargeFileViewer ---- */
+  const isLargePreview = !!activeTab?.largePreview;
+  /* 提取片段编辑出口：当前窗口内容进新标签页（普通可编辑标签，走第一层全部能力） */
+  const handleExtractFromLarge = useCallback((text: string, fromLine: number, toLine: number, sourceName: string) => {
+    const title = t('large.extractedTitle', { name: sourceName, from: fromLine, to: toLine });
+    const extracted: FileTab = {
+      ...makeUntitledTab(title),
+      content: text,
+      originalContent: '',
+      isDirty: true,
+      language: detectLanguageFromPath(sourceName),
+    };
+    editor.setTabs(prev => [...prev, extracted]);
+    editor.setActiveTabId(extracted.id);
+  }, [editor, t]);
+
   /* 手机端无分屏：split 折叠为预览，由底部工具栏在编辑/预览间切换 */
   const effectiveView: MdViewMode = activeTab
     ? (isPhone && activeTab.mdView === 'split' ? 'preview' : activeTab.mdView)
@@ -630,7 +649,7 @@ export default function App() {
 
   /* 编辑器面板当前是否渲染（分屏/编辑态 Ctrl+F 搜索源码）；同步进 ref 供 window 快捷键读取。
      CSV 网格视图下 CodeEditor 未挂载，同样视为不可见（状态栏光标段随之隐藏） */
-  const editorVisible = !!activeTab && !csvGridActive && !(isMarkdown && effectiveView === 'preview');
+  const editorVisible = !!activeTab && !csvGridActive && !isLargePreview && !(isMarkdown && effectiveView === 'preview');
 
   /* 字数统计：Markdown 按 CJK 感知计数，其余按空白分词（200 万字符单次线性扫描，毫秒级） */
   const activeLanguage = activeTab?.language ?? '';
@@ -1268,7 +1287,18 @@ export default function App() {
                   {renderMdPreview()}
                 </div>
               )}
-              {isMarkdown && effectiveView === 'split' ? (
+              {isLargePreview ? (
+                /* 大文件只读分块预览：主区域整块让给 viewer（无编辑器/网格概念） */
+                <div className="flex-1 min-w-0 overflow-hidden">
+                  <LargeFileViewer
+                    key={activeTab.id}
+                    path={activeTab.path!}
+                    name={activeTab.title}
+                    isDarkMode={isDarkMode}
+                    onExtract={handleExtractFromLarge}
+                  />
+                </div>
+              ) : isMarkdown && effectiveView === 'split' ? (
                 <>
                   <div className={cn("w-px shrink-0", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
                   <div className="flex-1 min-w-0 overflow-hidden">
@@ -1304,6 +1334,9 @@ export default function App() {
               <span className="truncate" title={activeTab.path || t('status.unsavedPath')}>{activeTab.path || t('status.unsavedPath')}</span>
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{LANGUAGE_LABELS[activeTab.language] || activeTab.language}</span>
+              {isLargePreview && (
+                <span className="shrink-0 text-amber-500 font-medium" title={t('large.extractTip')}>{t('large.readonlyChip')}</span>
+              )}
               {activeTab.binary && (
                 <span className="shrink-0 text-orange-400 font-medium" title={t('status.binaryTip')}>{t('status.binary')}</span>
               )}
@@ -1313,10 +1346,13 @@ export default function App() {
               {!activeTab.binary && activeTab.content.length > LARGE_HISTORY_CHARS && (
                 <span className="shrink-0" title={t('status.historyReducedTip')}>{t('status.historyReduced')}</span>
               )}
-              <span className="shrink-0 opacity-50">|</span>
-              <span className="shrink-0">{formatFileSize(activeTab.content)}</span>
-              <span className="shrink-0 opacity-50">|</span>
-              <span className="shrink-0">{t('status.lines', { n: activeTab.content.split('\n').length })}</span>
+              {/* 大文件预览标签：大小/行数/字数在编辑器内存模型之外（viewer 工具栏展示），状态栏不显示 */}
+              {!isLargePreview && (<>
+                <span className="shrink-0 opacity-50">|</span>
+                <span className="shrink-0">{formatFileSize(activeTab.content)}</span>
+                <span className="shrink-0 opacity-50">|</span>
+                <span className="shrink-0">{t('status.lines', { n: activeTab.content.split('\n').length })}</span>
+              </>)}
               {csvGridActive && (
                 <>
                   <span className="shrink-0 opacity-50">|</span>
@@ -1325,10 +1361,12 @@ export default function App() {
                   <span className="shrink-0">{t('csv.delimiter')} {delimiterLabel(csvDelimiter)}</span>
                 </>
               )}
-              <span className="shrink-0 opacity-50">|</span>
-              <span className="shrink-0 tabular-nums">
-                {t('status.charCount', { n: wordCountInfo.chars })} · {t('status.wordCount', { n: wordCountInfo.words })}
-              </span>
+              {!isLargePreview && (<>
+                <span className="shrink-0 opacity-50">|</span>
+                <span className="shrink-0 tabular-nums">
+                  {t('status.charCount', { n: wordCountInfo.chars })} · {t('status.wordCount', { n: wordCountInfo.words })}
+                </span>
+              </>)}
               {/* 行列位置：仅编辑器可见时显示（预览态无光标概念） */}
               {editorVisible && (
                 <>
@@ -1342,7 +1380,8 @@ export default function App() {
               {activeTab.isDirty && <span className="shrink-0 text-amber-500 font-medium">{t('status.unsavedPath')}</span>}
               <div className="flex-1" />
 
-              {/* 换行符菜单 */}
+              {/* 换行符菜单（大文件预览无编辑/保存概念，隐藏） */}
+              {!isLargePreview && (
               <button
                 onClick={() => setStatusMenu(m => m === 'eol' ? null : 'eol')}
                 className={cn(
@@ -1353,7 +1392,9 @@ export default function App() {
               >
                 {EOL_LABELS[activeTab.eol]}
               </button>
-              {/* 编码菜单 */}
+              )}
+              {/* 编码菜单（同上隐藏：编码探测在 Rust probe 侧完成） */}
+              {!isLargePreview && (
               <button
                 onClick={() => setStatusMenu(m => m === 'encoding-root' ? null : 'encoding-root')}
                 className={cn(
@@ -1365,6 +1406,7 @@ export default function App() {
                 {encodingLabel(activeTab.encoding)}
                 {activeTab.bom && ' BOM'}
               </button>
+              )}
               {!activeTab.readOnly && (
                 <button
                   onClick={file.handleRevert}

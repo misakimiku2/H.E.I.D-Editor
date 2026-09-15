@@ -46,6 +46,8 @@ export interface FileTab extends CsvTabState {
   binary?: boolean;
   /** 大文件（超降级阈值）：关闭语法高亮/小地图等保证流畅 */
   large?: boolean;
+  /** 大文件只读分块预览（32~512MB 第二层）：content 恒为空，正文由 LargeFileViewer 分窗读取 */
+  largePreview?: boolean;
 }
 
 /** 大文件降级阈值（字符数）：超过即关闭语法高亮、小地图、补全等重计算特性 */
@@ -95,6 +97,17 @@ export function makeUntitledTab(title: string): FileTab {
     bom: false,
     eol: 'lf',
     originalEol: 'lf',
+  };
+}
+
+/** 大文件只读分块预览标签（第二层）：readOnly 恒真，无保存/撤销概念 */
+export function makeLargePreviewTab(path: string, title: string, language: string): FileTab {
+  return {
+    ...makeUntitledTab(title),
+    path,
+    language,
+    readOnly: true,
+    largePreview: true,
   };
 }
 

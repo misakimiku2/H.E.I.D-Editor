@@ -147,17 +147,9 @@ export async function readLocalPath(path: string, forceEncoding?: string): Promi
   return openedFromBytes(bytes, { name, path, handle: null }, forceEncoding);
 }
 
+/** 浏览器模式文件选择器（FS Access API 优先，input 降级）；
+    Tauri 桌面/安卓不走此入口——桌面先取路径经 openPathIntoTab 分层路由，安卓走 SAF 桥 */
 export async function pickAndReadFile(): Promise<OpenedFile | null> {
-  if (isTauri) {
-    const { open } = await import('@tauri-apps/plugin-dialog');
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: rt('file.filterName'), extensions: READ_EXTENSIONS.map(e => e.slice(1)) }],
-    });
-    if (typeof selected !== 'string') return null;
-    return await readLocalPath(selected);
-  }
   if (supportsFsAccess()) {
     try {
       const [handle] = await (window as any).showOpenFilePicker({

@@ -7,13 +7,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import {
-  pickAndReadFile, readLocalPath, saveFileToDisk, androidPickFiles,
+  pickAndReadFile, readLocalPath, saveFileToDisk, androidPickFiles, isTauri, READ_EXTENSIONS,
   type OpenedFile,
 } from '../lib/fileIO';
 import {
-  LARGE_FILE_CHARS, makeNewUntitled, nextTabId,
+  LARGE_FILE_CHARS, makeNewUntitled, makeLargePreviewTab, nextTabId,
   type FileTab,
 } from '../lib/tabModel';
+import {
+  classifyBySize, fileSize, formatBytes, LARGE_FILE_MAX_BYTES,
+} from '../lib/largeFile';
 import { detectLanguageFromPath } from '../lib/codemirror';
 import { displayNameFromPath, IS_ANDROID_APP } from '../lib/platform';
 import { applyLineEnding, type LineEnding } from '../lib/lineEndings';
@@ -58,12 +61,34 @@ export function useFileActions({
 
   /* ---- 打开 ---- */
 
-  /** 按路径打开（最近打开 / 文件树 / 拖拽 / argv 路径共用）；已打开的同路径标签直接刷新并聚焦 */
+  /** 按路径打开（最近打开 / 文件树 / 拖拽 / argv / 选择器路径共用）；
+      桌面端先按字节数分层：>512MB 拒绝、32~512MB 只读分块预览、其余整体读入 */
   const openPathIntoTab = useCallback(async (path: string) => {
     try {
+      const size = await fileSize(path);
+      if (size != null) {
+        const cls = classifyBySize(size);
+        if (cls === 'reject') {
+          appAlert(t('open.errTooLarge', {
+            size: formatBytes(size),
+            max: formatBytes(LARGE_FILE_MAX_BYTES),
+          }));
+          return;
+        }
+        if (cls === 'preview') {
+          const existing = tabsRef.current.find(t => t.path === path);
+          if (existing) { setActiveTabIdRef.current(existing.id); return; }
+          const name = displayNameFromPath(path);
+          const newTab = makeLargePreviewTab(path, name, detectLanguageFromPath(name));
+          setTabs(prev => [...prev, newTab]);
+          setActiveTabIdRef.current(newTab.id);
+          addRecent(path, name);
+          return;
+        }
+      }
       const file = await readLocalPath(path);
       const language = detectLanguageFromPath(file.name);
-      const existing = tabsRef.current.find(t => t.path === path);
+      const existing = tabsRef.current.find(t => t.path === path && !t.largePreview);
       if (existing) {
         setTabs(prev => prev.map(t => t.id === existing.id
           ? { ...t, content: file.content, originalContent: file.content, isDirty: false, encoding: file.encoding, bom: file.bom, eol: file.eol, originalEol: file.eol }
@@ -100,13 +125,26 @@ export function useFileActions({
     }
   }, [addRecent, setTabs, t]);
 
-  /** 打开文件选择器（安卓 = 系统文档选择器，支持多选） */
+  /** 打开文件选择器（安卓 = 系统文档选择器，支持多选；桌面 = 先取路径再统一走分层路由） */
   const handleOpenFile = useCallback(async () => {
     /* 安卓：系统文档选择器（支持多选），逐个复用 openPathIntoTab */
     if (IS_ANDROID_APP) {
       const picked = await androidPickFiles();
       if (!picked) return;
       for (const f of picked) await openPathIntoTab(f.uri);
+      return;
+    }
+    /* 桌面 Tauri：只拿路径，内容读入交给 openPathIntoTab 的分层路由
+       （先查尺寸再决定整读 / 分块预览 / 拒绝，避免选中超大文件先被整读） */
+    if (isTauri) {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: t('file.filterName'), extensions: READ_EXTENSIONS.map(e => e.slice(1)) }],
+      });
+      if (typeof selected !== 'string') return;
+      await openPathIntoTab(selected);
       return;
     }
     let result: OpenedFile | null = null;
