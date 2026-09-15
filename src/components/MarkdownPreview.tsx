@@ -9,7 +9,7 @@ import { remarkGfmStrict, remarkInlineExt } from '../lib/remarkExt';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, ghcolors } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers, Workflow, Pencil } from 'lucide-react';
+import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers, Workflow, Pencil, Maximize2, Minimize2 } from 'lucide-react';
 import { renderMermaidSvg } from '../lib/mermaid';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP } from '../lib/platform';
@@ -134,16 +134,26 @@ MarkdownImage.displayName = 'MarkdownImage';
 
 /* ---- Mermaid 图：```mermaid 代码块懒加载渲染为内联 SVG ----
    动态 import 拆出独立 chunk，首次出现图表时才下载，避免拖累移动端主包体积。
-   悬停显示「编辑」入口，打开图表编辑器（见 MermaidEditModal）。 */
+   悬停显示「编辑」入口，打开图表编辑器（见 MermaidEditModal）。
+   宽图（甘特图/XY 图）按原始尺寸展示并支持按住鼠标拖动平移，右上角可切换「适应宽度」。 */
 
-const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, canEdit, onEdit }: {
+/** 拖动平移的启动阈值（px）：小于它仍按点击/双击处理 */
+const DRAG_THRESHOLD = 4;
+
+const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, canEdit, onEdit, onMenu }: {
   code: string;
   isDarkMode: boolean;
   canEdit?: boolean;
   onEdit?: (e: React.MouseEvent) => void;
+  onMenu?: (e: React.MouseEvent) => void;
 }) {
+  const t = useT();
   const [svg, setSvg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  /* false = 保持 mermaid 的原始尺寸（宽图横向滚动，文字清晰）；true = 缩到容器宽看全貌 */
+  const [fitWidth, setFitWidth] = useState(false);
+  /* 图比容器宽时才显示缩放切换按钮（窄到溢出才有选择的意义） */
+  const [overflowing, setOverflowing] = useState(false);
   const holderRef = useRef<HTMLDivElement | null>(null);
   const idRef = useRef(`md-mermaid-${Date.now()}-${Math.floor(Math.random() * 1e9)}`);
   const bindRef = useRef<((el: HTMLElement | null) => void) | undefined>(undefined);
@@ -171,6 +181,79 @@ const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, 
     bindRef.current?.(holderRef.current);
   }, [svg]);
 
+  /* mermaid 默认输出 width:100%：宽图（甘特图/XY 图）被压到容器宽后文字小到看不清。
+     这里按「原始尺寸 / 适应宽度」两种模式套用 mermaid 算出的原始宽度：
+     原始尺寸下由容器横向滚动查看，小图则自然居中（mx-auto + w-max）。 */
+  useEffect(() => {
+    if (svg === null) return;
+    const el = holderRef.current?.querySelector('svg');
+    if (!el) return;
+    if (!el.dataset.rawWidth) {
+      const raw = el.style.maxWidth;
+      if (raw && raw !== 'none') el.dataset.rawWidth = raw;
+    }
+    const raw = el.dataset.rawWidth;
+    if (!raw) return;
+    el.style.maxWidth = 'none';
+    el.style.height = 'auto';
+    el.style.width = fitWidth ? '100%' : raw;
+  }, [svg, fitWidth]);
+
+  /* 跟随容器宽度判断是否溢出（分屏切换/改窗口大小都要重算） */
+  useEffect(() => {
+    if (svg === null) return;
+    const holder = holderRef.current;
+    const pane = holder?.parentElement;
+    if (!holder || !pane) return;
+    const update = () => {
+      const el = holder.querySelector('svg');
+      const raw = parseFloat(el?.dataset.rawWidth ?? '0') || 0;
+      /* 容器 p-3：可用内容宽 = clientWidth - 24，留 4px 余量 */
+      setOverflowing(raw > pane.clientWidth - 20);
+    };
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(update);
+    ro.observe(pane);
+    return () => ro.disconnect();
+  }, [svg]);
+
+  /* 宽图（原始尺寸）支持按住鼠标左右拖动平移；拖动超过阈值才算平移，
+     这样单击、双击（进编辑器）和右键菜单都不受影响。触屏交给原生手势。 */
+  const dragRef = useRef<{ x: number; left: number; moved: boolean; id: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const canDrag = overflowing && !fitWidth;
+
+  const onDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'touch' || e.button !== 0) return;
+    const el = e.currentTarget;
+    if (el.scrollWidth <= el.clientWidth + 1) return;
+    dragRef.current = { x: e.clientX, left: el.scrollLeft, moved: false, id: e.pointerId };
+  };
+
+  const onDragMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragRef.current;
+    if (!st || st.id !== e.pointerId) return;
+    const el = e.currentTarget;
+    const dx = e.clientX - st.x;
+    if (!st.moved) {
+      if (Math.abs(dx) < DRAG_THRESHOLD) return;
+      st.moved = true;
+      setDragging(true);
+      try { el.setPointerCapture(e.pointerId); } catch { /* 指针已失效，忽略 */ }
+    }
+    el.scrollLeft = st.left - dx;
+  };
+
+  const onDragEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragRef.current;
+    if (!st) return;
+    dragRef.current = null;
+    if (!st.moved) return;
+    setDragging(false);
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* 未捕获则忽略 */ }
+  };
+
   if (err) {
     return (
       <div
@@ -187,26 +270,60 @@ const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, 
   }
 
   return (
-    <div className="group my-4 rounded-lg p-3 overflow-x-auto relative" style={{ background: isDarkMode ? 'rgba(39,39,42,0.4)' : 'rgba(244,244,245,0.5)' }}>
-      {svg === null ? (
-        <div style={{ padding: '1rem', fontSize: '12px', color: isDarkMode ? '#a1a1aa' : '#71717a' }}>图表加载中…</div>
-      ) : (
-        <div ref={holderRef} dangerouslySetInnerHTML={{ __html: svg }} />
-      )}
+    /* 外层不滚动：右上角按钮固定在这里，图表横向滚动时不会跟着跑 */
+    <div
+      className="group relative my-4"
+      /* 双击图表也能进编辑器（悬停右上角有按钮，双击是更顺手的入口） */
+      onDoubleClick={canEdit ? onEdit : undefined}
+      onContextMenu={canEdit ? onMenu : undefined}
+    >
+      <div
+        className={cn(
+          'heid-scroll rounded-lg p-3 overflow-x-auto',
+          /* 可用鼠标按住左右拖动平移（仅在宽图原始尺寸下；触屏交给原生手势） */
+          canDrag && (dragging ? 'cursor-grabbing select-none' : 'cursor-grab'),
+        )}
+        style={{ background: isDarkMode ? 'rgba(39,39,42,0.4)' : 'rgba(244,244,245,0.5)' }}
+        onPointerDown={onDragStart}
+        onPointerMove={onDragMove}
+        onPointerUp={onDragEnd}
+        onPointerCancel={onDragEnd}
+      >
+        {svg === null ? (
+          <div style={{ padding: '1rem', fontSize: '12px', color: isDarkMode ? '#a1a1aa' : '#71717a' }}>{t('md.mermaidLoading')}</div>
+        ) : (
+          <div ref={holderRef} className={fitWidth ? 'w-full' : 'mx-auto w-max'} dangerouslySetInnerHTML={{ __html: svg }} />
+        )}
+      </div>
       {canEdit && (
-        <button
-          onClick={onEdit}
-          title="编辑图表"
-          className={cn(
-            'absolute top-2 right-2 z-10 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium',
-            'opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-md border shadow-sm',
-            isDarkMode
-              ? 'bg-zinc-800/80 border-zinc-700 text-zinc-200 hover:bg-zinc-700'
-              : 'bg-white/80 border-zinc-200 text-zinc-600 hover:bg-zinc-50',
+        <div className="absolute top-2 right-2 z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {(overflowing || fitWidth) && (
+            <button
+              onClick={() => setFitWidth((v) => !v)}
+              title={fitWidth ? t('md.mm.actualSize') : t('md.mm.fitWidth')}
+              className={cn(
+                'flex items-center rounded-md px-1.5 py-1 backdrop-blur-md border shadow-sm transition-colors',
+                isDarkMode
+                  ? 'bg-zinc-800/80 border-zinc-700 text-zinc-200 hover:bg-zinc-700'
+                  : 'bg-white/80 border-zinc-200 text-zinc-600 hover:bg-zinc-50',
+              )}
+            >
+              {fitWidth ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+            </button>
           )}
-        >
-          <Pencil size={12} />编辑
-        </button>
+          <button
+            onClick={onEdit}
+            title={t('md.mermaidEdit')}
+            className={cn(
+              'flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium backdrop-blur-md border shadow-sm transition-colors',
+              isDarkMode
+                ? 'bg-zinc-800/80 border-zinc-700 text-zinc-200 hover:bg-zinc-700'
+                : 'bg-white/80 border-zinc-200 text-zinc-600 hover:bg-zinc-50',
+            )}
+          >
+            <Pencil size={12} />{t('common.edit')}
+          </button>
+        </div>
       )}
     </div>
   );
@@ -264,6 +381,60 @@ function ImageContextMenu({ x, y, canEdit, isDarkMode, onClose, onCopy, onCut, o
       {canEdit && <button className={item} onClick={onCut}><Scissors size={13} />{t('image.cut')}</button>}
       {canEdit && <button className={cn(item, isDarkMode ? 'hover:bg-red-900/50' : 'hover:bg-red-50')} onClick={onDelete}><Trash2 size={13} />{t('image.delete')}</button>}
       {canEdit && <button className={item} onClick={onTab}><Layers size={13} />{t('image.toTab')}</button>}
+    </div>
+  );
+}
+
+/* ---- 图表右键菜单：编辑 / 删除（与图片菜单同风格） ---- */
+
+function MermaidContextMenu({ x, y, isDarkMode, onClose, onEdit, onDelete }: {
+  x: number; y: number; isDarkMode: boolean;
+  onClose: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const onDown = (e: PointerEvent | MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
+  const left = Math.min(x, window.innerWidth - 158);
+  const top = Math.min(y, window.innerHeight - 84);
+  const item = cn(
+    'flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-xs transition-colors text-left',
+    isDarkMode ? 'hover:bg-zinc-700/70 text-zinc-200' : 'hover:bg-zinc-100 text-zinc-700',
+  );
+
+  return (
+    <div
+      ref={ref}
+      className={cn(
+        'fixed z-[150] w-40 rounded-lg border shadow-xl backdrop-blur-md p-1 flex flex-col',
+        isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
+      )}
+      style={{ left, top }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <button className={item} onClick={onEdit}><Pencil size={13} />{t('md.mermaidEdit')}</button>
+      <button
+        className={cn(item, isDarkMode ? 'hover:bg-red-900/50' : 'hover:bg-red-50')}
+        onClick={onDelete}
+      >
+        <Trash2 size={13} />{t('md.mermaidDelete')}
+      </button>
     </div>
   );
 }
@@ -646,6 +817,13 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                   const end = sd['data-md-end'] ? Number(sd['data-md-end']) : NaN;
                   if (Number.isFinite(start) && Number.isFinite(end)) requestMermaidEditRef.current(codeContent, start, end);
                 }}
+                onMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const start = sd['data-md-start'] ? Number(sd['data-md-start']) : NaN;
+                  const end = sd['data-md-end'] ? Number(sd['data-md-end']) : NaN;
+                  if (Number.isFinite(start) && Number.isFinite(end)) requestMermaidMenuRef.current(e, codeContent, start, end);
+                }}
               />
             </div>
           );
@@ -812,6 +990,15 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     setMermaidEdit({ code, start, end });
   };
 
+  /* ---- 图表右键菜单：编辑 / 删除 ---- */
+  const [mermaidMenu, setMermaidMenu] = useState<{
+    x: number; y: number; code: string; start: number; end: number;
+  } | null>(null);
+  const requestMermaidMenuRef = useRef<(e: React.MouseEvent, code: string, start: number, end: number) => void>(() => {});
+  requestMermaidMenuRef.current = (e, code, start, end) => {
+    if (!onChangeRef.current) return;
+    setMermaidMenu({ x: e.clientX, y: e.clientY, code, start, end });
+  };
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -837,6 +1024,22 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       onChangeRef.current!(cur.slice(0, ed.start) + block + cur.slice(ed.end));
     });
     setMermaidEdit(null);
+  }, [withScrollRestore]);
+  /* 图表右键「删除」：连同块前后紧邻的换行一起收拢成一个空行，避免留下成片空白 */
+  const handleMermaidDelete = useCallback((start: number, end: number) => {
+    setMermaidMenu(null);
+    if (!onChangeRef.current) return;
+    withScrollRestore(() => {
+      const cur = contentStrRef.current;
+      let s = start;
+      let e = end;
+      let before = 0;
+      while (s - 1 >= 0 && cur[s - 1] === '\n') { s -= 1; before += 1; }
+      let after = 0;
+      while (e < cur.length && cur[e] === '\n') { e += 1; after += 1; }
+      const sep = before > 0 && after > 0 ? '\n\n' : '';
+      onChangeRef.current!(cur.slice(0, s) + sep + cur.slice(e));
+    });
   }, [withScrollRestore]);
   const handleImageCopy = useCallback(async (src: string) => {
     setImageMenu(null);
@@ -1489,6 +1692,21 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           onCut={() => handleImageCut(imageMenu)}
           onDelete={() => handleImageDelete(imageMenu.srcStart, imageMenu.srcEnd)}
           onTab={() => handleImageToTab(imageMenu.srcStart, imageMenu.srcEnd)}
+        />
+      )}
+
+      {/* 图表右键菜单：编辑 / 删除 */}
+      {mermaidMenu && (
+        <MermaidContextMenu
+          x={mermaidMenu.x}
+          y={mermaidMenu.y}
+          isDarkMode={isDarkMode}
+          onClose={() => setMermaidMenu(null)}
+          onEdit={() => {
+            setMermaidEdit({ code: mermaidMenu.code, start: mermaidMenu.start, end: mermaidMenu.end });
+            setMermaidMenu(null);
+          }}
+          onDelete={() => handleMermaidDelete(mermaidMenu.start, mermaidMenu.end)}
         />
       )}
 
