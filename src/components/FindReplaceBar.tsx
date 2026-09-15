@@ -11,7 +11,7 @@ import { clampBarPosition } from '../lib/position';
 import { setFindMatchesEffect } from '../lib/editorSearch';
 import {
   findMatches, matchAtSelection, nextMatchIndex, prevMatchIndex,
-  replacementFor, RESCAN_DOC_LIMIT, type MatchRange, type SearchOptions,
+  replaceAllInText, replacementFor, RESCAN_DOC_LIMIT, type MatchRange, type SearchOptions,
 } from '../lib/searchCore';
 import type { PointerPos } from '../hooks/useLastPointer';
 import { useT } from '../lib/i18nContext';
@@ -97,7 +97,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
     }
     const r = findMatches(view.state.doc.toString(), o);
     matchStateRef.current = r;
-    setCount({ total: r.matches.length, capped: r.capped });
+    setCount({ total: r.total, capped: r.capped });
     const cur = r.error ? 0 : computeCurrent(r.matches);
     setCurrent(cur);
     view.dispatch({ effects: setFindMatchesEffect.of({ matches: r.matches, current: cur }) });
@@ -194,15 +194,11 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   const replaceAll = useCallback(() => {
     const view = getView();
     if (!view) return;
-    const { matches, error } = matchStateRef.current;
-    if (error || matches.length === 0) return;
+    if (matchStateRef.current.error) return;
     const text = view.state.doc.toString();
-    const changes = matches.map(m => ({
-      from: m.from,
-      to: m.to,
-      insert: replacementFor(text, m, optionsRef.current, replaceText),
-    }));
-    view.dispatch({ changes });
+    const insert = replaceAllInText(text, optionsRef.current, replaceText);
+    if (insert === text) return;
+    view.dispatch({ changes: { from: 0, to: text.length, insert } });
   }, [getView, replaceText]);
 
   const jumpToLine = useCallback(() => {
@@ -262,7 +258,9 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
     ? t('find.invalidRegex')
     : count.total === 0
       ? (query ? t('find.noResults') : '')
-      : count.capped ? `${count.total}+` : `${current + 1}/${count.total}`;
+      : count.capped
+        ? `${current + 1}/${matchStateRef.current.matches.length} · ${t('find.matchTotal', { total: count.total })}`
+        : `${current + 1}/${count.total}`;
 
   return createPortal(
     <div

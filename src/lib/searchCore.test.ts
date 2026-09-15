@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   findMatches, matchAtSelection, nextMatchIndex, prevMatchIndex,
-  replacementFor, type SearchOptions,
+  replaceAllInText, replacementFor, type SearchOptions,
 } from './searchCore';
 
 const opts = (partial: Partial<SearchOptions>): SearchOptions => ({
@@ -117,5 +117,81 @@ describe('普通模式替换不展开 $', () => {
     const r = findMatches('x a$1b y', o);
     expect(r.matches).toEqual([{ from: 2, to: 6 }]);
     expect(replacementFor('x a$1b y', r.matches[0], o, '[$1]')).toBe('[$1]');
+  });
+});
+
+describe('全量计数与扫描上限解除', () => {
+  it('扫描不再在 200 万字符处截断：边界之外的匹配可命中', () => {
+    const filler = 'a'.repeat(2_000_100);
+    const text = filler + 'NEEDLE' + 'b';
+    const r = findMatches(text, opts({ query: 'NEEDLE', caseSensitive: true }));
+    expect(r.matches).toEqual([{ from: 2_000_100, to: 2_000_106 }]);
+    expect(r.total).toBe(1);
+  });
+
+  it('匹配数超过上限：total 记录全量、matches 数组截断且 capped=true', () => {
+    const text = 'ab '.repeat(6000);
+    const r = findMatches(text, opts({ query: 'ab' }));
+    expect(r.total).toBe(6000);
+    expect(r.matches.length).toBe(5000);
+    expect(r.matches[0]).toEqual({ from: 0, to: 2 });
+    expect(r.capped).toBe(true);
+  });
+
+  it('未超限：total 与 matches 一致且 capped=false', () => {
+    const r = findMatches('ab ab', opts({ query: 'ab' }));
+    expect(r.total).toBe(2);
+    expect(r.matches.length).toBe(2);
+    expect(r.capped).toBe(false);
+  });
+
+  it('正则模式同样全量计数：超过上限不中断', () => {
+    const text = 'a1 '.repeat(6000);
+    const r = findMatches(text, opts({ query: '\\d', regexp: true }));
+    expect(r.total).toBe(6000);
+    expect(r.matches.length).toBe(5000);
+    expect(r.capped).toBe(true);
+  });
+
+  it('全词模式计数不受数组截断影响', () => {
+    const text = 'cat dog '.repeat(6000);
+    const r = findMatches(text, opts({ query: 'cat', wholeWord: true }));
+    expect(r.total).toBe(6000);
+    expect(r.capped).toBe(true);
+  });
+});
+
+describe('replaceAllInText 全文替换', () => {
+  it('普通模式全文替换且替换串中的 $ 不展开', () => {
+    expect(replaceAllInText('a b a', opts({ query: 'a' }), '$&x')).toBe('$&x b $&x');
+  });
+
+  it('大小写不敏感全文替换', () => {
+    expect(replaceAllInText('Aa aA b', opts({ query: 'aa' }), 'X')).toBe('X X b');
+  });
+
+  it('全词模式只替换词边界命中', () => {
+    expect(replaceAllInText('cat category cat', opts({ query: 'cat', wholeWord: true }), 'dog')).toBe('dog category dog');
+  });
+
+  it('正则模式支持 $1 引用', () => {
+    expect(replaceAllInText('1a2b', opts({ query: '(\\d)([a-z])', regexp: true }), '$2$1')).toBe('a1b2');
+  });
+
+  it('正则模式零宽匹配跳过（与导航语义一致）', () => {
+    expect(replaceAllInText('ab', opts({ query: 'x*', regexp: true }), 'Y')).toBe('ab');
+  });
+
+  it('非法正则原样返回', () => {
+    expect(replaceAllInText('abc', opts({ query: 'a(', regexp: true }), 'x')).toBe('abc');
+  });
+
+  it('超出 matches 数组上限的命中也被替换（5000+）', () => {
+    const text = 'ab '.repeat(6000);
+    expect(replaceAllInText(text, opts({ query: 'ab' }), 'xy')).toBe('xy '.repeat(6000));
+  });
+
+  it('空查询原样返回', () => {
+    expect(replaceAllInText('abc', opts({ query: '' }), 'x')).toBe('abc');
   });
 });

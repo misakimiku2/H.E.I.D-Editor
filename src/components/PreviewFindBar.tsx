@@ -177,7 +177,7 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
       if (r) ranges.push(r);
     }
     rangesRef.current = ranges;
-    setCount({ total: ranges.length, capped: result.capped });
+    setCount({ total: ranges.length, capped: result.total > ranges.length });
     setCurrent(-1);
     applyHighlights(-1);
   }, [applyHighlights, clearHighlights, getContainer]);

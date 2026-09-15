@@ -1,7 +1,7 @@
 /**
  * 查找引擎（纯函数）：在文档字符串上扫描匹配区间，供查找栏计数、导航与替换使用。
  * 支持普通文本 / 正则、大小写敏感、全词匹配；返回不重叠且升序的匹配区间。
- * 性能护栏：匹配数与扫描字符数设上限，避免超大文档下 UI 卡死。
+ * 性能护栏：matches 数组设上限（导航 / 高亮 / 单项替换用），total 始终统计全量命中。
  */
 
 export interface SearchOptions {
@@ -17,17 +17,18 @@ export interface MatchRange {
 }
 
 export interface ScanResult {
+  /** 前 MAX_MATCHES 条匹配（导航、高亮与单项替换的取值域） */
   matches: MatchRange[];
-  /** 命中数达到上限，实际数量更多 */
+  /** 全量命中数（不受 matches 数组截断影响） */
+  total: number;
+  /** matches 数组被截断（total > matches.length，实际命中更多） */
   capped: boolean;
   /** 正则表达式非法等原因导致无法扫描 */
   error: string | null;
 }
 
-/** 单次扫描的匹配数上限（达到即停止，UI 显示 5000+） */
+/** matches 数组上限（导航与高亮取值域；计数走 total 不受此限） */
 export const MAX_MATCHES = 5000;
-/** 单次扫描的字符上限（超出部分不扫描） */
-export const MAX_SCAN_CHARS = 2_000_000;
 
 /** 单次重扫的文档规模上限：超过则仅在查询变化时重扫，输入过程跳过 */
 export const RESCAN_DOC_LIMIT = 5_000_000;
@@ -70,7 +71,8 @@ function compileLocal(opts: SearchOptions): CompiledPattern {
 }
 
 /**
- * 扫描 [start, end) 区间内的全部匹配。
+ * 扫描 [start, end) 区间内的全部匹配：total 统计全量命中，
+ * matches 数组只保留前 MAX_MATCHES 条（导航与高亮取值域）。
  * 普通文本走 indexOf 顺序扫描；正则走全局正则迭代；零宽匹配一律跳过。
  */
 export function findMatches(
@@ -80,32 +82,28 @@ export function findMatches(
   end: number = text.length,
 ): ScanResult {
   const matches: MatchRange[] = [];
-  if (!opts.query) return { matches, capped: false, error: null };
+  let total = 0;
+  if (!opts.query) return { matches, total: 0, capped: false, error: null };
   const from = Math.max(0, Math.min(start, text.length));
   const to = Math.max(from, Math.min(end, text.length));
-  /* 超大文档截断扫描（UI 不会传 start/end，此护栏兜底超大文件） */
-  const scope = text.length > MAX_SCAN_CHARS ? text.slice(0, MAX_SCAN_CHARS) : text;
-  const bound = Math.min(to, scope.length);
-  if (from >= bound) return { matches, capped: false, error: null };
+  if (from >= to) return { matches, total: 0, capped: false, error: null };
 
   const local = compileLocal(opts);
-  if (!local.regex) return { matches, capped: false, error: local.error };
+  if (!local.regex) return { matches, total: 0, capped: false, error: local.error };
 
   if (!opts.regexp) {
-    const haystack = opts.caseSensitive ? scope : scope.toLowerCase();
+    const haystack = opts.caseSensitive ? text : text.toLowerCase();
     const needle = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
     let idx = haystack.indexOf(needle, from);
-    while (idx !== -1 && idx < bound) {
+    while (idx !== -1 && idx < to) {
       const endIdx = idx + needle.length;
-      if (!opts.wholeWord || (!isWordChar(scope[idx - 1]) && !isWordChar(scope[endIdx]))) {
-        matches.push({ from: idx, to: endIdx });
-        if (matches.length >= MAX_MATCHES) {
-          return { matches, capped: true, error: null };
-        }
+      if (!opts.wholeWord || (!isWordChar(text[idx - 1]) && !isWordChar(text[endIdx]))) {
+        total += 1;
+        if (matches.length < MAX_MATCHES) matches.push({ from: idx, to: endIdx });
       }
       idx = haystack.indexOf(needle, idx + Math.max(needle.length, 1));
     }
-    return { matches, capped: false, error: null };
+    return { matches, total, capped: total > matches.length, error: null };
   }
 
   // 正则模式：仅追加 g 旗标做全局迭代（其余语义保持用户正则原样）
@@ -113,22 +111,51 @@ export function findMatches(
   try {
     global = new RegExp(local.regex.source, local.regex.flags.includes('g') ? local.regex.flags : local.regex.flags + 'g');
   } catch (e) {
-    return { matches, capped: false, error: e instanceof Error ? e.message : String(e) };
+    return { matches, total: 0, capped: false, error: e instanceof Error ? e.message : String(e) };
   }
   global.lastIndex = from;
   for (;;) {
-    const m = global.exec(scope);
-    if (!m || m.index >= bound) break;
+    const m = global.exec(text);
+    if (!m || m.index >= to) break;
     if (m[0].length === 0) {
       global.lastIndex += 1;
       continue;
     }
-    matches.push({ from: m.index, to: m.index + m[0].length });
-    if (matches.length >= MAX_MATCHES) {
-      return { matches, capped: true, error: null };
-    }
+    total += 1;
+    if (matches.length < MAX_MATCHES) matches.push({ from: m.index, to: m.index + m[0].length });
   }
-  return { matches, capped: false, error: null };
+  return { matches, total, capped: total > matches.length, error: null };
+}
+
+/**
+ * 全文替换：与 findMatches / replacementFor 同一语义（普通模式替换串按字面、
+ * 正则模式支持 $1 引用、零宽匹配跳过），一次性作用于全文——
+ * 全部替换不再受 matches 数组上限约束。
+ */
+export function replaceAllInText(text: string, opts: SearchOptions, replaceWith: string): string {
+  if (!opts.query) return text;
+  const local = compileLocal(opts);
+  if (!local.regex) return text;
+  let global: RegExp;
+  try {
+    global = new RegExp(local.regex.source, local.regex.flags.includes('g') ? local.regex.flags : local.regex.flags + 'g');
+  } catch {
+    return text;
+  }
+  let out = '';
+  let last = 0;
+  for (;;) {
+    const m = global.exec(text);
+    if (!m) break;
+    if (m[0].length === 0) {
+      global.lastIndex += 1;
+      continue;
+    }
+    const piece = opts.regexp ? m[0].replace(local.regex, replaceWith) : replaceWith;
+    out += text.slice(last, m.index) + piece;
+    last = m.index + m[0].length;
+  }
+  return out + text.slice(last);
 }
 
 /**
