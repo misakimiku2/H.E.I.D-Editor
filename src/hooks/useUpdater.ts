@@ -4,14 +4,15 @@
  * - 安卓（侧载）：无原生更新器，经既有 http_get 抓取 latest.json 比较版本，
  *   有新版则提示前往 Releases 页面手动下载（roadmap「安卓只做版本检查提示」）；
  * - 浏览器模式：无更新通道，一切检查直接跳过。
- * 启动后延迟静默检查一次，24h 节流（lib/update.ts）。
+ * 启动后延迟静默检查一次（无节流，每次启动都检查——节流曾导致发版后收不到提示）；
+ * 发现新版本的通知展示由 useUpdateNotifications（左下角通用通知）编排。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { IS_ANDROID_APP } from '../lib/platform';
 import { isTauri } from '../lib/fileIO';
 import { openExternal } from '../lib/openExternal';
 import {
-  LATEST_JSON_URL, RELEASES_PAGE, isNewerVersion, markAutoChecked, parseLatestJson, shouldAutoCheck,
+  LATEST_JSON_URL, RELEASES_PAGE, isNewerVersion, parseLatestJson,
 } from '../lib/update';
 
 export type UpdatePhase =
@@ -64,7 +65,6 @@ export function useUpdater() {
         if (!info) throw new Error('invalid latest.json');
         const { getVersion } = await import('@tauri-apps/api/app');
         const current = await getVersion();
-        markAutoChecked(Date.now());
         if (isNewerVersion(info.version, current)) {
           setState(s => ({ ...s, phase: 'available', latestVersion: info.version, notes: info.notes ?? null }));
         } else {
@@ -74,7 +74,6 @@ export function useUpdater() {
       }
       const { check: checkUpdater } = await import('@tauri-apps/plugin-updater');
       const update = await checkUpdater();
-      markAutoChecked(Date.now());
       if (update) {
         updateRef.current = update;
         setState(s => ({
@@ -132,13 +131,13 @@ export function useUpdater() {
     setState(s => ({ ...s, phase: 'idle' }));
   }, []);
 
-  /* 启动自动检查（仅 Tauri；24h 节流，失败静默） */
+  /* 启动自动检查（仅 Tauri；每次启动都检查，失败静默） */
   const checkRef = useRef(check);
   checkRef.current = check;
   useEffect(() => {
     if (!isTauri) return;
     const timer = setTimeout(() => {
-      if (shouldAutoCheck(Date.now())) void checkRef.current({ source: 'auto' });
+      void checkRef.current({ source: 'auto' });
     }, AUTO_CHECK_DELAY_MS);
     return () => clearTimeout(timer);
   }, []);

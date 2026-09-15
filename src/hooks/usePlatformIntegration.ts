@@ -24,6 +24,7 @@ export interface OverlayState {
   settingsOpen: boolean;
   shortcutsOpen: boolean;
   tabMenuOpen: boolean;
+  releaseNotesOpen: boolean;
 }
 
 export interface OverlayActions {
@@ -35,6 +36,7 @@ export interface OverlayActions {
   closeTabSheet: () => void;
   closeMenu: () => void;
   closeAbout: () => void;
+  closeReleaseNotes: () => void;
 }
 
 export interface PlatformIntegrationOptions {
@@ -185,6 +187,7 @@ export function usePlatformIntegration({
       if (o.tabMenuOpen) { a.closeTabMenu(); return; }
       if (o.tabSheetOpen) { a.closeTabSheet(); return; }
       if (o.menuOpen) { a.closeMenu(); return; }
+      if (o.releaseNotesOpen) { a.closeReleaseNotes(); return; }
       if (o.aboutOpen) { a.closeAbout(); return; }
       void (async () => {
         if (await confirmWindowCloseRef.current()) {

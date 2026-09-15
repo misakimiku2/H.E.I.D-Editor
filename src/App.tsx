@@ -18,6 +18,8 @@ import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { AlertDialog } from './components/AlertDialog';
+import { NotificationStack } from './components/NotificationStack';
+import { ReleaseNotesModal } from './components/ReleaseNotesModal';
 import { ImageViewer } from './components/ImageViewer';
 import { SvgWorkbench } from './components/SvgWorkbench';
 import { resolveImageSrc, ImageForbiddenError } from './lib/imageSrc';
@@ -65,7 +67,11 @@ import { usePlatformIntegration } from './hooks/usePlatformIntegration';
 import { useAppShortcuts } from './hooks/useAppShortcuts';
 import { useSplitScroll } from './hooks/useSplitScroll';
 import { useUpdater } from './hooks/useUpdater';
-import { FALLBACK_APP_VERSION } from './lib/update';
+import { useUpdateNotifications } from './hooks/useUpdateNotifications';
+import {
+  consumeStartupReleaseNotes, FALLBACK_APP_VERSION, loadReleaseNotes,
+  type StoredReleaseNotes,
+} from './lib/update';
 
 /* ---------- App ---------- */
 
@@ -471,9 +477,14 @@ export default function App() {
   const confirmWindowCloseRef = useRef(confirmWindowClose);
   confirmWindowCloseRef.current = confirmWindowClose;
 
+  /* ---- 更新说明（只读文档）：更新重启后自动展示一次；「关于」里可重看最近一次 ---- */
+  const [releaseNotes, setReleaseNotes] = useState<StoredReleaseNotes | null>(() => loadReleaseNotes());
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
+
   /* ---- 平台适配（拖拽 / 链接守卫 / 关闭拦截 / 安卓返回键与安全区 / 浏览器兜底）---- */
   const overlayState = {
     tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
+    releaseNotesOpen,
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
@@ -489,14 +500,16 @@ export default function App() {
       closeTabSheet: () => setTabSheetOpen(false),
       closeMenu: () => setMenuOpen(false),
       closeAbout: () => setAboutOpen(false),
+      closeReleaseNotes: () => setReleaseNotesOpen(false),
     },
   });
 
   /* ---- 分屏同步滚动 ---- */
   const { attachEditorScroller, attachPreviewScroller } = useSplitScroll();
 
-  /* ---- 应用更新（桌面签名安装 / 安卓版本检查提示；启动后自动检查一次，24h 节流）---- */
+  /* ---- 应用更新（桌面签名安装 / 安卓版本检查提示；每次启动自动静默检查一次）---- */
   const updater = useUpdater();
+  useUpdateNotifications(updater, t);
   const [appVersion, setAppVersion] = useState<string>(FALLBACK_APP_VERSION);
   useEffect(() => {
     if (!isTauri) return;
@@ -507,6 +520,19 @@ export default function App() {
       .catch(() => { /* 保留兜底版本号 */ });
     return () => { cancelled = true; };
   }, []);
+
+  /* 更新重启后：消费「当前版本」的未展示说明（只自动弹一次；空说明不弹，仍可在「关于」重看）；
+     发现新版本时同步「关于」入口可用态 */
+  useEffect(() => {
+    if (!isTauri) return;
+    const pending = consumeStartupReleaseNotes(appVersion);
+    setReleaseNotes(loadReleaseNotes());
+    if (pending && pending.notes.trim().length > 0) setReleaseNotesOpen(true);
+  }, [appVersion]);
+  /* 自动检查发现新版本时，通知编排 hook 已把说明落盘——同步「关于」入口的可用态 */
+  useEffect(() => {
+    if (updater.phase === 'available') setReleaseNotes(loadReleaseNotes());
+  }, [updater.phase]);
 
   /* ---- 文件树侧栏：选择器走平台提供者；记忆根目录，抽屉默认关闭 ---- */
   const chooseTreeFolder = useCallback(async () => {
@@ -1675,6 +1701,19 @@ export default function App() {
                       {t('update.check')}
                     </button>
                   )}
+                  {/* 最近一次更新的说明（更新重启后自动弹出，关闭后从这里重看） */}
+                  {releaseNotes && (
+                    <button
+                      onClick={() => { setAboutOpen(false); setReleaseNotesOpen(true); }}
+                      className={cn(
+                        "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1",
+                        isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
+                      )}
+                    >
+                      <FileText size={10} />
+                      {t('update.viewNotes')}
+                    </button>
+                  )}
                 </div>
               )}
               <div className={cn(
@@ -1763,17 +1802,8 @@ export default function App() {
         onNew={file.handleNewFile}
       />
 
-      {/* 更新提示弹窗：启动自动检查发现新版本时弹出（手动检查在关于弹窗内展示） */}
-      {updater.phase === 'available' && updater.source === 'auto' && (
-        <ConfirmDialog
-          title={t('update.newVersion', { v: updater.latestVersion ?? '' })}
-          message={updater.notes || (IS_ANDROID_APP ? t('update.androidHint') : '')}
-          isDarkMode={isDarkMode}
-          confirmText={IS_ANDROID_APP ? t('update.goDownload') : t('update.installNow')}
-          onConfirm={() => { IS_ANDROID_APP ? updater.goDownload() : void updater.install(); }}
-          onCancel={updater.dismiss}
-        />
-      )}
+      {/* 更新提示已改为左下角通用通知卡片（useUpdateNotifications 编排），
+          手动检查的结果仍在「关于」弹窗内展示 */}
 
       {/* 丢弃确认弹窗（退出应用 / 关闭脏标签共用，自绘以统一三端视觉） */}
       {pendingDiscard && (
@@ -1798,6 +1828,19 @@ export default function App() {
           message={alertState.message}
           isDarkMode={isDarkMode}
           onClose={closeAlert}
+        />
+      )}
+
+      {/* 通用通知卡片（左下角；窄屏移到顶部避让拇指工具栏） */}
+      <NotificationStack isDarkMode={isDarkMode} />
+
+      {/* 更新说明弹窗（只读 Markdown，更新重启后自动弹出；「关于」里可重看） */}
+      {releaseNotesOpen && releaseNotes && (
+        <ReleaseNotesModal
+          version={releaseNotes.version}
+          notes={releaseNotes.notes}
+          isDarkMode={isDarkMode}
+          onClose={() => setReleaseNotesOpen(false)}
         />
       )}
 

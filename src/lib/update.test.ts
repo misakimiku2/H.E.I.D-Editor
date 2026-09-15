@@ -1,8 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import {
-  compareVersions, isNewerVersion, parseLatestJson, shouldAutoCheck, markAutoChecked,
-  AUTO_CHECK_INTERVAL_MS,
+  compareVersions, consumeStartupReleaseNotes, getIgnoredVersion, isNewerVersion,
+  loadReleaseNotes, parseLatestJson, saveReleaseNotes, setIgnoredVersion,
+  shouldNotifyUpdate, summarizeNotes,
 } from './update';
+
+function fakeStorage(): { store: Map<string, string>; getItem(k: string): string | null; setItem(k: string, v: string): void } {
+  const store = new Map<string, string>();
+  return {
+    store,
+    getItem: k => (store.has(k) ? store.get(k)! : null),
+    setItem: (k, v) => void store.set(k, v),
+  };
+}
+const asStorage = (s: ReturnType<typeof fakeStorage>) => s as unknown as Storage;
 
 describe('compareVersions', () => {
   it('主.次.修订 逐段比较', () => {
@@ -63,30 +74,70 @@ describe('parseLatestJson', () => {
   });
 });
 
-describe('shouldAutoCheck / markAutoChecked', () => {
-  function fakeStorage(): { store: Map<string, string>; getItem(k: string): string | null; setItem(k: string, v: string): void } {
-    const store = new Map<string, string>();
-    return {
-      store,
-      getItem: k => (store.has(k) ? store.get(k)! : null),
-      setItem: (k, v) => void store.set(k, v),
-    };
-  }
-
-  it('从未检查过返回 true', () => {
-    expect(shouldAutoCheck(1000, fakeStorage() as unknown as Storage)).toBe(true);
+describe('忽略版本持久化', () => {
+  it('未忽略返回 null，忽略后可读回', () => {
+    const s = fakeStorage();
+    expect(getIgnoredVersion(asStorage(s))).toBe(null);
+    setIgnoredVersion('1.2.1', asStorage(s));
+    expect(getIgnoredVersion(asStorage(s))).toBe('1.2.1');
   });
 
-  it('间隔内返回 false，超过间隔返回 true', () => {
+  it('shouldNotifyUpdate：未忽略弹；同版本不弹；比忽略版本新则弹', () => {
+    expect(shouldNotifyUpdate('1.2.1', null)).toBe(true);
+    expect(shouldNotifyUpdate('1.2.1', '1.2.1')).toBe(false);
+    expect(shouldNotifyUpdate('1.2.2', '1.2.1')).toBe(true);
+    expect(shouldNotifyUpdate('1.2.0', '1.2.1')).toBe(false);
+  });
+});
+
+describe('发行说明持久化', () => {
+  it('保存后可读回；notes 缺省存为空串', () => {
     const s = fakeStorage();
-    markAutoChecked(1_000, s as unknown as Storage);
-    expect(shouldAutoCheck(1_000 + AUTO_CHECK_INTERVAL_MS - 1, s as unknown as Storage)).toBe(false);
-    expect(shouldAutoCheck(1_000 + AUTO_CHECK_INTERVAL_MS, s as unknown as Storage)).toBe(true);
+    saveReleaseNotes({ version: '1.2.1', notes: '# 更新说明' }, asStorage(s));
+    expect(loadReleaseNotes(asStorage(s))).toEqual({ version: '1.2.1', notes: '# 更新说明', shown: false });
+    saveReleaseNotes({ version: '1.2.2' }, asStorage(s));
+    expect(loadReleaseNotes(asStorage(s))!.notes).toBe('');
   });
 
-  it('损坏的时间值视为从未检查', () => {
+  it('consume：当前版本且未展示 → 返回并标记已展示；再次 consume 返回 null', () => {
     const s = fakeStorage();
-    s.store.set('heid-update-last-check', 'garbage');
-    expect(shouldAutoCheck(1000, s as unknown as Storage)).toBe(true);
+    saveReleaseNotes({ version: '1.2.1', notes: 'notes' }, asStorage(s));
+    const first = consumeStartupReleaseNotes('1.2.1', asStorage(s));
+    expect(first).toEqual({ version: '1.2.1', notes: 'notes', shown: false });
+    expect(loadReleaseNotes(asStorage(s))!.shown).toBe(true);
+    expect(consumeStartupReleaseNotes('1.2.1', asStorage(s))).toBe(null);
+  });
+
+  it('consume：版本不匹配 / 无记录 / 损坏 JSON 返回 null 且不改动存储', () => {
+    const s = fakeStorage();
+    saveReleaseNotes({ version: '1.2.1', notes: 'n' }, asStorage(s));
+    expect(consumeStartupReleaseNotes('1.3.0', asStorage(s))).toBe(null);
+    expect(loadReleaseNotes(asStorage(s))!.shown).toBe(false);
+
+    const empty = fakeStorage();
+    expect(consumeStartupReleaseNotes('1.2.1', asStorage(empty))).toBe(null);
+
+    const bad = fakeStorage();
+    bad.store.set('heid-update-release-notes', 'garbage');
+    expect(loadReleaseNotes(asStorage(bad))).toBe(null);
+    expect(consumeStartupReleaseNotes('1.2.1', asStorage(bad))).toBe(null);
+  });
+});
+
+describe('summarizeNotes', () => {
+  it('压缩空白为单行', () => {
+    expect(summarizeNotes('# 标题\n\n- 甲\n- 乙')).toBe('# 标题 - 甲 - 乙');
+  });
+
+  it('超长截断加省略号', () => {
+    const out = summarizeNotes('a'.repeat(200), 160);
+    expect(out).toHaveLength(161);
+    expect(out!.endsWith('…')).toBe(true);
+  });
+
+  it('空 / 缺省返回 null', () => {
+    expect(summarizeNotes(undefined)).toBe(null);
+    expect(summarizeNotes('')).toBe(null);
+    expect(summarizeNotes('   \n\t')).toBe(null);
   });
 });
