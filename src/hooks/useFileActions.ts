@@ -30,6 +30,9 @@ import type { DiscardDecision, PendingDiscardConfirm } from './useDiscardConfirm
 
 type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string;
 
+/** 跳转请求序号：区分同一标签的连续跳转（同位置二连跳也能触发 effect） */
+let jumpSeq = 0;
+
 export interface FileActionsOptions {
   editor: EditorState;
   askDiscardConfirm: (message: string, confirmText: string, saveText?: string) => Promise<DiscardDecision>;
@@ -62,8 +65,12 @@ export function useFileActions({
   /* ---- 打开 ---- */
 
   /** 按路径打开（最近打开 / 文件树 / 拖拽 / argv / 选择器路径共用）；
-      桌面端先按字节数分层：>512MB 拒绝、32~512MB 只读分块预览、其余整体读入 */
-  const openPathIntoTab = useCallback(async (path: string) => {
+      桌面端先按字节数分层：>512MB 拒绝、32~512MB 只读分块预览、其余整体读入。
+      jump：打开后跳转到指定行列（跨文件搜索结果点击），编辑器挂载后消费一次 */
+  const openPathIntoTab = useCallback(async (path: string, jump?: { line: number; col: number }) => {
+    const jumpRequest = jump
+      ? { line: jump.line, col: jump.col, seq: ++jumpSeq }
+      : undefined;
     try {
       const size = await fileSize(path);
       if (size != null) {
@@ -77,7 +84,10 @@ export function useFileActions({
         }
         if (cls === 'preview') {
           const existing = tabsRef.current.find(t => t.path === path);
-          if (existing) { setActiveTabIdRef.current(existing.id); return; }
+          if (existing) {
+            setActiveTabIdRef.current(existing.id);
+            return;
+          }
           const name = displayNameFromPath(path);
           const newTab = makeLargePreviewTab(path, name, detectLanguageFromPath(name));
           setTabs(prev => [...prev, newTab]);
@@ -90,6 +100,12 @@ export function useFileActions({
       const language = detectLanguageFromPath(file.name);
       const existing = tabsRef.current.find(t => t.path === path && !t.largePreview);
       if (existing) {
+        if (jumpRequest) {
+          /* 跳转请求：文件已在标签中，直接定位——不重读磁盘覆盖未保存内容 */
+          setTabs(prev => prev.map(t => t.id === existing.id ? { ...t, jumpRequest } : t));
+          setActiveTabIdRef.current(existing.id);
+          return;
+        }
         setTabs(prev => prev.map(t => t.id === existing.id
           ? { ...t, content: file.content, originalContent: file.content, isDirty: false, encoding: file.encoding, bom: file.bom, eol: file.eol, originalEol: file.eol }
           : t
@@ -108,13 +124,15 @@ export function useFileActions({
         language,
         isDirty: false,
         readOnly: !!file.binary,
-        mdView: language === 'markdown' ? 'preview' : 'edit',
+        /* 跳转场景用编辑视图：编辑器必然挂载，跳转定位才能生效 */
+        mdView: jumpRequest ? 'edit' : language === 'markdown' ? 'preview' : 'edit',
         encoding: file.encoding,
         bom: file.bom,
         eol: file.eol,
         originalEol: file.eol,
         binary: file.binary,
         large: file.content.length > LARGE_FILE_CHARS,
+        jumpRequest,
       };
       setTabs(prev => [...prev, newTab]);
       setActiveTabIdRef.current(newTab.id);

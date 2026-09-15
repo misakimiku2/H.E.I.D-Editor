@@ -734,6 +734,8 @@ export default function App() {
         onFindClose={closeFind}
         onFindOpen={() => openFind(false, false)}
         getPointer={getPointer}
+        jumpTo={activeTab.jumpRequest}
+        onJumpDone={() => editor.setTabs(prev => prev.map(tb => tb.id === activeTab.id ? { ...tb, jumpRequest: undefined } : tb))}
         history={{ canUndo: editor.canUndo, canRedo: editor.canRedo, onUndo: editor.handleUndo, onRedo: editor.handleRedo }}
         markdownMenu={isMarkdown && !activeTab.readOnly
           ? { canUndo: editor.canUndo, canRedo: editor.canRedo, onUndo: editor.handleUndo, onRedo: editor.handleRedo }
@@ -1244,7 +1246,7 @@ export default function App() {
             isDarkMode={isDarkMode}
             activeTabId={editor.activeTabId}
             tabs={editor.tabs}
-            onOpenFile={(p) => void file.openPathIntoTab(p)}
+            onOpenFile={(p, jump) => void file.openPathIntoTab(p, jump)}
             onOpenImage={(p) => void openImageInViewer(p)}
             onRootChange={handleTreeRootChange}
             onClose={() => setTreeOpen(false)}

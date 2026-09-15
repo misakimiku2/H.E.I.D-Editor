@@ -48,6 +48,9 @@ export interface FileTab extends CsvTabState {
   large?: boolean;
   /** 大文件只读分块预览（32~512MB 第二层）：content 恒为空，正文由 LargeFileViewer 分窗读取 */
   largePreview?: boolean;
+  /** 待跳转位置（跨文件搜索结果点击打开）：编辑器挂载后执行一次并清除。
+      seq 区分同一标签的连续请求，避免相同位置的二连跳被 React 视为无变化 */
+  jumpRequest?: { line: number; col: number; seq: number };
 }
 
 /** 大文件降级阈值（字符数）：超过即关闭语法高亮、小地图、补全等重计算特性 */

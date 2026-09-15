@@ -263,6 +263,10 @@ export interface CodeEditorProps {
   history?: { canUndo: boolean; canRedo: boolean; onUndo: () => void; onRedo: () => void };
   /** 打开查找浮层（通用右键菜单「查找/替换」入口） */
   onFindOpen?: () => void;
+  /** 待消费的跳转请求（跨文件搜索结果打开定位）：view 就绪后选中并滚动居中，消费一次 */
+  jumpTo?: { line: number; col: number; seq: number };
+  /** 跳转完成回调（消费后清除请求，避免重复跳转） */
+  onJumpDone?: () => void;
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({
@@ -283,6 +287,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   markdownMenu,
   history,
   onFindOpen,
+  jumpTo,
+  onJumpDone,
 }) => {
   /* tags 以 t 导入（@lezer/highlight），翻译函数让位使用别名 tr */
   const tr = useT();
@@ -293,6 +299,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const minimapRafRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const viewReadyRef = useRef<EditorView | null>(null);
+  /* view 创建即置位：跳转 effect 依赖 state 才能在挂载时机触发 */
+  const [viewReady, setViewReady] = useState(false);
   const cleanupFns = useRef<(() => void)[]>([]);
   /* 语言扩展懒加载：语言切换时先清空再异步载入（chunk 已缓存时几乎无感） */
   const [langExtension, setLangExtension] = useState<Extension | null>(null);
@@ -1228,6 +1236,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
   const handleCreateEditor = useCallback((view: EditorView) => {
     viewReadyRef.current = view;
+    setViewReady(true);
     onScrollerRef.current?.(view.scrollDOM);
     cleanupFns.current.forEach(fn => fn());
     cleanupFns.current = [];
@@ -1255,6 +1264,22 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
     onCreateEditor?.(view);
   }, [fixSelectionLayer, setupLineNumberClick, setupStickyScroll, setupMinimap, onCreateEditor, lowPerf, settings.stickyScroll, settings.minimap]);
+
+  /* 跳转请求消费：view 就绪后选中目标位置并居中（挂载时机与已挂载的连续请求共用） */
+  useEffect(() => {
+    if (!viewReady || !jumpTo) return;
+    const view = viewReadyRef.current;
+    if (!view) return;
+    const lineNo = Math.min(Math.max(1, Math.floor(jumpTo.line)), view.state.doc.lines);
+    const line = view.state.doc.line(lineNo);
+    const pos = line.from + Math.min(Math.max(0, Math.floor(jumpTo.col) - 1), line.to - line.from);
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: 'center' }),
+    });
+    view.focus();
+    onJumpDone?.();
+  }, [viewReady, jumpTo, onJumpDone]);
 
   /* 拆掉并按当前断点重建粘性滚动/小地图（主题切换与平板旋转断点共用） */
   const reinstallCodeMapFeatures = useCallback(() => {

@@ -424,6 +424,12 @@ const zh = {
   'tree.invalidName': '名称无效：不能为空，且不能包含 \\ / : * ? " < > | 等字符',
   'tree.copySuffix': '副本',
   'tree.namePlaceholder': '输入名称，回车确认',
+  'tree.searchInFiles': '在文件夹中搜索',
+  'tree.searchPlaceholder': '输入后回车搜索',
+  'tree.searchScanning': '搜索中…',
+  'tree.searchSummary': '{files} 个文件 {total} 处 · 扫描 {scanned} 个文件',
+  'tree.searchCapped': '仅显示前 {max} 处',
+  'tree.searchNoResults': '无匹配',
 } as const;
 
 export type MessageKey = keyof typeof zh;
@@ -846,6 +852,12 @@ const en: Record<MessageKey, string> = {
   'tree.invalidName': 'Invalid name: must not be empty or contain \\ / : * ? " < > |',
   'tree.copySuffix': 'copy',
   'tree.namePlaceholder': 'Type a name, Enter to confirm',
+  'tree.searchInFiles': 'Search in Folder',
+  'tree.searchPlaceholder': 'Type, Enter to search',
+  'tree.searchScanning': 'Searching…',
+  'tree.searchSummary': '{files} files, {total} matches · {scanned} scanned',
+  'tree.searchCapped': 'Showing first {max} matches',
+  'tree.searchNoResults': 'No matches',
 };
 
 const DICTS: Record<Lang, Record<MessageKey, string>> = { zh, en };

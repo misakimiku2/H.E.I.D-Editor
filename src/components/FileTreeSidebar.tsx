@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown, ChevronRight, FileText, Folder, FolderX, FolderOpen,
-  Loader2, PanelLeftClose, RefreshCw,
+  Loader2, PanelLeftClose, RefreshCw, Search, X,
   FilePlus, FolderPlus, FileImage, Scissors, Copy, ClipboardPaste, Pencil, Trash2, Link2, FolderSearch,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -12,6 +12,10 @@ import {
   isImagePath, isSvgPath,
   type DirLister, type TreeNode,
 } from '../lib/fileTree';
+import {
+  groupByFile, hitRangeInSnippet, searchInDir,
+  type DirSearchOptions, type DirSearchResult, type FileHit,
+} from '../lib/dirSearch';
 import { fsMkdir, fsRename, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
 import { writeLocalPath } from '../lib/fileIO';
 import { appAlert } from '../lib/appAlert';
@@ -32,7 +36,8 @@ interface FileTreeSidebarProps {
   isDarkMode: boolean;
   activeTabId: string;
   tabs: SidebarTabInfo[];
-  onOpenFile: (path: string) => void;
+  /** 点击文件打开；jump 携带行列时打开后定位（跨文件搜索结果） */
+  onOpenFile: (path: string, jump?: { line: number; col: number }) => void;
   /** 打开图片文件（走通用图片查看器；缺省时图片仍按文本文件打开） */
   onOpenImage?: (path: string) => void;
   /** 关闭文件夹（清空根目录） */
@@ -138,6 +143,51 @@ export function FileTreeSidebar({
   const [creating, setCreating] = useState<{ parentPath: string; isDir: boolean } | null>(null);
   const [renaming, setRenaming] = useState<{ path: string; name: string; isDir: boolean } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+
+  /* ---- 跨文件搜索态（桌面；结果替代树体展示） ---- */
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState('');
+  const [searchOpts, setSearchOpts] = useState<DirSearchOptions>({ caseSensitive: false, regexp: false, wholeWord: false });
+  const [result, setResult] = useState<DirSearchResult | null>(null);
+  const [searchingBusy, setSearchingBusy] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchSeqRef = useRef(0);
+
+  /* 进入搜索态自动聚焦输入框 */
+  useEffect(() => {
+    if (searching) searchInputRef.current?.focus();
+  }, [searching]);
+
+  /* 根目录变化：搜索结果基于旧根，全部失效 */
+  useEffect(() => {
+    setSearching(false);
+    setQuery('');
+    setResult(null);
+  }, [rootPath]);
+
+  const exitSearch = useCallback(() => {
+    setSearching(false);
+    setQuery('');
+    setResult(null);
+  }, []);
+
+  /** 按需触发：Enter 时一次全量扫描（无索引、无常驻后台） */
+  const runSearch = useCallback(async () => {
+    const q = query.trim();
+    if (!q) { setResult(null); return; }
+    const seq = ++searchSeqRef.current;
+    setSearchingBusy(true);
+    try {
+      const r = await searchInDir(rootPath, q, searchOpts);
+      if (searchSeqRef.current === seq) setResult(r);
+    } catch (e) {
+      if (searchSeqRef.current === seq) {
+        setResult({ matches: [], filesScanned: 0, filesMatched: 0, matchTotal: 0, truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, error: String(e) });
+      }
+    } finally {
+      if (searchSeqRef.current === seq) setSearchingBusy(false);
+    }
+  }, [query, rootPath, searchOpts]);
 
   const dirtyMap = useMemo(() => {
     const m = new Map<string, boolean>();
@@ -392,6 +442,86 @@ export function FileTreeSidebar({
 
   if (!open) return null;
 
+  /* ---- 搜索态渲染 ---- */
+
+  const searchOptBtn = (active: boolean) => cn(
+    'h-6 px-2 rounded-md text-[10px] font-semibold font-mono transition-colors',
+    active
+      ? (isDarkMode ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-300 text-zinc-800')
+      : (isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200'),
+  );
+
+  const renderHitRow = (hit: FileHit) => {
+    const { from, to } = hitRangeInSnippet(hit);
+    return (
+      <button
+        key={`${hit.path}:${hit.line}:${hit.col}`}
+        onClick={() => onOpenFile(hit.path, { line: hit.line, col: hit.col })}
+        title={`${relativePathUnderRoot(hit.path, rootPath)}:${hit.line}:${hit.col}`}
+        className={cn(
+          'heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-6 pl-8 rounded-lg text-[11px] flex items-center gap-1.5 transition-colors text-left',
+          isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-300' : 'hover:bg-zinc-200/70 text-zinc-700',
+        )}
+      >
+        <span className="w-9 shrink-0 text-right opacity-50 tabular-nums">{hit.line}</span>
+        <span className="heid-name-clip truncate flex-1 min-w-0 font-mono">
+          <span className="heid-name-text inline-block whitespace-nowrap">
+            {hit.text.slice(0, from)}
+            <mark className={isDarkMode ? 'bg-amber-500/40 text-amber-200 rounded-sm' : 'bg-amber-300/70 text-amber-900 rounded-sm'}>
+              {hit.text.slice(from, to)}
+            </mark>
+            {hit.text.slice(to)}
+          </span>
+        </span>
+      </button>
+    );
+  };
+
+  const renderSearchBody = () => {
+    if (searchingBusy) {
+      return (
+        <div className="px-3 py-6 text-center text-[11px] opacity-60 flex flex-col items-center gap-2">
+          <Loader2 size={13} className="animate-spin" />
+          {t('tree.searchScanning')}
+        </div>
+      );
+    }
+    if (!result) return null;
+    if (result.error) {
+      return <div className="px-3 py-4 text-[11px] text-red-500 break-all">{result.error}</div>;
+    }
+    if (result.matches.length === 0) {
+      return <div className="px-3 py-6 text-center text-[11px] opacity-50">{t('tree.searchNoResults')}</div>;
+    }
+    return (
+      <>
+        <div className="px-3 pt-1.5 pb-1 text-[10px] opacity-50 shrink-0">
+          {t('tree.searchSummary', { files: result.filesMatched, total: result.matchTotal, scanned: result.filesScanned })}
+          {result.truncated && ` · ${t('tree.searchCapped', { max: result.matches.length })}`}
+        </div>
+        {groupByFile(result.matches).map(g => (
+          <div key={g.path}>
+            <button
+              onClick={() => onOpenFile(g.path)}
+              title={g.path}
+              className={cn(
+                'heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-7 rounded-lg text-xs flex items-center gap-1.5 transition-colors text-left',
+                isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700',
+              )}
+            >
+              <FileText size={13} className="shrink-0 opacity-60" />
+              <span className="heid-name-clip truncate flex-1 min-w-0 font-medium">
+                <span className="heid-name-text inline-block whitespace-nowrap">{relativePathUnderRoot(g.path, rootPath)}</span>
+              </span>
+              <span className="text-[10px] opacity-50 shrink-0">{g.hits.length}</span>
+            </button>
+            {g.hits.map(renderHitRow)}
+          </div>
+        ))}
+      </>
+    );
+  };
+
   const panel = cn(
     'flex flex-col bg-white/95 dark:bg-zinc-800/95',
     isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white',
@@ -410,7 +540,7 @@ export function FileTreeSidebar({
             : 'relative w-64 shrink-0 border-r',
         )}
       >
-        {/* 头部：文件夹名 + 刷新 + 关闭文件夹 + 收起 */}
+        {/* 头部：文件夹名 + 搜索 + 刷新 + 关闭文件夹 + 收起 */}
         <div className={cn(
           'h-10 shrink-0 border-b flex items-center gap-1 pl-3 pr-1.5',
           isDarkMode ? 'border-zinc-700' : 'border-zinc-200',
@@ -419,6 +549,20 @@ export function FileTreeSidebar({
           <span className="truncate flex-1 text-xs font-semibold" title={rootPath}>
             {lister?.displayName(rootPath) ?? rootPath}
           </span>
+          {canManage && (
+            <button
+              onClick={() => (searching ? exitSearch() : setSearching(true))}
+              title={t('tree.searchInFiles')}
+              className={cn(
+                'p-1.5 rounded-md transition-colors',
+                searching
+                  ? (isDarkMode ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-200 text-zinc-800')
+                  : (isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500'),
+              )}
+            >
+              <Search size={13} />
+            </button>
+          )}
           <button
             onClick={handleRefresh}
             title={t('tree.refresh')}
@@ -443,33 +587,93 @@ export function FileTreeSidebar({
             </button>
           )}
         </div>
-        {/* 树体（空白处右键 = 根目录菜单） */}
-        <div className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1" onContextMenu={(e) => openMenu(e, null)}>
-          {tree ? (
-            <>
-              {/* 根目录内新建：命名行置顶（目录内的在对应目录展开区里） */}
-              {creating?.parentPath === rootPath && (
-                <NameRow
-                  depth={0}
-                  isDir={creating.isDir}
-                  isDarkMode={isDarkMode}
-                  placeholder={t('tree.namePlaceholder')}
-                  onCommit={(name) => void commitCreate(name)}
-                  onCancel={() => setCreating(null)}
-                />
-              )}
-              {tree.children !== null && tree.children.length === 0 && !creating ? (
-                <div className="px-3 py-6 text-center text-[11px] opacity-50">{t('tree.empty')}</div>
-              ) : (
-                renderNode(tree, 0)
-              )}
-            </>
-          ) : (
-            <div className="px-3 py-6 text-center">
-              <Loader2 size={13} className="animate-spin mx-auto opacity-50" />
+        {/* 搜索态：输入区 + 结果列表（替代树体） */}
+        {searching && (
+          <div className={cn('shrink-0 border-b px-2 py-1.5 flex flex-col gap-1', isDarkMode ? 'border-zinc-700' : 'border-zinc-200')}>
+            <div className="flex items-center gap-1">
+              <input
+                ref={searchInputRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); void runSearch(); }
+                  else if (e.key === 'Escape') { e.preventDefault(); exitSearch(); }
+                  else e.stopPropagation();
+                }}
+                placeholder={t('tree.searchPlaceholder')}
+                className={cn(
+                  'flex-1 min-w-0 h-7 px-2 rounded-md border text-xs outline-none transition-colors',
+                  isDarkMode
+                    ? 'bg-zinc-900 border-zinc-600 text-zinc-200 focus:border-blue-500 placeholder:text-zinc-600'
+                    : 'bg-white border-zinc-300 text-zinc-800 focus:border-blue-500 placeholder:text-zinc-400',
+                )}
+              />
+              <button
+                onClick={exitSearch}
+                title={t('common.close')}
+                className={cn('p-1.5 rounded-md transition-colors shrink-0', isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
+              >
+                <X size={13} />
+              </button>
             </div>
-          )}
-        </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setSearchOpts(o => ({ ...o, caseSensitive: !o.caseSensitive }))}
+                className={searchOptBtn(searchOpts.caseSensitive)}
+                title={t('find.caseSensitive')}
+              >
+                Aa
+              </button>
+              <button
+                onClick={() => setSearchOpts(o => ({ ...o, wholeWord: !o.wholeWord }))}
+                className={searchOptBtn(searchOpts.wholeWord)}
+                title={t('find.wholeWord')}
+              >
+                ab
+              </button>
+              <button
+                onClick={() => setSearchOpts(o => ({ ...o, regexp: !o.regexp }))}
+                className={searchOptBtn(searchOpts.regexp)}
+                title={t('find.useRegex')}
+              >
+                .*
+              </button>
+            </div>
+          </div>
+        )}
+        {/* 树体（空白处右键 = 根目录菜单）；搜索态时让位给结果列表 */}
+        {searching ? (
+          <div className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1">
+            {renderSearchBody()}
+          </div>
+        ) : (
+          <div className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1" onContextMenu={(e) => openMenu(e, null)}>
+            {tree ? (
+              <>
+                {/* 根目录内新建：命名行置顶（目录内的在对应目录展开区里） */}
+                {creating?.parentPath === rootPath && (
+                  <NameRow
+                    depth={0}
+                    isDir={creating.isDir}
+                    isDarkMode={isDarkMode}
+                    placeholder={t('tree.namePlaceholder')}
+                    onCommit={(name) => void commitCreate(name)}
+                    onCancel={() => setCreating(null)}
+                  />
+                )}
+                {tree.children !== null && tree.children.length === 0 && !creating ? (
+                  <div className="px-3 py-6 text-center text-[11px] opacity-50">{t('tree.empty')}</div>
+                ) : (
+                  renderNode(tree, 0)
+                )}
+              </>
+            ) : (
+              <div className="px-3 py-6 text-center">
+                <Loader2 size={13} className="animate-spin mx-auto opacity-50" />
+              </div>
+            )}
+          </div>
+        )}
       </div>
       {menu && (
         <ContextMenu menu={{ x: menu.x, y: menu.y, items: menu.items }} isDarkMode={isDarkMode} onClose={() => setMenu(null)} />
