@@ -2,6 +2,8 @@ mod encoding;
 mod external;
 mod fsops;
 mod http;
+#[cfg(desktop)]
+mod large_file;
 mod render;
 
 /// 单实例与文件关联的启动路径：首实例从 argv 收集（NSIS「打开方式」/ 拖到快捷方式传入），

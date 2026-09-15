@@ -137,6 +137,45 @@ fn decode_utf16(bytes: &[u8], little: bool) -> String {
     text.into_owned()
 }
 
+/// 大文件探测用的采样检测：只看头部样本判定编码 label / BOM / 二进制，
+/// 阶梯与 detect_and_decode 一致（BOM → NUL → 严格 UTF-8 → GBK 系无损 → 回退 GBK）。
+pub fn detect_label(sample: &[u8]) -> (String, bool, bool) {
+    if sample.is_empty() {
+        return ("utf-8".into(), false, false);
+    }
+    if starts_with(sample, &BOM_UTF8) {
+        return ("utf-8".into(), true, false);
+    }
+    if starts_with(sample, &[0xFF, 0xFE]) {
+        return ("utf-16le".into(), true, false);
+    }
+    if starts_with(sample, &[0xFE, 0xFF]) {
+        return ("utf-16be".into(), true, false);
+    }
+    if sample.contains(&0) {
+        return ("utf-8".into(), false, true);
+    }
+    if std::str::from_utf8(sample).is_ok() {
+        return ("utf-8".into(), false, false);
+    }
+    for (encoding, label) in [
+        (&GBK, "gbk"),
+        (&GB18030, "gb18030"),
+        (&BIG5, "big5"),
+        (&SHIFT_JIS, "shift_jis"),
+    ] {
+        if lossless_decode(encoding, sample).is_some() {
+            return (label.into(), false, false);
+        }
+    }
+    ("gbk".into(), false, false)
+}
+
+/// 编码 label 是否可被 encoding_rs 识别（大文件强制编码前校验）
+pub fn is_known_label(label: &str) -> bool {
+    encoding_rs::Encoding::for_label(label.as_bytes()).is_some()
+}
+
 /// UTF-16 手动编码：Encoding Standard 规定 encode() 对纯 ASCII 输入直接返回 ASCII 字节，
 /// 因此 UTF-16 必须自行展开为 16 位单元（含可选 BOM）
 fn encode_utf16_units(text: &str, little: bool, bom: bool) -> Vec<u8> {
@@ -278,6 +317,40 @@ mod tests {
     #[test]
     fn unknown_label_errors() {
         assert!(encode_text("x", "not-a-encoding", false).is_err());
+    }
+
+    #[test]
+    fn detect_label_bom_variants() {
+        let (label, bom, binary) = detect_label(&[0xEF, 0xBB, 0xBF, b'a']);
+        assert_eq!(label, "utf-8");
+        assert!(bom && !binary);
+        let (label, bom, _) = detect_label(&[0xFF, 0xFE, b'a', 0]);
+        assert_eq!(label, "utf-16le");
+        assert!(bom);
+        let (label, _, _) = detect_label(&[0xFE, 0xFF, 0, b'a']);
+        assert_eq!(label, "utf-16be");
+    }
+
+    #[test]
+    fn detect_label_binary_and_plain_utf8() {
+        assert!(detect_label(&[b'a', 0, b'b']).2);
+        let (label, bom, binary) = detect_label("plain 中文".as_bytes());
+        assert_eq!(label, "utf-8");
+        assert!(!bom && !binary);
+    }
+
+    #[test]
+    fn detect_label_gbk_sample() {
+        let (label, _, binary) = detect_label(&[0xC4, 0xE3, 0xBA, 0xC3]);
+        assert_eq!(label, "gbk");
+        assert!(!binary);
+    }
+
+    #[test]
+    fn known_label_check() {
+        assert!(is_known_label("gbk"));
+        assert!(is_known_label("utf-8"));
+        assert!(!is_known_label("nope-enc"));
     }
 }
 
