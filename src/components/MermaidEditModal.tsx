@@ -3,6 +3,7 @@ import { X, Check, RotateCcw, AlertTriangle, Maximize2, Minimize2 } from 'lucide
 import { cn } from '../lib/utils';
 import { renderMermaidSvg } from '../lib/mermaid';
 import { useT, type MessageKey } from '../lib/i18nContext';
+import { useDragScroll } from '../hooks/useDragScroll';
 import { ConfirmDialog } from './ConfirmDialog';
 import {
   DIAGRAM_KINDS,
@@ -40,6 +41,11 @@ interface MermaidEditModalProps {
 
 const PREVIEW_DEBOUNCE = 220;
 
+/* 左右两栏宽度：左栏可拖动分隔条调整，默认给预览留出更多空间 */
+const FORM_DEFAULT = 420;
+const FORM_MIN = 400;
+const PREVIEW_MIN = 320;
+
 /** 图型显示名（含可视化编辑器不支持的图型，用于降级提示） */
 const KIND_LABEL_KEYS: Record<string, MessageKey> = {
   flowchart: 'md.mmtype.flowchart',
@@ -72,6 +78,44 @@ export function MermaidEditModal({ initialCode, isDarkMode, onClose, onSave }: M
   const seqRef = useRef(0);
   const modalRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
+  /* 预览区支持按住鼠标拖动平移（原始尺寸下横向、适应宽度下纵向） */
+  const { dragging, handlers: dragHandlers } = useDragScroll<HTMLDivElement>();
+
+  /* ---- 左栏宽度可拖动调整 ---- */
+  const [formWidth, setFormWidth] = useState(FORM_DEFAULT);
+  const [resizing, setResizing] = useState(false);
+  const resizeRef = useRef<{ left: number; width: number } | null>(null);
+
+  const onDividerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const rect = modalRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    resizeRef.current = { left: rect.left, width: rect.width };
+    setResizing(true);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* 指针已失效则忽略 */
+    }
+  };
+
+  const onDividerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = resizeRef.current;
+    if (!st) return;
+    const max = Math.max(FORM_MIN, st.width - PREVIEW_MIN);
+    setFormWidth(Math.min(Math.max(e.clientX - st.left, FORM_MIN), max));
+  };
+
+  const onDividerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!resizeRef.current) return;
+    resizeRef.current = null;
+    setResizing(false);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* 未捕获则忽略 */
+    }
+  };
 
   const code = useMemo(() => (model ? generateMermaid(model, extras) : initialCode), [model, extras, initialCode]);
   /* 与打开时等价的源码（用于判断「有没有真的改过」，没改就直接关闭、不重写文档） */
@@ -168,7 +212,7 @@ export function MermaidEditModal({ initialCode, isDarkMode, onClose, onSave }: M
       <div
         ref={modalRef}
         className={cn(
-          'relative flex flex-col w-full max-w-[1040px] h-[84vh] rounded-xl border shadow-2xl overflow-hidden',
+          'relative flex flex-col w-full max-w-[1180px] h-[84vh] rounded-xl border shadow-2xl overflow-hidden',
           isDarkMode ? 'border-zinc-700/70' : 'border-zinc-200/80',
         )}
         style={isDarkMode ? { background: '#262626' } : { background: '#ffffff' }}
@@ -224,9 +268,12 @@ export function MermaidEditModal({ initialCode, isDarkMode, onClose, onSave }: M
           </button>
         </div>
 
-        {/* 主体：表单 | 预览 */}
-        <div className="flex-1 flex min-h-0">
-          <div className="w-1/2 flex flex-col min-w-0 border-r" style={{ borderColor: isDarkMode ? '#3f3f46' : '#e4e4e7' }}>
+        {/* 主体：表单 | 分隔条 | 预览（分隔条可拖动调整左右宽度） */}
+        <div className={cn('flex-1 flex min-h-0', resizing && 'select-none')}>
+          <div
+            className="flex flex-col min-w-0 shrink-0"
+            style={{ width: formWidth, minWidth: FORM_MIN, maxWidth: `calc(100% - ${PREVIEW_MIN}px)` }}
+          >
             {model ? (
               <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
                 {model.kind === 'flowchart' && <FlowchartForm model={model} onChange={setModel} isDark={isDarkMode} />}
@@ -269,8 +316,31 @@ export function MermaidEditModal({ initialCode, isDarkMode, onClose, onSave }: M
             )}
           </div>
 
-          {/* 预览侧：SVG 按 mermaid 算出的原始宽度展示（宽图横向滚动），避免被半栏压扁 */}
-          <div className="heid-scroll w-1/2 min-w-0 overflow-auto p-4">
+          {/* 分隔条：左右拖动调整表单宽度（最窄 400px，预览保底 320px），双击复位 */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            onPointerDown={onDividerDown}
+            onPointerMove={onDividerMove}
+            onPointerUp={onDividerUp}
+            onPointerCancel={onDividerUp}
+            onDoubleClick={() => setFormWidth(FORM_DEFAULT)}
+            title={t('md.mm.resizeHint')}
+            className={cn(
+              'w-1.5 shrink-0 cursor-col-resize touch-none transition-colors',
+              resizing ? 'bg-[#96A5EB]' : isDarkMode ? 'bg-zinc-700/60 hover:bg-zinc-600' : 'bg-zinc-200 hover:bg-zinc-300',
+            )}
+          />
+
+          {/* 预览侧：SVG 按 mermaid 算出的原始宽度展示（宽图横向滚动），避免被半栏压扁；
+              按住鼠标可直接拖动平移（适应宽度下高度超出时可上下拖） */}
+          <div
+            className={cn(
+              'heid-scroll flex-1 min-w-0 overflow-auto p-4',
+              svg !== null && (dragging ? 'cursor-grabbing select-none' : 'cursor-grab'),
+            )}
+            {...dragHandlers}
+          >
             {err ? (
               <div
                 className={cn('w-full rounded-md px-3 py-2 text-xs', isDarkMode ? 'bg-red-900/30 text-red-300' : 'bg-red-50 text-red-600')}

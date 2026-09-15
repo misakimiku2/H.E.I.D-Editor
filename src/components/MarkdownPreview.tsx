@@ -18,6 +18,7 @@ import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { MermaidEditModal } from './MermaidEditModal';
 import { PreviewFindBar } from './PreviewFindBar';
 import type { PointerPos } from '../hooks/useLastPointer';
+import { useDragScroll } from '../hooks/useDragScroll';
 import { useT } from '../lib/i18nContext';
 import { parseLangBlocks } from '../lib/markdownLangs';
 import { applyImageTab, applySelectionTab } from '../lib/markdownTabs';
@@ -137,9 +138,6 @@ MarkdownImage.displayName = 'MarkdownImage';
    悬停显示「编辑」入口，打开图表编辑器（见 MermaidEditModal）。
    宽图（甘特图/XY 图）按原始尺寸展示并支持按住鼠标拖动平移，右上角可切换「适应宽度」。 */
 
-/** 拖动平移的启动阈值（px）：小于它仍按点击/双击处理 */
-const DRAG_THRESHOLD = 4;
-
 const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, canEdit, onEdit, onMenu }: {
   code: string;
   isDarkMode: boolean;
@@ -218,41 +216,9 @@ const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, 
     return () => ro.disconnect();
   }, [svg]);
 
-  /* 宽图（原始尺寸）支持按住鼠标左右拖动平移；拖动超过阈值才算平移，
-     这样单击、双击（进编辑器）和右键菜单都不受影响。触屏交给原生手势。 */
-  const dragRef = useRef<{ x: number; left: number; moved: boolean; id: number } | null>(null);
-  const [dragging, setDragging] = useState(false);
+  /* 宽图（原始尺寸）支持按住鼠标拖动平移（单击/双击/右键不受影响，阈值见 useDragScroll） */
+  const { dragging, handlers: dragHandlers } = useDragScroll<HTMLDivElement>();
   const canDrag = overflowing && !fitWidth;
-
-  const onDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'touch' || e.button !== 0) return;
-    const el = e.currentTarget;
-    if (el.scrollWidth <= el.clientWidth + 1) return;
-    dragRef.current = { x: e.clientX, left: el.scrollLeft, moved: false, id: e.pointerId };
-  };
-
-  const onDragMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const st = dragRef.current;
-    if (!st || st.id !== e.pointerId) return;
-    const el = e.currentTarget;
-    const dx = e.clientX - st.x;
-    if (!st.moved) {
-      if (Math.abs(dx) < DRAG_THRESHOLD) return;
-      st.moved = true;
-      setDragging(true);
-      try { el.setPointerCapture(e.pointerId); } catch { /* 指针已失效，忽略 */ }
-    }
-    el.scrollLeft = st.left - dx;
-  };
-
-  const onDragEnd = (e: React.PointerEvent<HTMLDivElement>) => {
-    const st = dragRef.current;
-    if (!st) return;
-    dragRef.current = null;
-    if (!st.moved) return;
-    setDragging(false);
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* 未捕获则忽略 */ }
-  };
 
   if (err) {
     return (
@@ -284,10 +250,7 @@ const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, 
           canDrag && (dragging ? 'cursor-grabbing select-none' : 'cursor-grab'),
         )}
         style={{ background: isDarkMode ? 'rgba(39,39,42,0.4)' : 'rgba(244,244,245,0.5)' }}
-        onPointerDown={onDragStart}
-        onPointerMove={onDragMove}
-        onPointerUp={onDragEnd}
-        onPointerCancel={onDragEnd}
+        {...dragHandlers}
       >
         {svg === null ? (
           <div style={{ padding: '1rem', fontSize: '12px', color: isDarkMode ? '#a1a1aa' : '#71717a' }}>{t('md.mermaidLoading')}</div>
