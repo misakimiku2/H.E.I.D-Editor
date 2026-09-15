@@ -41,3 +41,14 @@ export function displayNameFromPath(path: string): string {
   }
   return path.split(/[\\/]/).pop() || path;
 }
+
+/**
+ * 本地路径的所在目录（去掉末段文件名）；content:// 与无分隔符路径返回空串。
+ * Windows 盘符根（C:\a.md → C:）与 Unix 根（/a.md → /）保留。
+ */
+export function dirNameOf(path: string): string {
+  if (path.startsWith('content://')) return '';
+  const idx = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+  if (idx < 0) return '';
+  return path.slice(0, idx);
+}

@@ -16,6 +16,8 @@ import { LargeFileViewer } from './components/LargeFileViewer';
 import { detectDelimiter, delimiterLabel, CSV_GRID_MAX_CHARS, CSV_GRID_MAX_ROWS, type CsvDelimiter } from './lib/csv';
 import { kindFromPath, formatStructured, indentFromSettings, TREE_MAX_CHARS, type StructKind } from './lib/jsonTree';
 import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
+import { MarkdownOutline } from './components/MarkdownOutline';
+import { extractHeadings, type MdHeading } from './lib/markdownOutline';
 import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -26,9 +28,12 @@ import { ImageViewer } from './components/ImageViewer';
 import { SvgWorkbench } from './components/SvgWorkbench';
 import { resolveImageSrc, ImageForbiddenError } from './lib/imageSrc';
 import { appAlert, registerAppAlert } from './lib/appAlert';
+import { showNotification } from './lib/notifications';
+import { savePastedImage, blobToDataUrl, DATA_URI_MAX_BYTES } from './lib/markdownImagePaste';
+import { localizeRemoteImages, type LocalizeIo } from './lib/imageLocalize';
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
-import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath } from './lib/platform';
+import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
 import { LANGUAGE_LABELS, detectLanguageFromPath } from './lib/codemirror';
 import {
   EOL_LABELS, applyLineEnding, type LineEnding,
@@ -604,6 +609,50 @@ export default function App() {
     }
   }, [editor.activeTab, isDarkMode, t]);
 
+  /* ---- 图片本地化：下载 markdown 里的远程图源到 assets/ 并替换为相对路径（桌面） ---- */
+  const canLocalizeImages = isTauri && !IS_ANDROID_APP;
+  const handleLocalizeImages = useCallback(async () => {
+    const tab = editor.activeTab;
+    if (!tab || tab.language !== 'markdown' || tab.binary) return;
+    if (!tab.path) {
+      showNotification({ kind: 'info', title: t('md.localizeTitle'), message: t('md.localizeNeedSave'), timeoutMs: 4000 });
+      return;
+    }
+    const dir = dirNameOf(tab.path);
+    const io: LocalizeIo = {
+      download: async (url) => {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const r = await invoke<{ base64: string; content_type: string }>('http_get_binary', { url });
+        return { base64: r.base64, contentType: r.content_type };
+      },
+      save: async (rel, bytes) => {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const { writeFile } = await import('@tauri-apps/plugin-fs');
+        await invoke('fs_mkdir', { path: `${dir}/assets` });
+        await writeFile(`${dir}/${rel}`, bytes);
+      },
+    };
+    try {
+      const res = await localizeRemoteImages(tab.content, io);
+      if (res.ok.length === 0 && res.failed.length === 0) {
+        showNotification({ kind: 'info', title: t('md.localizeTitle'), message: t('md.localizeNoRemote'), timeoutMs: 4000 });
+        return;
+      }
+      if (res.md !== tab.content) editor.updateTabContent(tab.id, res.md, { major: true });
+      const message = res.failed.length > 0
+        ? t('md.localizeDone', { n: res.ok.length, m: res.failed.length })
+        : t('md.localizeAllDone', { n: res.ok.length });
+      showNotification({
+        kind: res.failed.length ? 'info' : 'success',
+        title: t('md.localizeTitle'),
+        message,
+        timeoutMs: 6000,
+      });
+    } catch (e: any) {
+      showNotification({ kind: 'error', title: t('md.localizeTitle'), message: t('md.localizeErr', { msg: e?.message ?? String(e) }) });
+    }
+  }, [editor, t]);
+
   /* ---- 状态栏弹出菜单（编码 / 换行符）---- */
   type StatusMenu = null | 'encoding-root' | 'encoding-reopen' | 'encoding-save' | 'eol';
   const [statusMenu, setStatusMenu] = useState<StatusMenu>(null);
@@ -728,6 +777,24 @@ export default function App() {
   }, [activeTab, isMarkdown, editor.tabs, lastMdTabId]);
   /* 预览当前是否处于可见形态（分屏 / 纯预览） */
   const previewVisible = isMarkdown && (effectiveView === 'split' || effectiveView === 'preview');
+
+  /* ---- Markdown 大纲侧栏：标题提取 + 点击分流（预览滚动 / 编辑器跳转） ---- */
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const mdOutline = useMemo(
+    () => (isMarkdown && activeTab ? extractHeadings(activeTab.content) : []),
+    [isMarkdown, activeTab?.content, activeTab],
+  );
+  const outlineJumpSeqRef = useRef(0);
+  const handleOutlineJump = useCallback((h: MdHeading) => {
+    if (previewVisible) previewRef.current?.scrollToOffset(h.offset);
+    if (editorVisible) {
+      outlineJumpSeqRef.current += 1;
+      editor.setTabs(prev => prev.map(t => t.id === editor.activeTabIdRef.current
+        ? { ...t, jumpRequest: { line: h.line + 1, col: 1, seq: outlineJumpSeqRef.current } }
+        : t));
+    }
+  }, [previewVisible, editorVisible, editor]);
+
   /* SVG 标签：源码 + 实时可视化预览工作台（svg 是可编辑的代码，不走图片查看器） */
   const isSvgTab = !!activeTab && !activeTab.readOnly && isSvgPath(activeTab.path ?? activeTab.title);
 
@@ -739,6 +806,7 @@ export default function App() {
         docKey={mdAliveTab.id}
         content={mdAliveTab.content}
         isDarkMode={isDarkMode}
+        baseDir={mdAliveTab.path ? dirNameOf(mdAliveTab.path) : undefined}
         onChange={mdAliveTab.readOnly ? undefined : (v) => editor.updateTabContent(mdAliveTab.id, v, { major: true })}
         canUndo={editor.canUndo}
         canRedo={editor.canRedo}
@@ -784,6 +852,37 @@ export default function App() {
     );
   };
 
+  /* ---- Markdown 粘贴图片落盘（桌面）/ data URI 回退（浏览器）；安卓不启用 ---- */
+  const handleMarkdownImagePaste = useCallback(async (file: File): Promise<string | null> => {
+    const tab = editor.activeTab;
+    if (!tab) return null;
+    if (isTauri) {
+      if (IS_ANDROID_APP) return null; // SAF 无二进制写桥，不拦截
+      if (!tab.path) {
+        showNotification({ kind: 'info', title: t('md.pasteTitle'), message: t('md.pasteNeedSave'), timeoutMs: 4000 });
+        return null;
+      }
+      try {
+        const rel = await savePastedImage(file, file.type || 'image/png', dirNameOf(tab.path));
+        showNotification({ kind: 'success', title: t('md.pasteTitle'), message: t('md.pasteSaved', { name: rel }), timeoutMs: 4000 });
+        return rel;
+      } catch (e: any) {
+        showNotification({ kind: 'error', title: t('md.pasteTitle'), message: t('md.pasteFailed', { msg: e?.message ?? String(e) }) });
+        return null;
+      }
+    }
+    /* 浏览器模式：无盘可落，转 data URI 插入（≤2MB） */
+    if (file.size > DATA_URI_MAX_BYTES) {
+      showNotification({ kind: 'info', title: t('md.pasteTitle'), message: t('md.pasteTooLarge'), timeoutMs: 4000 });
+      return null;
+    }
+    try {
+      return await blobToDataUrl(file);
+    } catch {
+      return null;
+    }
+  }, [editor.activeTab, t]);
+
   const renderEditor = () => {
     if (!activeTab) return null;
     return (
@@ -809,6 +908,7 @@ export default function App() {
         markdownMenu={isMarkdown && !activeTab.readOnly
           ? { canUndo: editor.canUndo, canRedo: editor.canRedo, onUndo: editor.handleUndo, onRedo: editor.handleRedo }
           : undefined}
+        onImagePaste={isMarkdown && !activeTab.readOnly && !IS_ANDROID_APP ? handleMarkdownImagePaste : undefined}
       />
     );
   };
@@ -993,8 +1093,23 @@ export default function App() {
           )}
         </button>
 
-        {/* Markdown 视图三档切换：编辑 | 分屏 | 预览（仅 markdown 文件显示） */}
+        {/* Markdown 视图三档切换：编辑 | 分屏 | 预览（仅 markdown 文件显示）；附大纲侧栏开关 */}
         {isMarkdown && activeTab && (
+          <>
+          {!isPhone && (
+            <button
+              onClick={() => setOutlineOpen(o => !o)}
+              className={cn(
+                "p-1.5 rounded-md transition-colors shrink-0 mr-1",
+                outlineOpen
+                  ? (isDarkMode ? "bg-zinc-600/80 text-zinc-100" : "bg-zinc-200 text-zinc-700")
+                  : (isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600")
+              )}
+              title={t('md.outline')}
+            >
+              <ListTree size={15} />
+            </button>
+          )}
           <div
             role="group"
             aria-label={t('view.mdViewAria')}
@@ -1026,6 +1141,7 @@ export default function App() {
               );
             })}
           </div>
+          </>
         )}
 
         {/* CSV 视图两档切换：网格 | 文本（仅 csv 文件显示） */}
@@ -1279,6 +1395,20 @@ export default function App() {
               <FileDown size={14} />
               {t('export.htmlMenu')}
             </button>
+            {canLocalizeImages && (
+              <button
+                onClick={() => { setMenuOpen(false); void handleLocalizeImages(); }}
+                disabled={!isMarkdown || !activeTab?.path || !!activeTab?.binary}
+                className={cn(
+                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                )}
+                title={t('md.localizeMenu')}
+              >
+                <ImageDown size={14} />
+                {t('md.localize')}
+              </button>
+            )}
             {isTauri && (
               <button
                 onClick={() => { setMenuOpen(false); setUrlImportOpen(true); }}
@@ -1397,11 +1527,23 @@ export default function App() {
                 </button>
               </div>
             )}
-            {/* 行容器恒定：预览槽位永远是第一个子元素（跨视图/跨标签保活不重挂） */}
+            {/* 行容器恒定：预览槽位恒挂 key（跨视图/跨标签保活不重挂；大纲列按键控增删不影响它） */}
             <div className="flex flex-1 overflow-hidden">
+              {/* Markdown 大纲侧栏：markdown 且开启时显示在预览/编辑器左侧（手机无此面板） */}
+              {isMarkdown && !isPhone && outlineOpen && (
+                <div
+                  key="md-outline-col"
+                  className={cn(
+                    'w-52 shrink-0 border-r overflow-hidden',
+                    isDarkMode ? 'border-zinc-700 bg-zinc-900/40' : 'border-zinc-200 bg-zinc-50',
+                  )}
+                >
+                  <MarkdownOutline headings={mdOutline} isDarkMode={isDarkMode} onJump={handleOutlineJump} />
+                </div>
+              )}
               {/* 预览保活槽位：不可见时仅 display:none，不卸载 */}
               {mdAliveTab && (
-                <div className={cn("min-w-0 overflow-hidden", previewVisible ? "flex-1" : "hidden")}>
+                <div key="md-preview-slot" className={cn("min-w-0 overflow-hidden", previewVisible ? "flex-1" : "hidden")}>
                   {renderMdPreview()}
                 </div>
               )}

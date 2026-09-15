@@ -20,6 +20,7 @@ import { FindReplaceBar } from './FindReplaceBar';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { findHighlightExtension } from '../lib/editorSearch';
 import { readClipboardText, writeClipboardText, clipboardReadPermissionState, isTauriRuntime } from '../lib/fileOps';
+import { imageFileFromClipboard } from '../lib/markdownImagePaste';
 import { loadLanguageExtension } from '../lib/codemirror';
 import { parseColorLiteral, serializeColorLiteral } from '../lib/colorLiteral';
 import type { Rgba } from '../lib/colorMath';
@@ -317,6 +318,8 @@ export interface CodeEditorProps {
   jumpTo?: { line: number; col: number; seq: number };
   /** 跳转完成回调（消费后清除请求，避免重复跳转） */
   onJumpDone?: () => void;
+  /** 提供（markdown 标签页）时拦截粘贴图片：返回插入文本（相对路径 / data URI），null 放弃 */
+  onImagePaste?: (file: File) => Promise<string | null>;
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({
@@ -339,6 +342,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onFindOpen,
   jumpTo,
   onJumpDone,
+  onImagePaste,
 }) => {
   /* tags 以 t 导入（@lezer/highlight），翻译函数让位使用别名 tr */
   const tr = useT();
@@ -391,6 +395,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onScrollerRef.current = onScroller;
   const onCursorRef = useRef(onCursor);
   onCursorRef.current = onCursor;
+  const onImagePasteRef = useRef(onImagePaste);
+  onImagePasteRef.current = onImagePaste;
   /* 查找浮层状态镜像进 ref：编辑器 keymap 的 Escape 需要同步读到最新值 */
   const findOpenRef = useRef(!!find?.open);
   findOpenRef.current = !!find?.open;
@@ -1553,6 +1559,29 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         if (viewUpdateSubsRef.current.size === 0) return;
         for (const fn of Array.from(viewUpdateSubsRef.current)) fn(u);
       }),
+      /* 粘贴图片拦截（markdown）：剪贴板含 image/* 时交给 App 落盘，返回路径后在光标处插入 */
+      ...(onImagePasteRef.current ? [EditorView.domEventHandlers({
+        paste: (event, view) => {
+          const file = imageFileFromClipboard(event.clipboardData?.items);
+          if (!file) return false;
+          event.preventDefault();
+          void onImagePasteRef.current?.(file).then(insert => {
+            if (!insert) return;
+            const pos = view.state.selection.main.head;
+            /* 含空白/括号的地址用尖括号包裹，避免 markdown 链接语法截断 */
+            const text = /[()\s]/.test(insert) ? `![](<${insert}>)` : `![](${insert})`;
+            try {
+              view.dispatch({
+                changes: { from: pos, insert: text },
+                selection: { anchor: pos + text.length },
+              });
+            } catch {
+              /* 落盘期间编辑器已销毁（切标签页）：放弃插入 */
+            }
+          });
+          return true;
+        },
+      })] : []),
     ];
     if (wrapEnabled) {
       exts.push(EditorView.lineWrapping);

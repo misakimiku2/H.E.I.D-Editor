@@ -16,9 +16,25 @@ const MIME_MAP: Record<string, string> = {
 /** plugin-fs 明确拒绝（权限不足），与普通读取失败区分提示 */
 export class ImageForbiddenError extends Error {}
 
+/** 图片 URL 协议前缀（这些不参与本地路径拼接） */
+const REMOTE_RE = /^(https?:|data:|blob:|content:)/;
+/** Windows 盘符 / UNC / Unix 绝对路径 */
+const ABSOLUTE_PATH_RE = /^([a-zA-Z]:[\\/]|\\\\|\/)/;
+
+/**
+ * Markdown 相对图片地址（`assets/x.png`）与文档目录拼接为可读的绝对路径。
+ * 协议地址与绝对路径原样返回；无 baseDir（未保存文档）返回原值（后续按现状报错）。
+ * 拼接统一 '/'，读取端（plugin-fs / convertFileSrc）两者均可接受。
+ */
+export function joinRelativeSrc(src: string, baseDir?: string): string {
+  if (!src || REMOTE_RE.test(src) || ABSOLUTE_PATH_RE.test(src)) return src;
+  if (!baseDir) return src;
+  const dir = baseDir.replace(/[\\/]+$/, '');
+  return dir ? `${dir}/${src}` : src;
+}
+
 /** 解析为可直接给 <img> 使用的 URL；失败抛错（权限不足抛 ImageForbiddenError） */
-export async function resolveImageSrc(src: string): Promise<string> {
-  if (!src || /^(https?:|data:|blob:|content:)/.test(src)) return src;
+export async function resolveImageSrc(src: string): Promise<string> {  if (!src || /^(https?:|data:|blob:|content:)/.test(src)) return src;
   const cached = imageCache.get(src);
   if (cached) return cached;
   const { readFile } = await import('@tauri-apps/plugin-fs');

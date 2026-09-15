@@ -482,6 +482,8 @@ const zh = {
   'json.copied': '已复制',
 
   'md.outline': '大纲',
+  'md.pasteTitle': '粘贴图片',
+  'md.localizeTitle': '图片本地化',
   'md.outlineAria': 'Markdown 大纲',
   'md.outlineEmpty': '无标题',
   'md.pasteNeedSave': '粘贴图片需要先保存文件（用于确定图片保存位置）',
@@ -1087,6 +1089,8 @@ const en: Record<MessageKey, string> = {
   'json.copied': 'Copied',
 
   'md.outline': 'Outline',
+  'md.pasteTitle': 'Paste image',
+  'md.localizeTitle': 'Localize images',
   'md.outlineAria': 'Markdown outline',
   'md.outlineEmpty': 'No headings',
   'md.pasteNeedSave': 'Save the file first to paste images (needed to locate the image folder)',

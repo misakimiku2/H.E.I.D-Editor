@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, createContext, useContext } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { ImageViewer } from './ImageViewer';
-import { resolveImageSrc, ImageForbiddenError } from '../lib/imageSrc';
+import { resolveImageSrc, joinRelativeSrc, ImageForbiddenError } from '../lib/imageSrc';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import remarkEmoji from 'remark-emoji';
@@ -63,9 +63,11 @@ const MarkdownImage = React.memo<{
   /** 图片语法在源码中的偏移（删除/剪切用）；页签文档下已是全文坐标 */
   srcStart?: number;
   srcEnd?: number;
+  /** 文档所在目录：相对图片地址以此为基准拼绝对路径读取 */
+  baseDir?: string;
   onOpen?: (src: string, alt: string) => void;
   onMenu?: (e: React.MouseEvent, info: { resolvedSrc: string; alt: string; srcStart?: number; srcEnd?: number }) => void;
-}>(({ src, alt, isDarkMode, srcStart, srcEnd, onOpen, onMenu }) => {
+}>(({ src, alt, isDarkMode, srcStart, srcEnd, baseDir, onOpen, onMenu }) => {
   const t = useT();
   const [imgSrc, setImgSrc] = useState<string>('');
   const [loadError, setLoadError] = useState<string>('');
@@ -85,7 +87,7 @@ const MarkdownImage = React.memo<{
       }
     }
 
-    const target = filePath || (src && !src.startsWith('https://local-image.placeholder') ? src : '');
+    const target = filePath || (src && !src.startsWith('https://local-image.placeholder') ? joinRelativeSrc(src, baseDir) : '');
     if (!target) return;
     (async () => {
       try {
@@ -97,7 +99,7 @@ const MarkdownImage = React.memo<{
       }
     })();
     return () => { cancelled = true; };
-  }, [src, alt, t]);
+  }, [src, alt, baseDir, t]);
 
   if (!imgSrc && !loadError) return null;
 
@@ -659,6 +661,8 @@ interface MarkdownPreviewProps {
   /** 文档标识（标签页 id）：变化表示打开了另一篇文档，预览立即重渲染（跳过防抖） */
   docKey?: string;
   isDarkMode: boolean;
+  /** 文档所在目录（相对图片地址的读取基准） */
+  baseDir?: string;
   /** 提供后（非只读标签页）才允许选区右键格式化与插入菜单 */
   onChange?: (next: string) => void;
   /** 撤销/重做控制，透传给右键菜单 */
@@ -706,14 +710,16 @@ interface CellEdit {
 
 const BORDER_TOLERANCE = 5;
 
-/** 移动端顶栏触发的插入动作（插入点 = 文末） */
+/** 移动端顶栏触发的插入动作（插入点 = 文末）；大纲点击滚动到源码偏移处 */
 export interface MarkdownPreviewHandle {
   insertTable: () => void;
   openImageModal: () => void;
+  /** 大纲导航：滚到 ≥offset 的首个块元素（标题按 [data-md-start] 定位） */
+  scrollToOffset: (offset: number) => void;
 }
 
 export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle, MarkdownPreviewProps>(({
-  content, docKey, isDarkMode, onChange, canUndo, canRedo, onUndo, onRedo, onScroller,
+  content, docKey, isDarkMode, baseDir, onChange, canUndo, canRedo, onUndo, onRedo, onScroller,
   findOpen, onFindClose, getPointer,
 }, ref) => {
   const t = useT();
@@ -728,6 +734,16 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   React.useImperativeHandle(ref, () => ({
     insertTable: () => { if (onChange) onChange(insertBlockAt(content, content.length, BLANK_TABLE)); },
     openImageModal: () => { setImageModal(buildSourceSnippet(content, content.length)); },
+    /* 大纲导航：块元素按 data-md-start 全文坐标定位，取 ≥offset 的最近一块滚过去 */
+    scrollToOffset: (offset: number) => {
+      const root = contentRef.current;
+      if (!root) return;
+      const blocks = Array.from(root.querySelectorAll<HTMLElement>('[data-md-start]'));
+      const target = blocks.find(el => Number(el.dataset.mdStart) >= offset)
+        ?? blocks[blocks.length - 1];
+      if (target) root.scrollTo({ top: Math.max(0, target.offsetTop - 12), behavior: 'smooth' });
+      else root.scrollTo({ top: 0 });
+    },
   }), [content, onChange]);
 
   /* 剥离语法高亮主题的背景色，交给外层容器控制 */
@@ -863,7 +879,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       const sd = srcData(node);
       return (
         <MarkdownImage
-          src={src || ''} alt={alt || ''} isDarkMode={isDarkMode}
+          src={src || ''} alt={alt || ''} isDarkMode={isDarkMode} baseDir={baseDir}
           srcStart={sd['data-md-start'] ? Number(sd['data-md-start']) : undefined}
           srcEnd={sd['data-md-end'] ? Number(sd['data-md-end']) : undefined}
           onOpen={(s, a) => setViewer({ src: s, alt: a })}
@@ -892,7 +908,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     td: block('td'),
     th: block('th'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [isDarkMode, cleanTheme, codeComponent]);
+  }), [isDarkMode, baseDir, cleanTheme, codeComponent]);
 
   const proseClassName = useMemo(() => {
     return cn(

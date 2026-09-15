@@ -22,7 +22,28 @@ describe('renderMarkdownToHtml', () => {
     const html = await renderMarkdownToHtml('```js\nconst x = 1;\n```', { title: 'T', dark: false });
     expect(html).toContain('<pre>');
     expect(html).toContain('<code');
-    expect(html).toContain('const x = 1;');
+    /* 着色后内容被 span 拆分，按片段断言 */
+    expect(html).toContain('language-js');
+    expect(html).toContain('const');
+  });
+
+  it('带语言标注的代码块输出语法着色（内联 style 的 token span）', async () => {
+    const html = await renderMarkdownToHtml('```ts\nconst x: number = 1;\n```', { title: 'T', dark: false });
+    expect(html).toContain('class="code-block"');
+    /* ghcolors 主题的 token 色以内联 style 出现 */
+    expect(html).toMatch(/class="token" style="color:#/);
+  });
+
+  it('无语言代码块不着色（普通 pre，不做行内误判）', async () => {
+    const html = await renderMarkdownToHtml('```\nplain code\n```', { title: 'T', dark: false });
+    expect(html).toContain('plain code');
+    expect(html).not.toContain('class="code-block"');
+  });
+
+  it('行内代码维持 <code> 不走代码块样式', async () => {
+    const html = await renderMarkdownToHtml('文字 `inline()` 结尾', { title: 'T', dark: false });
+    expect(html).toContain('<code>inline()</code>');
+    expect(html).not.toContain('class="code-block"');
   });
 
   it('title 中的 HTML 字符被转义', async () => {
