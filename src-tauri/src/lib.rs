@@ -5,6 +5,8 @@ mod http;
 #[cfg(desktop)]
 mod large_file;
 mod render;
+#[cfg(desktop)]
+mod search;
 
 /// 单实例与文件关联的启动路径：首实例从 argv 收集（NSIS「打开方式」/ 拖到快捷方式传入），
 /// 二次启动经 single-instance 回调转发给已运行实例（聚焦窗口 + heid-open-paths 事件）。
@@ -167,7 +169,9 @@ pub fn run() {
             #[cfg(desktop)]
             large_file::read_byte_window,
             #[cfg(desktop)]
-            large_file::file_size
+            large_file::file_size,
+            #[cfg(desktop)]
+            search::search_in_dir
         ])
         .setup(|app| {
             #[cfg(desktop)]

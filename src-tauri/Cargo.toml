@@ -23,10 +23,12 @@ encoding_rs = "0.8"
 ureq = "2"
 
 # 桌面专属插件：单实例聚焦 / 自动更新（安卓按侧载场景走前端版本检查，不引入原生更新器）
+# regex 仅供桌面跨文件搜索（安卓 SAF 无递归枚举能力，不编译进 APK）
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+regex = "1"
 
 [profile.release]
 codegen-units = 1
