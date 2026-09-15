@@ -104,15 +104,15 @@ CSV 网格编辑器、SVG 工作台、图片查看器、文件树侧栏、外部
 20. ✅ **SVG 可视化工作台**（`SvgWorkbench.tsx`）：左侧源码 + 右侧 blob 隔离预览（脚本不执行），滚轮缩放、拖拽平移、适应面板 / 原始尺寸
 21. ✅ **内置图片查看器**（`ImageViewer.tsx`）：智能初始尺寸（大图适应、小图原始）、光标锚点缩放、1:1 切换、底部信息栏
 22. ✅ **README 与截图重写**：功能亮点分区 + 6 张界面截图（`docs/screenshots/`）
-23. ⏳ **Mermaid 图与编辑弹窗**（`src/lib/mermaid.ts` + `MermaidEditModal.tsx`）：代码已完成，尚未入库
+23. ✅ **Mermaid 图与编辑弹窗**（`src/lib/mermaid.ts` + `MermaidEditModal.tsx`）：预览渲染、编辑弹窗与格式化工具
 
 ---
 
-## v1.1.x —— 维护批次（可立即执行）
+## v1.1.x —— 维护批次 ✅ 已完成（2026-09）
 
-24. **版本号常量同步**：`src/lib/update.ts` 的 `FALLBACK_APP_VERSION` 仍为 `1.0.0`，落后于 `package.json` / `tauri.conf.json` / `Cargo.toml` 的 `1.1.0`，属实际可见的显示偏差，应与三处版本号一并纳入发布前检查
-25. **未入库内容提交**：Mermaid 编辑弹窗、`src-tauri/nsis/` 安装钩子、`scripts/register-shell-integration.ps1` 目前在本地未提交
-26. **零散修正**：`src-tauri/Cargo.toml` 描述仍为历史文案（"extracted from nexus-ai-assistant"）；`ROADMAP` 与 README 的版本号描述易滞后，随版本一起改
+24. ✅ **版本号常量同步**：`src/lib/update.ts` 的 `FALLBACK_APP_VERSION` 更新为 `1.1.0`，与 `package.json` / `tauri.conf.json` / `Cargo.toml` 一致（发布前检查四处版本号）
+25. ✅ **未入库内容提交**：Mermaid 编辑弹窗（`feat(markdown)`）、`src-tauri/nsis/` 安装钩子与外壳注册脚本（`build(shell)`）均已入库
+26. ✅ **零散修正**：`src-tauri/Cargo.toml` 描述更正为 H.I.D.E 产品定位，去除历史残留文案
 
 ## v1.2 —— 大文件与跨文件检索（P0）
 
