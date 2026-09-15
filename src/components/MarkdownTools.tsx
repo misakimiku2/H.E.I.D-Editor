@@ -5,7 +5,7 @@ import {
   List, ListOrdered, ListTodo, Braces, Link2,
   Minus, Undo2, Redo2,
   Layers, PanelTop, PanelBottom, Eraser,
-  Highlighter, Superscript, Subscript, Sigma, Footprints,
+  Highlighter, Superscript, Subscript, Sigma, Footprints, Workflow,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT, type MessageKey } from '../lib/i18nContext';
@@ -21,6 +21,7 @@ export type MdOp =
   | { kind: 'mark'; color?: string } | { kind: 'sup' } | { kind: 'sub' } | { kind: 'math' }
   | { kind: 'quote' } | { kind: 'ul' } | { kind: 'ol' } | { kind: 'task' }
   | { kind: 'codeBlock' } | { kind: 'table' } | { kind: 'hr' } | { kind: 'footnote' }
+  | { kind: 'mermaid' }
   | { kind: 'tabGroup' } | { kind: 'tabStart' } | { kind: 'tabEnd' } | { kind: 'tabClear' };
 
 /* 行内标记 → 包裹符；链接/图片单独处理。
@@ -70,9 +71,11 @@ function prefixLines(slice: string, toggleTest: RegExp, make: (lineIndex: number
 
 const TABLE_TEMPLATE_ZH = '| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n|  |  |  |';
 
-/* 对单个源码片段套用操作，返回替换后的文本；tableTemplate 供 i18n 覆盖（缺省中文表头）
-   （tabGroup 不在此处理：整段选区→一个页签的变换见 lib/markdownTabs） */
-export function transformSlice(op: MdOp, slice: string, selectedText: string, tableTemplate = TABLE_TEMPLATE_ZH): string {
+const MERMAID_TEMPLATE_ZH = '```mermaid\nflowchart TD\n    A[开始] --> B{判断?}\n    B -->|是| C[处理]\n    B -->|否| D[结束]\n```';
+
+/* 对单个源码片段套用操作，返回替换后的文本；tableTemplate/mermaidTemplate 供 i18n
+   覆盖（缺省中文默认）。tabGroup 不在此处理：整段选区→一个页签的变换见 lib/markdownTabs */
+export function transformSlice(op: MdOp, slice: string, selectedText: string, tableTemplate = TABLE_TEMPLATE_ZH, mermaidTemplate = MERMAID_TEMPLATE_ZH): string {
   switch (op.kind) {
     case 'tabGroup':
     case 'footnote':
@@ -102,6 +105,8 @@ export function transformSlice(op: MdOp, slice: string, selectedText: string, ta
     }
     case 'table':
       return slice.trimEnd() + '\n\n' + tableTemplate;
+    case 'mermaid':
+      return slice.trimEnd() + '\n\n' + mermaidTemplate;
     case 'hr':
       return slice.trimEnd() + '\n\n---';
     case 'tabStart':
@@ -257,6 +262,7 @@ export const MENU_SECTIONS: Array<{ labelKey: MessageKey; ops: MdMenuOp[] }> = [
       { op: { kind: 'hr' }, icon: Minus, textKey: 'md.hr', nameKey: 'md.hr', syntax: '---' },
       { op: { kind: 'math' }, icon: Sigma, textKey: 'md.math', nameKey: 'md.mathName', syntax: '$' },
       { op: { kind: 'footnote' }, icon: Footprints, textKey: 'md.footnote', nameKey: 'md.footnoteName' },
+      { op: { kind: 'mermaid' }, icon: Workflow, textKey: 'md.mermaid', nameKey: 'md.mermaidName', syntax: '```mermaid' },
     ],
   },
   {

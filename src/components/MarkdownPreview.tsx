@@ -9,11 +9,13 @@ import { remarkGfmStrict, remarkInlineExt } from '../lib/remarkExt';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, ghcolors } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers } from 'lucide-react';
+import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers, Workflow, Pencil } from 'lucide-react';
+import { renderMermaidSvg } from '../lib/mermaid';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP } from '../lib/platform';
 import { FormatMenu, INLINE_WRAPS, transformSlice, footnoteEdit, type MdOp, type MenuState } from './MarkdownTools';
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
+import { MermaidEditModal } from './MermaidEditModal';
 import { PreviewFindBar } from './PreviewFindBar';
 import type { PointerPos } from '../hooks/useLastPointer';
 import { useT } from '../lib/i18nContext';
@@ -130,7 +132,87 @@ const MarkdownImage = React.memo<{
 
 MarkdownImage.displayName = 'MarkdownImage';
 
-MarkdownImage.displayName = 'MarkdownImage';
+/* ---- Mermaid 图：```mermaid 代码块懒加载渲染为内联 SVG ----
+   动态 import 拆出独立 chunk，首次出现图表时才下载，避免拖累移动端主包体积。
+   悬停显示「编辑」入口，打开图表编辑器（见 MermaidEditModal）。 */
+
+const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, canEdit, onEdit }: {
+  code: string;
+  isDarkMode: boolean;
+  canEdit?: boolean;
+  onEdit?: (e: React.MouseEvent) => void;
+}) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const holderRef = useRef<HTMLDivElement | null>(null);
+  const idRef = useRef(`md-mermaid-${Date.now()}-${Math.floor(Math.random() * 1e9)}`);
+  const bindRef = useRef<((el: HTMLElement | null) => void) | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    setErr(null);
+    setSvg(null);
+    renderMermaidSvg(code, isDarkMode, idRef.current)
+      .then(({ svg: out, bind }) => {
+        if (cancelled) return;
+        bindRef.current = bind;
+        setSvg(out);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => { cancelled = true; };
+  }, [code, isDarkMode]);
+
+  /* SVG 注入后绑定交互（点击等），需在真实 DOM 上调用 */
+  useEffect(() => {
+    if (svg === null) return;
+    bindRef.current?.(holderRef.current);
+  }, [svg]);
+
+  if (err) {
+    return (
+      <div
+        className="my-4 rounded-lg overflow-auto"
+        style={{ background: isDarkMode ? '#1e1e1e' : '#f3f4f6' }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', padding: '1.25rem', fontSize: '13px', lineHeight: '1.6' }}>
+          <div style={{ fontWeight: 600, color: isDarkMode ? '#f87171' : '#b91c1c' }}>Mermaid 解析失败</div>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', color: isDarkMode ? '#a1a1aa' : '#71717a' }}>{err}</pre>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', color: isDarkMode ? '#d4d4d8' : '#374151' }}>{code}</pre>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group my-4 rounded-lg p-3 overflow-x-auto relative" style={{ background: isDarkMode ? 'rgba(39,39,42,0.4)' : 'rgba(244,244,245,0.5)' }}>
+      {svg === null ? (
+        <div style={{ padding: '1rem', fontSize: '12px', color: isDarkMode ? '#a1a1aa' : '#71717a' }}>图表加载中…</div>
+      ) : (
+        <div ref={holderRef} dangerouslySetInnerHTML={{ __html: svg }} />
+      )}
+      {canEdit && (
+        <button
+          onClick={onEdit}
+          title="编辑图表"
+          className={cn(
+            'absolute top-2 right-2 z-10 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium',
+            'opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-md border shadow-sm',
+            isDarkMode
+              ? 'bg-zinc-800/80 border-zinc-700 text-zinc-200 hover:bg-zinc-700'
+              : 'bg-white/80 border-zinc-200 text-zinc-600 hover:bg-zinc-50',
+          )}
+        >
+          <Pencil size={12} />编辑
+        </button>
+      )}
+    </div>
+  );
+});
+
+MermaidRenderer.displayName = 'MermaidRenderer';
 
 /* ---- 图片右键菜单：复制 / 剪切 / 删除 / 设为页签 ---- */
 
@@ -355,8 +437,9 @@ const InsertMenu = React.memo<{
   isDarkMode: boolean;
   onTable: () => void;
   onImage: () => void;
+  onDiagram: () => void;
   onClose: () => void;
-}>(({ x, y, isDarkMode, onTable, onImage, onClose }) => {
+}>(({ x, y, isDarkMode, onTable, onImage, onDiagram, onClose }) => {
   const t = useT();
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -383,7 +466,7 @@ const InsertMenu = React.memo<{
   }, [onClose]);
 
   const left = Math.max(4, Math.min(x, window.innerWidth - 176));
-  const top = Math.max(4, Math.min(y, window.innerHeight - 100));
+  const top = Math.max(4, Math.min(y, window.innerHeight - 148));
 
   return (
     <div
@@ -418,6 +501,16 @@ const InsertMenu = React.memo<{
       >
         <ImageIcon size={13} />
         {t('image.menuImage')}
+      </button>
+      <button
+        onClick={onDiagram}
+        className={cn(
+          "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
+          isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+        )}
+      >
+        <Workflow size={13} />
+        {t('md.mermaid')}
       </button>
     </div>
   );
@@ -539,6 +632,24 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
 
       if (isCodeBlock) {
         const lang = match ? match[1] : 'text';
+        if (lang === 'mermaid') {
+          const sd = srcData(node);
+          return (
+            <div {...sd}>
+              <MermaidRenderer
+                code={codeContent}
+                isDarkMode={isDarkMode}
+                canEdit={!!onChangeRef.current}
+                onEdit={(e) => {
+                  e.stopPropagation();
+                  const start = sd['data-md-start'] ? Number(sd['data-md-start']) : NaN;
+                  const end = sd['data-md-end'] ? Number(sd['data-md-end']) : NaN;
+                  if (Number.isFinite(start) && Number.isFinite(end)) requestMermaidEditRef.current(codeContent, start, end);
+                }}
+              />
+            </div>
+          );
+        }
         return (
           <div
             className="my-4 rounded-lg overflow-hidden"
@@ -690,6 +801,17 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
+  /* ---- Mermaid 图表编辑：打开/保存图表编辑器，把编辑后的源码块回写文档 ---- */
+  const [mermaidEdit, setMermaidEdit] = useState<{ code: string; start: number; end: number } | null>(null);
+  const mermaidEditRef = useRef(mermaidEdit);
+  mermaidEditRef.current = mermaidEdit;
+  /* codeComponent 已 memo 化，这里用一个惰性 ref 提供最新回调，避免改动其依赖 */
+  const requestMermaidEditRef = useRef<(code: string, start: number, end: number) => void>(() => {});
+  requestMermaidEditRef.current = (code, start, end) => {
+    if (!onChangeRef.current) return;
+    setMermaidEdit({ code, start, end });
+  };
+
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -706,6 +828,16 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       requestAnimationFrame(() => { if (scroller) scroller.scrollTop = top; });
     });
   }, []);
+  const handleMermaidSave = useCallback((code: string) => {
+    const ed = mermaidEditRef.current;
+    if (!ed || !onChangeRef.current) return;
+    withScrollRestore(() => {
+      const cur = contentStrRef.current;
+      const block = '```mermaid\n' + code.replace(/\n+$/, '') + '\n```';
+      onChangeRef.current!(cur.slice(0, ed.start) + block + cur.slice(ed.end));
+    });
+    setMermaidEdit(null);
+  }, [withScrollRestore]);
   const handleImageCopy = useCallback(async (src: string) => {
     setImageMenu(null);
     const ok = await copyImageToClipboard(src);
@@ -906,7 +1038,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         next = content.slice(0, fe.markerAt) + fe.marker
           + content.slice(fe.markerAt, fe.defAt) + fe.def + content.slice(fe.defAt);
       } else {
-        const targets = (op.kind === 'link' || op.kind === 'image' || !!INLINE_WRAPS[op.kind])
+        const targets = (op.kind === 'link' || op.kind === 'image' || op.kind === 'mermaid' || !!INLINE_WRAPS[op.kind])
           ? menu.blocks.slice(0, 1)
           : menu.blocks;
         const sorted = [...targets].sort((x, y) => y.start - x.start);
@@ -914,7 +1046,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           const b = sorted[d];
           const slice = content.slice(b.start, b.end);
           next = next.slice(0, b.start)
-            + transformSlice(op, slice, menu.text, t('md.tableTemplate'))
+            + transformSlice(op, slice, menu.text, t('md.tableTemplate'), t('md.mermaidTemplate'))
             + next.slice(b.end);
         }
       }
@@ -933,6 +1065,12 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     onChange(insertBlockAt(content, blankMenu.insertAt, BLANK_TABLE));
     setBlankMenu(null);
   }, [blankMenu, content, onChange]);
+
+  const handleInsertDiagram = useCallback(() => {
+    if (!blankMenu || !onChange) return;
+    onChange(insertBlockAt(content, blankMenu.insertAt, t('md.mermaidTemplate')));
+    setBlankMenu(null);
+  }, [blankMenu, content, onChange, t]);
 
   const handleInsertImages = useCallback((images: InsertImage[], caretAbs: number) => {
     if (!onChange || images.length === 0) return;
@@ -1313,6 +1451,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           isDarkMode={isDarkMode}
           onTable={handleInsertTable}
           onImage={() => { setImageModal(buildSourceSnippet(content, blankMenu.insertAt)); setBlankMenu(null); }}
+          onDiagram={handleInsertDiagram}
           onClose={closeBlankMenu}
         />
       )}
@@ -1360,6 +1499,16 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           alt={viewer.alt}
           isDarkMode={isDarkMode}
           onClose={() => setViewer(null)}
+        />
+      )}
+
+      {/* 图表编辑器：悬停图表点「编辑」打开，保存后回写源码块 */}
+      {mermaidEdit && (
+        <MermaidEditModal
+          initialCode={mermaidEdit.code}
+          isDarkMode={isDarkMode}
+          onClose={() => setMermaidEdit(null)}
+          onSave={handleMermaidSave}
         />
       )}
 

@@ -1217,7 +1217,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       return;
     }
 
-    const replaced = transformSlice(op, doc.sliceString(from, to), mdMenu.text, tr('md.tableTemplate'));
+    const replaced = transformSlice(op, doc.sliceString(from, to), mdMenu.text, tr('md.tableTemplate'), tr('md.mermaidTemplate'));
     majorNextRef.current = true;
     view.dispatch({
       changes: { from, to, insert: replaced },
