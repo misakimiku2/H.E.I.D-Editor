@@ -129,6 +129,12 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
     setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, ...patch } : t));
   }, [activeTab]);
 
+  /* 切换当前 json/yaml 标签页的结构树视图状态 */
+  const setJsonView = useCallback((mode: 'tree' | 'text') => {
+    if (!activeTab) return;
+    setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, jsonView: mode } : t));
+  }, [activeTab]);
+
   /* 当前被标签页引用的真实文件路径（去重）——两条时间线的存活域（关最后一个标签页即丢弃）。
      大文件分块预览标签除外：watcher 基准读取会整读文件，正是要避免的路径 */
   const referencedPaths = useMemo(
@@ -151,6 +157,7 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
     canUndo, canRedo, handleUndo, handleRedo,
     setMdView,
     setCsvState,
+    setJsonView,
     referencedPaths,
     deleteTab,
   };

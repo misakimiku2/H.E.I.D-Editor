@@ -4,15 +4,17 @@ import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
   GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
-  Table, Code,
+  Table, Code, Braces, Wand2, Printer, ListTree, ImageDown,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
 import { cn } from './lib/utils';
 import { CodeEditor } from './components/CodeEditor';
 import { CsvGridEditor } from './components/CsvGridEditor';
+import { JsonTreeViewer } from './components/JsonTreeViewer';
 import { LargeFileViewer } from './components/LargeFileViewer';
 import { detectDelimiter, delimiterLabel, CSV_GRID_MAX_CHARS, CSV_GRID_MAX_ROWS, type CsvDelimiter } from './lib/csv';
+import { kindFromPath, formatStructured, indentFromSettings, TREE_MAX_CHARS, type StructKind } from './lib/jsonTree';
 import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
 import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
@@ -648,6 +650,34 @@ export default function App() {
     if (findState.open && csvGridActive) editor.setCsvState({ csvView: 'text' });
   }, [findState.open, csvGridActive]);
 
+  /* ---- JSON / YAML 结构树视图：可解析且未超性能闸门的文件默认树浏览 ----
+     jsonView 未设置时按闸门取默认；解析是否成功由 JsonTreeViewer 兜底（失败显示横幅可切回文本） */
+  const structKind: StructKind | null = activeTab && !activeTab.binary && !activeTab.largePreview
+    ? kindFromPath(activeTab.path ?? activeTab.title)
+    : null;
+  const structEligible = !!structKind && activeContent.length <= TREE_MAX_CHARS;
+  const effectiveJsonView: 'tree' | 'text' = activeTab
+    ? (activeTab.jsonView ?? (structEligible ? 'tree' : 'text'))
+    : 'text';
+  const jsonTreeActive = structEligible && effectiveJsonView === 'tree';
+  /* 结构树视图下 CodeEditor 未挂载：同网格视图处理（查找落到文本视图、状态栏光标段隐藏） */
+  useEffect(() => {
+    if (findState.open && jsonTreeActive) editor.setJsonView('text');
+  }, [findState.open, jsonTreeActive]);
+
+  /* 格式化（缩进规范化）：一次普通编辑（可撤销、变脏），解析失败弹提示 */
+  const handleFormatStruct = useCallback(async () => {
+    const tab = editor.activeTab;
+    if (!tab || !structKind) return;
+    try {
+      const indent = indentFromSettings(settings.insertSpaces, settings.tabSize);
+      const formatted = await formatStructured(tab.content, structKind, indent);
+      if (formatted !== tab.content) editor.updateTabContent(tab.id, formatted, { major: true });
+    } catch (e: any) {
+      appAlert(t('json.formatError', { msg: e?.message ?? String(e) }));
+    }
+  }, [editor, structKind, settings.insertSpaces, settings.tabSize, t]);
+
   /* ---- 大文件只读分块预览（第二层）：无编辑器/网格/预览概念，主区域整块让给 LargeFileViewer ---- */
   const isLargePreview = !!activeTab?.largePreview;
   /* 提取片段编辑出口：当前窗口内容进新标签页（普通可编辑标签，走第一层全部能力） */
@@ -674,8 +704,8 @@ export default function App() {
   };
 
   /* 编辑器面板当前是否渲染（分屏/编辑态 Ctrl+F 搜索源码）；同步进 ref 供 window 快捷键读取。
-     CSV 网格视图下 CodeEditor 未挂载，同样视为不可见（状态栏光标段随之隐藏） */
-  const editorVisible = !!activeTab && !csvGridActive && !isLargePreview && !(isMarkdown && effectiveView === 'preview');
+     CSV 网格 / JSON 结构树视图下 CodeEditor 未挂载，同样视为不可见（状态栏光标段随之隐藏） */
+  const editorVisible = !!activeTab && !csvGridActive && !jsonTreeActive && !isLargePreview && !(isMarkdown && effectiveView === 'preview');
 
   /* 字数统计：Markdown 按 CJK 感知计数，其余按空白分词（200 万字符单次线性扫描，毫秒级） */
   const activeLanguage = activeTab?.language ?? '';
@@ -737,6 +767,19 @@ export default function App() {
         onHeaderToggle={(on) => editor.setCsvState({ csvHeaderOn: on })}
         onWidthsChange={(w) => editor.setCsvState({ csvColWidths: w })}
         onShape={handleCsvShape}
+      />
+    );
+  };
+
+  const renderJsonTree = () => {
+    if (!activeTab || !structKind) return null;
+    return (
+      <JsonTreeViewer
+        key={activeTab.id}
+        content={activeTab.content}
+        kind={structKind}
+        isDarkMode={isDarkMode}
+        onFallbackText={() => editor.setJsonView('text')}
       />
     );
   };
@@ -1016,6 +1059,53 @@ export default function App() {
                 </button>
               );
             })}
+          </div>
+        )}
+
+        {/* JSON / YAML 视图两档切换：结构树 | 文本（可解析且未超闸门时显示，附格式化入口） */}
+        {structEligible && activeTab && (
+          <div className="flex items-center gap-1 mr-2 shrink-0">
+            <div
+              role="group"
+              aria-label={t('json.viewAria')}
+              className={cn(
+                "flex items-center rounded-full p-0.5",
+                isDarkMode ? "bg-zinc-700/60" : "bg-zinc-200/80"
+              )}
+            >
+              {([
+                { mode: 'tree', icon: Braces, title: t('json.tree') },
+                { mode: 'text', icon: Code, title: t('csv.text') },
+              ] as const).map(({ mode: m, icon: Icon, title }) => {
+                const active = effectiveJsonView === m;
+                return (
+                  <button
+                    key={m}
+                    onClick={() => editor.setJsonView(m)}
+                    title={title}
+                    className={cn(
+                      "w-7 h-6 rounded-full flex items-center justify-center transition-all",
+                      active
+                        ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
+                        : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
+                    )}
+                  >
+                    <Icon size={13} />
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              onClick={() => void handleFormatStruct()}
+              disabled={!!activeTab.readOnly}
+              className={cn(
+                "p-1.5 rounded-md transition-colors shrink-0 disabled:opacity-40",
+                isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
+              )}
+              title={t('json.format')}
+            >
+              <Wand2 size={14} />
+            </button>
           </div>
         )}
 
@@ -1337,6 +1427,10 @@ export default function App() {
                 csvGridActive ? (
                   <div className="flex-1 min-w-0 overflow-hidden">
                     {renderCsvGrid()}
+                  </div>
+                ) : jsonTreeActive ? (
+                  <div className="flex-1 min-w-0 overflow-hidden">
+                    {renderJsonTree()}
                   </div>
                 ) : isSvgTab ? (
                   <SvgWorkbench content={activeTab.content} isDarkMode={isDarkMode} stacked={isPhone}>

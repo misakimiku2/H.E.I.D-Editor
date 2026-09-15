@@ -13,6 +13,9 @@ export type MdViewMode = SessionMdView;
 /** csv 标签页的视图模式：网格（缺省，`csvView` 未设即 grid）/ 原文本 */
 export type CsvViewMode = 'grid' | 'text';
 
+/** json / yaml 标签页的视图模式：结构树 / 原文本（可解析且未超限时默认 tree） */
+export type JsonViewMode = 'tree' | 'text';
+
 /** csv 页签的会话内 UI 状态（可选字段：缺省时按各自默认值生效） */
 export interface CsvTabState {
   /** 网格 / 原文本视图；缺省 grid */
@@ -48,6 +51,8 @@ export interface FileTab extends CsvTabState {
   large?: boolean;
   /** 大文件只读分块预览（32~512MB 第二层）：content 恒为空，正文由 LargeFileViewer 分窗读取 */
   largePreview?: boolean;
+  /** json / yaml 结构树视图状态（未设时按可解析性与性能闸门取默认） */
+  jsonView?: JsonViewMode;
   /** 待跳转位置（跨文件搜索结果点击打开）：编辑器挂载后执行一次并清除。
       seq 区分同一标签的连续请求，避免相同位置的二连跳被 React 视为无变化 */
   jumpRequest?: { line: number; col: number; seq: number };
