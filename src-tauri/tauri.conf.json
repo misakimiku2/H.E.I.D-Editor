@@ -44,7 +44,8 @@
       "nsis": {
         "languages": ["SimpChinese"],
         "headerImage": "./icons/installer-header.bmp",
-        "sidebarImage": "./icons/installer-sidebar.bmp"
+        "sidebarImage": "./icons/installer-sidebar.bmp",
+        "installerHooks": "./nsis/installer-hooks.nsh"
       }
     },
     "fileAssociations": [

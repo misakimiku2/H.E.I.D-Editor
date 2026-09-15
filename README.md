@@ -75,7 +75,7 @@ VS Code 风格的编辑体验：Canvas 语法着色迷你地图（点击/拖拽�
 - 本地文件读写：原生对话框、拖拽进窗即开、最近打开（15 条）、可选文件树侧栏（懒加载 + 右键文件管理：新建 / 重命名 / 复制 / 删除 / 在资源管理器中显示）
 - 编码：UTF-8 / UTF-8 BOM / UTF-16 / GBK / GB18030 / Big5 / Shift_JIS 自动检测，状态栏一键「以编码重新打开」或「转换编码并保存」
 - 换行符：CRLF / LF / CR 保留原样，一键转换
-- 文件关联与单实例：40+ 扩展名注册「打开方式」，二次启动聚焦已有窗口
+- 文件关联与单实例：42 种扩展名注册「打开方式」与「默认应用」（可按类型把 H.I.D.E 设为默认编辑器），资源管理器右键「用 H.I.D.E 打开」，二次启动聚焦已有窗口
 - 外部修改检测：diff 时间线逐条对比采纳（桌面）
 
 **内容格式**
@@ -139,6 +139,23 @@ npm run tauri:build         # 编译 Rust 并打包（首次约 4-10 分钟）
 - **独立可执行文件**：`src-tauri/target/release/nexus-editor.exe`
 - **安装程序**：`src-tauri/target/release/bundle/nsis/H.I.D.E_1.1.0_x64-setup.exe`
 
+### 注册为系统编辑器
+
+安装包在安装完成时会自动写入外壳集成注册（`src-tauri/nsis/installer-hooks.nsh`）：
+把 H.I.D.E 加入「打开方式」候选、登记进「设置 → 默认应用」、并添加资源管理器右键
+「用 H.I.D.E 打开」。卸载时由同一钩子精确回滚，不影响其他编辑器的注册。
+
+已装旧版本不想重装、或开发调试时，可直接执行等价脚本：
+
+```powershell
+npm run register:shell     # 写入：打开方式候选 + 默认应用清单 + 右键菜单
+npm run unregister:shell   # 撤销上述注册
+```
+
+> Windows 10/11 禁止程序静默篡改「默认程序」（UserChoice 带哈希校验），
+> 脚本与安装包只把 H.I.D.E 注册为**候选**；设为默认需在
+> 设置 → 应用 → 默认应用 中手动选择一次。
+
 ### 安卓（Android 7.0 / API 24+）
 
 ```bash
@@ -193,8 +210,10 @@ npm run tauri:dev    # 桌面窗口 + 热更新
 │   │   └── mobile/           # 移动端组件（TopAppBar / BottomToolbar / TabSheet / Sheet）
 │   ├── hooks/                # useUpdater / useFileActions / useExternalFileWatcher 等 9 个
 │   └── lib/                  # codemirror 主题与语言 / 编码检测 / i18n / 会话 / 草稿 / 查找引擎…
+├── scripts/                  # register-shell-integration.ps1（系统编辑器注册 / 撤销）
 └── src-tauri/                # Tauri 壳（Rust + Android 工程）
     ├── tauri.conf.json       # 窗口（无边框）/ 文件关联 / 更新器 / NSIS 打包配置
+    ├── nsis/                 # 安装钩子：打开方式候选 / 默认应用 / 右键菜单注册
     ├── capabilities/         # fs 读写、对话框、窗口控制、更新器权限（桌面/全平台分文件）
     ├── src/                  # lib.rs + encoding / fsops / http / render / external 模块
     └── gen/android/          # Android Studio 工程（入库，含 MainActivity 定制）
