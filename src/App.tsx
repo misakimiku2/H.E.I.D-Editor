@@ -4,7 +4,7 @@ import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
   GitCompare, Columns2, History, ChevronRight, ChevronLeft, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
-  Table, Code, Braces, Wand2, Printer, ListTree, ImageDown,
+  Table, Code, Braces, Wand2, Printer, ImageDown,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -815,9 +815,8 @@ export default function App() {
   /* 预览当前是否处于可见形态（分屏 / 纯预览） */
   const previewVisible = isMarkdown && (effectiveView === 'split' || effectiveView === 'preview');
 
-  /* ---- Markdown 大纲侧栏：标题提取 + 点击分流（预览滚动 / 编辑器跳转） ---- */
+  /* ---- Markdown 大纲侧栏：标题提取 + 点击分流（预览滚动 / 编辑器跳转）；收展由预览右缘常驻把手负责 ---- */
   const [outlineOpen, setOutlineOpen] = useState(false);
-  const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   /* 大纲滚动跟随：预览滚到某标题附近时高亮对应条目（预览保活容器上监听滚动） */
   const [outlineActiveOffset, setOutlineActiveOffset] = useState<number | null>(null);
   const previewScrollElRef = useRef<HTMLDivElement | null>(null);
@@ -860,7 +859,7 @@ export default function App() {
     el.addEventListener('scroll', updateOutlineActive, { passive: true });
     updateOutlineActive();
     return () => el.removeEventListener('scroll', updateOutlineActive);
-  }, [updateOutlineActive, outlineOpen, previewVisible]);
+  }, [updateOutlineActive, previewVisible]);
   useEffect(() => { headingElsRef.current = null; }, [mdOutline]);
   const handleOutlineJump = useCallback((h: MdHeading) => {
     if (previewVisible) previewRef.current?.scrollToOffset(h.offset);
@@ -1244,23 +1243,9 @@ export default function App() {
           )}
         </button>
 
-        {/* Markdown 视图三档切换：编辑 | 分屏 | 预览（仅 markdown 文件显示）；附大纲侧栏开关 */}
+        {/* Markdown 视图三档切换：编辑 | 分屏 | 预览（仅 markdown 文件显示）；大纲收展由预览右缘的常驻把手负责 */}
         {isMarkdown && activeTab && (
           <>
-          {!isPhone && (
-            <button
-              onClick={() => setOutlineOpen(o => !o)}
-              className={cn(
-                "p-1.5 rounded-md transition-colors shrink-0 mr-1",
-                outlineOpen
-                  ? (isDarkMode ? "bg-zinc-600/80 text-zinc-100" : "bg-zinc-200 text-zinc-700")
-                  : (isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600")
-              )}
-              title={t('md.outline')}
-            >
-              <ListTree size={15} />
-            </button>
-          )}
           <div
             role="group"
             aria-label={t('view.mdViewAria')}
@@ -1700,31 +1685,34 @@ export default function App() {
                 <div key="md-preview-slot" className={cn("relative min-w-0 overflow-hidden", previewVisible ? "flex-1" : "hidden")}>
                   {renderMdPreview()}
                   {/* Markdown 大纲：贴预览视图右缘的毛玻璃小窗（手机无此面板）。
-                      收起时是贴右缘的 "<" 把手；展开后面板在其左、把手变 ">"。
+                      把手常驻：收起时是右移 10px 避让预览滚动条的 "<"，点击展开；
+                      展开后面板在其左、把手变 ">"。面板与把手圆角均朝左（贴右缘故右侧直角），
+                      面板滚动条用全局 heid-scroll 细样式。容器 pointer-events-none 穿透，
+                      仅把手/面板可点，收起时透明留白不挡预览滚动条拖拽。
                       高度自适应内容，上限为视图高度减上下各 40px（容器 top/bottom-10 定高，
                       面板 max-h-full 才能生效），超出即面板内滚动；展开/收起带过渡动画 */}
-                  {isMarkdown && !isPhone && outlineOpen && previewVisible && (
-                    <div className="absolute bottom-10 right-0 top-10 z-30 flex justify-end" data-testid="md-outline-pop">
+                  {isMarkdown && !isPhone && previewVisible && (
+                    <div className="pointer-events-none absolute bottom-10 right-0 top-10 z-30 flex justify-end" data-testid="md-outline-pop">
                       <div className="flex h-full items-center">
                         <button
                           className={cn(
-                            'flex h-11 w-5 shrink-0 items-center justify-center border shadow-md backdrop-blur-md transition-colors',
-                            outlineCollapsed ? 'rounded-r-lg border-l-0' : 'rounded-l-md',
+                            'pointer-events-auto flex h-11 w-5 shrink-0 items-center justify-center border shadow-md backdrop-blur-md transition-all duration-200 ease-out',
+                            outlineOpen ? 'rounded-l-lg' : 'mr-[10px] rounded-l-lg border-r-0',
                             isDarkMode
                               ? 'border-zinc-700/70 bg-zinc-800/70 text-zinc-400 hover:text-zinc-200'
                               : 'border-zinc-200/80 bg-white/70 text-zinc-500 hover:text-zinc-700',
                           )}
-                          title={outlineCollapsed ? t('md.outlineExpand') : t('md.outlineCollapse')}
-                          onClick={() => setOutlineCollapsed(c => !c)}
+                          title={outlineOpen ? t('md.outlineCollapse') : t('md.outlineExpand')}
+                          onClick={() => setOutlineOpen(o => !o)}
                         >
-                          {outlineCollapsed ? <ChevronLeft size={13} /> : <ChevronRight size={13} />}
+                          {outlineOpen ? <ChevronRight size={13} /> : <ChevronLeft size={13} />}
                         </button>
                         <div
                           className={cn(
-                            'max-h-full overflow-y-auto overscroll-contain border shadow-xl backdrop-blur-md transition-all duration-200 ease-out',
-                            outlineCollapsed
-                              ? 'w-0 border-transparent opacity-0'
-                              : (isDarkMode ? 'w-60 rounded-r-xl border-zinc-700/70 bg-zinc-800/70 opacity-100' : 'w-60 rounded-r-xl border-zinc-200/80 bg-white/70 opacity-100'),
+                            'pointer-events-auto max-h-full overflow-y-auto overscroll-contain heid-scroll border shadow-xl backdrop-blur-md transition-all duration-200 ease-out',
+                            outlineOpen
+                              ? (isDarkMode ? 'w-60 rounded-l-xl border-zinc-700/70 bg-zinc-800/70 opacity-100' : 'w-60 rounded-l-xl border-zinc-200/80 bg-white/70 opacity-100')
+                              : 'w-0 border-transparent opacity-0',
                           )}
                         >
                           <MarkdownOutline

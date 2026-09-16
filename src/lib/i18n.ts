@@ -482,7 +482,6 @@ const zh = {
   'json.copyTip': '双击或点击图标复制该值',
   'json.copied': '已复制',
 
-  'md.outline': '大纲',
   'md.outlineCollapse': '收起大纲',
   'md.outlineExpand': '展开大纲',
   'md.pasteTitle': '粘贴图片',
@@ -1093,7 +1092,6 @@ const en: Record<MessageKey, string> = {
   'json.copyTip': 'Double-click or click the icon to copy this value',
   'json.copied': 'Copied',
 
-  'md.outline': 'Outline',
   'md.outlineCollapse': 'Collapse outline',
   'md.outlineExpand': 'Expand outline',
   'md.pasteTitle': 'Paste image',
