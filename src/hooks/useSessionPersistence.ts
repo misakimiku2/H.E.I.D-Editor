@@ -1,8 +1,9 @@
 /**
  * 会话持久化（仅 Tauri）：启动时按快照重建上次会话，快照跟随标签页变化持续写入。
- * - file 条目重读磁盘（文件已删除/移动则跳过）；virtual 条目（未关闭且未编辑的
+ * - file 条目并行重读磁盘（文件已删除/移动则跳过）；virtual 条目（未关闭且未编辑的
  *   welcome / 空 untitled）确定性重建，保证「没关的标签页重启后还在」；
  * - 恢复尝试完成前不写入会话快照，避免启动瞬间把上次会话覆盖为空；
+ *   hadSession 供主区域在恢复期间显示「恢复中」占位（而非 welcome.ts 假标签）；
  * - 「退出并保存」在销毁窗口前也显式调用 writeSessionSnapshot 一次，
  *   避免状态更新对应的 effect 尚未执行、窗口已被销毁。
  */
@@ -38,18 +39,25 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
     }
   }, []);
 
+  /* 启动快照同步读一次：hadSession 让主区域在恢复完成前知道「有待恢复会话」，
+     改显示恢复中提示而不是 welcome.ts 占位编辑器，避免重启时先画一帧 welcome 再跳文档 */
+  const [startupSession] = useState(() => (isTauri ? loadSessionState() : null));
+  const hadSession = !!startupSession && startupSession.tabs.length > 0;
+
   useEffect(() => {
     if (!isTauri) return;
-    const session = loadSessionState();
+    const session = startupSession;
     if (!session || session.tabs.length === 0) {
       markHydrated();
       return;
     }
     let disposed = false;
     (async () => {
-      const restored: FileTab[] = [];
       /* 历史快照可能含同标题的重复虚拟条目（welcome 复活 bug 的遗留产物），先收敛 */
-      for (const st of dedupeVirtualByTitle(session.tabs)) {
+      const entries = dedupeVirtualByTitle(session.tabs);
+      /* 并行读盘：串行时总耗时为各文件读取之和，一个大文件就能把 welcome 占位拖长数秒；
+         结果按快照原顺序归位，激活标签的匹配逻辑不受读盘次序影响 */
+      const settled = await Promise.all(entries.map(async (st): Promise<FileTab | null> => {
         if (st.kind === 'virtual') {
           const base = st.title === 'welcome.ts' ? makeWelcomeTab() : makeUntitledTab(st.title);
           if (st.title !== 'welcome.ts') {
@@ -66,19 +74,17 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
               base.isDirty = true;
             }
           }
-          restored.push(base);
-          continue;
+          return base;
         }
         try {
           /* 尺寸分层与打开路由同判定：超限跳过（视为失效条目），大文件恢复为分块预览标签 */
           const size = await fileSize(st.path);
           if (size != null) {
             const cls = classifyBySize(size);
-            if (cls === 'reject') continue;
+            if (cls === 'reject') return null;
             if (cls === 'preview') {
               const name = displayNameFromPath(st.path);
-              restored.push(makeLargePreviewTab(st.path, name, detectLanguageFromPath(name)));
-              continue;
+              return makeLargePreviewTab(st.path, name, detectLanguageFromPath(name));
             }
           }
           const file = await readLocalPath(st.path);
@@ -86,7 +92,7 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
           /* 草稿叠加：上次退出时该文件有未保存内容，恢复并标脏 */
           const draft = getDraft(draftKeyForTab({ path: st.path, title: file.name }));
           const hasDraft = draft !== null && draft !== file.content;
-          restored.push({
+          return {
             id: nextTabId(),
             title: file.name,
             path: st.path,
@@ -103,12 +109,14 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
             originalEol: file.eol,
             binary: file.binary,
             large: file.content.length > LARGE_FILE_CHARS,
-          });
+          };
         } catch {
           // 文件已被删除/移动：跳过该标签
+          return null;
         }
-      }
+      }));
       if (disposed) return;
+      const restored = settled.filter((t): t is FileTab => t !== null);
       markHydrated();
       if (restored.length === 0) {
         // 全部失效：清掉快照，保留初始 welcome 标签
@@ -158,5 +166,5 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
     });
   }, [activeTabIdRef, tabsRef]);
 
-  return { writeSessionSnapshot, hydratedRef, hydrated };
+  return { writeSessionSnapshot, hydratedRef, hydrated, hadSession };
 }

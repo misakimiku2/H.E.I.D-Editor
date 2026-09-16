@@ -183,12 +183,14 @@ export default function App() {
     autosaveIntervalSec: settings.autosaveIntervalSec,
     t,
   });
-  const { writeSessionSnapshot, hydrated } = useSessionPersistence({
+  const { writeSessionSnapshot, hydrated, hadSession } = useSessionPersistence({
     tabsRef: editor.tabsRef,
     activeTabIdRef: editor.activeTabIdRef,
     setTabs: editor.setTabs,
     setActiveTabId: editor.setActiveTabId,
   });
+  /* 会话恢复期间不画 welcome.ts 占位编辑器：主区域显示「恢复中」，完成后直接落到上次激活的文档 */
+  const restoringSession = !hydrated && hadSession;
 
   /* 快照跟随标签页变化 */
   useEffect(() => {
@@ -1667,7 +1669,12 @@ export default function App() {
           />
         )}
         <div className="flex-1 flex flex-col overflow-hidden">
-        {activeTab ? (
+        {restoringSession ? (
+          <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
+            <RefreshCw size={20} className={cn("animate-spin", isDarkMode ? "text-zinc-600" : "text-zinc-400")} />
+            <p className={cn("text-sm", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>{t('session.restoring')}</p>
+          </div>
+        ) : activeTab ? (
           <>
             {/* CSV 性能闸门提示条：超大文件默认文本视图，可手动改用网格 */}
             {isCsv && isLargeCsv && effectiveCsvView === 'text' && gateBannerClosedId !== activeTab.id && (
