@@ -119,6 +119,31 @@ export function makeLargePreviewTab(path: string, title: string, language: strin
   };
 }
 
+/**
+ * 更新说明标签（固定 id）：只读 Markdown 预览文档（更新重启后自动打开 / 关于里重看）。
+ * 不落盘、不进会话快照（瞬态文档，useSessionSnapshot 按此 id 排除）；重开时按 id 复用替换。
+ */
+export const RELEASE_NOTES_TAB_ID = 'tab-release-notes';
+
+export function makeReleaseNotesTab(title: string, content: string): FileTab {
+  return {
+    id: RELEASE_NOTES_TAB_ID,
+    title,
+    path: null,
+    handle: null,
+    content,
+    originalContent: content,
+    language: 'markdown',
+    isDirty: false,
+    readOnly: true,
+    mdView: 'preview',
+    encoding: 'utf-8',
+    bom: false,
+    eol: 'lf',
+    originalEol: 'lf',
+  };
+}
+
 /** Ctrl+N 新建：标题序号取自计数器当前值（与 nextTabId 共用计数） */
 export function makeNewUntitled(): FileTab {
   return makeUntitledTab(`untitled-${tabCounter + 1}.txt`);

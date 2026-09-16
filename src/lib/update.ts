@@ -96,70 +96,84 @@ export function setIgnoredVersion(version: string, storage: Storage | null = def
   } catch { /* 忽略持久化失败 */ }
 }
 
-/* ---------- 发行说明持久化（重启后展示 + 关于里重看） ---------- */
+/* ---------- 发行说明持久化（重启后展示 + 关于里重看 / 回看过往版本） ---------- */
 
 export interface StoredReleaseNotes {
   version: string;
   notes: string;
-  /** 重启后是否已自动展示过（只自动弹一次；关闭后经「关于」重看） */
+  /** 该版本的文档是否已在更新重启后自动打开过（每个版本只自动展示一次） */
   shown: boolean;
 }
 
 export const RELEASE_NOTES_KEY = 'heid-update-release-notes';
 
-/** 读取最近一次保存的发行说明；存储缺失/损坏返回 null */
-export function loadReleaseNotes(storage: Storage | null = defaultStorage()): StoredReleaseNotes | null {
+/** 历史更新文档最多保留份数（含最新；超出丢弃最旧） */
+export const MAX_RELEASE_NOTES = 20;
+
+/**
+ * 读取已保存的更新文档列表（最新在前）。
+ * 兼容旧版单对象格式（自动包装为单项列表）；损坏条目逐个跳过，整体损坏返回空列表。
+ */
+export function loadReleaseNotesList(storage: Storage | null = defaultStorage()): StoredReleaseNotes[] {
   const raw = safeGet(storage, RELEASE_NOTES_KEY);
-  if (!raw) return null;
+  if (!raw) return [];
   try {
     const data: unknown = JSON.parse(raw);
-    if (!data || typeof data !== 'object') return null;
-    const rec = data as Record<string, unknown>;
-    if (typeof rec.version !== 'string' || rec.version.length === 0) return null;
-    return {
-      version: rec.version,
-      notes: typeof rec.notes === 'string' ? rec.notes : '',
-      shown: rec.shown === true,
-    };
+    const items: unknown[] = Array.isArray(data) ? data : [data];
+    const list: StoredReleaseNotes[] = [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      if (typeof rec.version !== 'string' || rec.version.length === 0) continue;
+      list.push({
+        version: rec.version,
+        notes: typeof rec.notes === 'string' ? rec.notes : '',
+        shown: rec.shown === true,
+      });
+    }
+    return list;
   } catch {
-    return null;
+    return [];
   }
 }
 
-/** 保存发行说明（发现新版本 / 开始安装时写入；shown 归零，等待更新重启后展示） */
-export function saveReleaseNotes(
-  info: { version: string; notes?: string },
-  storage: Storage | null = defaultStorage(),
-): void {
-  const payload: StoredReleaseNotes = { version: info.version, notes: info.notes ?? '', shown: false };
+function saveReleaseNotesList(list: StoredReleaseNotes[], storage: Storage | null): void {
   try {
-    storage?.setItem(RELEASE_NOTES_KEY, JSON.stringify(payload));
-  } catch { /* 忽略持久化失败 */ }
-}
-
-function markReleaseNotesShown(storage: Storage | null): void {
-  const stored = loadReleaseNotes(storage);
-  if (stored) saveReleaseNotesRaw({ ...stored, shown: true }, storage);
-}
-
-function saveReleaseNotesRaw(info: StoredReleaseNotes, storage: Storage | null): void {
-  try {
-    storage?.setItem(RELEASE_NOTES_KEY, JSON.stringify(info));
+    storage?.setItem(RELEASE_NOTES_KEY, JSON.stringify(list));
   } catch { /* 忽略持久化失败 */ }
 }
 
 /**
- * 更新重启后的开机展示：本地存有「当前版本」且未展示过的说明时返回之并标记已展示；
- * 其余情况（无记录 / 版本不匹配 / 已展示）返回 null，不自动弹。
+ * 保存一份更新文档（发现新版本 / 开始安装时写入）：
+ * 同版本重复保存视为替换并重置 shown（等待更新重启后展示）；最新插到列表头部；
+ * 超出容量丢弃最旧。
+ */
+export function saveReleaseNotes(
+  info: { version: string; notes?: string },
+  storage: Storage | null = defaultStorage(),
+): void {
+  const list = loadReleaseNotesList(storage);
+  const rest = list.filter(n => n.version !== info.version);
+  const next = [{ version: info.version, notes: info.notes ?? '', shown: false }, ...rest];
+  saveReleaseNotesList(next.slice(0, MAX_RELEASE_NOTES), storage);
+}
+
+/**
+ * 更新重启后的开机展示：列表中存在「当前版本」且未展示过的文档时返回之并标记已展示
+ * （每个版本只自动打开一次；关闭与否都不影响下次启动）；其余情况返回 null。
  */
 export function consumeStartupReleaseNotes(
   currentVersion: string,
   storage: Storage | null = defaultStorage(),
 ): StoredReleaseNotes | null {
-  const stored = loadReleaseNotes(storage);
-  if (!stored || stored.shown || stored.version !== currentVersion) return null;
-  markReleaseNotesShown(storage);
-  return stored;
+  const list = loadReleaseNotesList(storage);
+  const index = list.findIndex(n => n.version === currentVersion && !n.shown);
+  if (index < 0) return null;
+  const found = list[index];
+  const next = list.slice();
+  next[index] = { ...found, shown: true };
+  saveReleaseNotesList(next, storage);
+  return found;
 }
 
 /**

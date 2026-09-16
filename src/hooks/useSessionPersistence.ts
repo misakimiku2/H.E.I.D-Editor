@@ -6,7 +6,7 @@
  * - 「退出并保存」在销毁窗口前也显式调用 writeSessionSnapshot 一次，
  *   避免状态更新对应的 effect 尚未执行、窗口已被销毁。
  */
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { loadSessionState, saveSessionState, dedupeVirtualByTitle, type SessionTab } from '../lib/session';
 import { readLocalPath, isTauri } from '../lib/fileIO';
@@ -15,7 +15,7 @@ import { displayNameFromPath } from '../lib/platform';
 import { classifyBySize, fileSize } from '../lib/largeFile';
 import {
   INITIAL_WELCOME_ID, LARGE_FILE_CHARS, makeLargePreviewTab, makeUntitledTab, makeWelcomeTab, nextTabId,
-  type FileTab,
+  RELEASE_NOTES_TAB_ID, type FileTab,
 } from '../lib/tabModel';
 import { getDraft, draftKeyForTab } from '../lib/drafts';
 
@@ -27,14 +27,22 @@ export interface SessionPersistenceOptions {
 }
 
 export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setActiveTabId }: SessionPersistenceOptions) {
-  /* 恢复尝试完成前不写入会话快照，避免启动瞬间把上次会话覆盖为空 */
+  /* 恢复尝试完成前不写入会话快照，避免启动瞬间把上次会话覆盖为空。
+     hydrated 状态供「依赖会话就绪」的启动逻辑（如更新说明标签自动打开）按序执行 */
   const hydratedRef = useRef(false);
+  const [hydrated, setHydrated] = useState(!isTauri);
+  const markHydrated = useCallback(() => {
+    if (!hydratedRef.current) {
+      hydratedRef.current = true;
+      setHydrated(true);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isTauri) return;
     const session = loadSessionState();
     if (!session || session.tabs.length === 0) {
-      hydratedRef.current = true;
+      markHydrated();
       return;
     }
     let disposed = false;
@@ -101,7 +109,7 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
         }
       }
       if (disposed) return;
-      hydratedRef.current = true;
+      markHydrated();
       if (restored.length === 0) {
         // 全部失效：清掉快照，保留初始 welcome 标签
         saveSessionState({ tabs: [], activePath: null });
@@ -130,12 +138,14 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
 
   /* ---- 会话快照：跟随标签页变化持续写入 ----
      file 标签存路径；无路径标签仅在未编辑时存为 virtual（内容可确定性重建）；
-     脏的无路径标签不持久化——其存亡由退出确认决定，用户确认放弃后不应「复活」。 */
+     脏的无路径标签不持久化——其存亡由退出确认决定，用户确认放弃后不应「复活」；
+     更新说明标签（固定 id）是瞬态只读文档，virtual 重建不出内容，同样不进快照。 */
   const writeSessionSnapshot = useCallback(() => {
     if (!isTauri || !hydratedRef.current) return;
     const active = tabsRef.current.find(t => t.id === activeTabIdRef.current);
     saveSessionState({
       tabs: dedupeVirtualByTitle(tabsRef.current.flatMap((t): SessionTab[] => {
+        if (t.id === RELEASE_NOTES_TAB_ID) return [];
         if (t.path) return [{ kind: 'file', path: t.path, mdView: t.mdView }];
         /* 脏的无路径标签：内容在草稿（lib/drafts），快照只记 draft 标志；
            用户确认「不保存」退出时草稿与快照条目一并清除（见 confirmWindowClose / closeTab） */
@@ -148,5 +158,5 @@ export function useSessionPersistence({ tabsRef, activeTabIdRef, setTabs, setAct
     });
   }, [activeTabIdRef, tabsRef]);
 
-  return { writeSessionSnapshot, hydratedRef };
+  return { writeSessionSnapshot, hydratedRef, hydrated };
 }

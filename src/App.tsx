@@ -3,8 +3,8 @@ import { createPortal } from 'react-dom';
 import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
-  GitCompare, Columns2, History, ChevronRight, ChevronLeft, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
-  Table, Code, Braces, Wand2, Printer, ImageDown,
+  GitCompare, Columns2, History, ChevronRight, ChevronLeft, ChevronDown, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
+  Table, Code, Braces, Wand2, Printer, ImageDown, RefreshCw,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -24,7 +24,6 @@ import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { AlertDialog } from './components/AlertDialog';
 import { NotificationStack } from './components/NotificationStack';
-import { ReleaseNotesModal } from './components/ReleaseNotesModal';
 import { ImageViewer } from './components/ImageViewer';
 import { SvgWorkbench } from './components/SvgWorkbench';
 import { resolveImageSrc, ImageForbiddenError } from './lib/imageSrc';
@@ -62,7 +61,8 @@ import { BottomToolbar } from './components/mobile/BottomToolbar';
 import { TabSheet } from './components/mobile/TabSheet';
 import { androidCreateDoc, androidWriteUri, formatFileSize, isTauri, writeLocalPath } from './lib/fileIO';
 import {
-  INITIAL_WELCOME_ID, makeUntitledTab, makeWelcomeTab,
+  INITIAL_WELCOME_ID, makeReleaseNotesTab, makeUntitledTab, makeWelcomeTab,
+  RELEASE_NOTES_TAB_ID,
   type FileTab, type MdViewMode,
 } from './lib/tabModel';
 import { LARGE_HISTORY_CHARS } from './lib/tabHistory';
@@ -78,7 +78,7 @@ import { useSplitScroll } from './hooks/useSplitScroll';
 import { useUpdater } from './hooks/useUpdater';
 import { useUpdateNotifications } from './hooks/useUpdateNotifications';
 import {
-  consumeStartupReleaseNotes, FALLBACK_APP_VERSION, loadReleaseNotes,
+  consumeStartupReleaseNotes, FALLBACK_APP_VERSION, loadReleaseNotesList,
   type StoredReleaseNotes,
 } from './lib/update';
 
@@ -174,7 +174,7 @@ export default function App() {
     autosaveIntervalSec: settings.autosaveIntervalSec,
     t,
   });
-  const { writeSessionSnapshot } = useSessionPersistence({
+  const { writeSessionSnapshot, hydrated } = useSessionPersistence({
     tabsRef: editor.tabsRef,
     activeTabIdRef: editor.activeTabIdRef,
     setTabs: editor.setTabs,
@@ -487,14 +487,30 @@ export default function App() {
   const confirmWindowCloseRef = useRef(confirmWindowClose);
   confirmWindowCloseRef.current = confirmWindowClose;
 
-  /* ---- 更新说明（只读文档）：更新重启后自动展示一次；「关于」里可重看最近一次 ---- */
-  const [releaseNotes, setReleaseNotes] = useState<StoredReleaseNotes | null>(() => loadReleaseNotes());
-  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
+  /* ---- 更新文档（只读标签页）：更新重启后自动打开一次（最新一份）；
+     「关于 → 更新文档」随时重看，折叠列表可回看过往版本 ---- */
+  const [releaseNotesList, setReleaseNotesList] = useState<StoredReleaseNotes[]>(() => loadReleaseNotesList());
+  const [pastNotesOpen, setPastNotesOpen] = useState(false);
+  const latestNotes = releaseNotesList[0] ?? null;
+  const pastNotes = releaseNotesList.slice(1);
+
+  /** 打开（或替换内容并聚焦）固定 id 的更新文档标签页：预览视图、只读、不落盘 */
+  const openReleaseNotesTab = useCallback((entry: StoredReleaseNotes) => {
+    const markdown = entry.notes.trim().length > 0 ? entry.notes : t('update.notesEmpty');
+    editor.setTabs(prev => {
+      const fresh = makeReleaseNotesTab(`${t('update.releaseNotes')} v${entry.version}.md`, markdown);
+      const index = prev.findIndex(tab => tab.id === RELEASE_NOTES_TAB_ID);
+      if (index < 0) return [...prev, fresh];
+      const copy = prev.slice();
+      copy[index] = fresh;
+      return copy;
+    });
+    editor.setActiveTabId(RELEASE_NOTES_TAB_ID);
+  }, [editor.setTabs, editor.setActiveTabId, t]);
 
   /* ---- 平台适配（拖拽 / 链接守卫 / 关闭拦截 / 安卓返回键与安全区 / 浏览器兜底）---- */
   const overlayState = {
     tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
-    releaseNotesOpen,
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
@@ -510,7 +526,6 @@ export default function App() {
       closeTabSheet: () => setTabSheetOpen(false),
       closeMenu: () => setMenuOpen(false),
       closeAbout: () => setAboutOpen(false),
-      closeReleaseNotes: () => setReleaseNotesOpen(false),
     },
   });
 
@@ -536,17 +551,17 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  /* 更新重启后：消费「当前版本」的未展示说明（只自动弹一次；空说明不弹，仍可在「关于」重看）；
-     发现新版本时同步「关于」入口可用态 */
+  /* 更新重启后：打开「当前版本」的未展示文档（每个版本只自动打开一次；空说明不开，仍可在「关于」重看）。
+     等会话恢复完成（hydrated）再打开，避免恢复流程抢走焦点/把标签挤到恢复标签之前 */
   useEffect(() => {
-    if (!isTauri) return;
+    if (!isTauri || !hydrated) return;
     const pending = consumeStartupReleaseNotes(appVersion);
-    setReleaseNotes(loadReleaseNotes());
-    if (pending && pending.notes.trim().length > 0) setReleaseNotesOpen(true);
-  }, [appVersion]);
-  /* 自动检查发现新版本时，通知编排 hook 已把说明落盘——同步「关于」入口的可用态 */
+    setReleaseNotesList(loadReleaseNotesList());
+    if (pending && pending.notes.trim().length > 0) openReleaseNotesTab(pending);
+  }, [appVersion, hydrated, openReleaseNotesTab]);
+  /* 自动检查发现新版本时，通知编排 hook 已把文档落盘——同步「关于」入口的可用态 */
   useEffect(() => {
-    if (updater.phase === 'available') setReleaseNotes(loadReleaseNotes());
+    if (updater.phase === 'available') setReleaseNotesList(loadReleaseNotesList());
   }, [updater.phase]);
 
   /* ---- 文件树侧栏：选择器走平台提供者；记忆根目录，抽屉默认关闭 ---- */
@@ -780,9 +795,12 @@ export default function App() {
     editor.setActiveTabId(extracted.id);
   }, [editor, t]);
 
-  /* 手机端无分屏：split 折叠为预览，由底部工具栏在编辑/预览间切换 */
+  /* 手机端无分屏：split 折叠为预览，由底部工具栏在编辑/预览间切换；
+     只读 Markdown（更新文档标签）恒为预览——无编辑概念，不给切换入口 */
   const effectiveView: MdViewMode = activeTab
-    ? (isPhone && activeTab.mdView === 'split' ? 'preview' : activeTab.mdView)
+    ? (isMarkdown && activeTab.readOnly ? 'preview'
+        : isPhone && activeTab.mdView === 'split' ? 'preview'
+        : activeTab.mdView)
     : 'edit';
   const toggleMdView = () => {
     if (!activeTab) return;
@@ -1210,7 +1228,8 @@ export default function App() {
         </button>
 
         {/* Markdown 视图三档切换：编辑 | 分屏 | 预览（仅 markdown 文件显示）；大纲收展由预览右缘的常驻把手负责 */}
-        {isMarkdown && activeTab && (
+        {/* Markdown 视图三档切换：编辑 | 分屏 | 预览（仅可编辑的 markdown 文件显示；只读文档恒为预览） */}
+        {isMarkdown && activeTab && !activeTab.readOnly && (
           <>
           <div
             role="group"
@@ -2097,25 +2116,65 @@ export default function App() {
                     <button
                       onClick={updater.checkManually}
                       className={cn(
-                        "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors",
-                        isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
-                      )}
-                    >
-                      {t('update.check')}
-                    </button>
-                  )}
-                  {/* 最近一次更新的说明（更新重启后自动弹出，关闭后从这里重看） */}
-                  {releaseNotes && (
-                    <button
-                      onClick={() => { setAboutOpen(false); setReleaseNotesOpen(true); }}
-                      className={cn(
                         "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1",
                         isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
                       )}
                     >
-                      <FileText size={10} />
-                      {t('update.viewNotes')}
+                      <RefreshCw size={10} />
+                      {t('update.check')}
                     </button>
+                  )}
+                  {/* 更新文档：主按钮打开最新一份（更新重启后自动打开的同一份）；
+                      有过往版本时出现折叠按钮，展开后逐份查看 */}
+                  {latestNotes && (
+                    <>
+                      {/* 折叠按钮绝对定位悬浮于按钮右侧，不占布局宽度——保证上下两行按钮共用居中轴线、图标对齐 */}
+                      <div className="relative">
+                        <button
+                          onClick={() => { setAboutOpen(false); openReleaseNotesTab(latestNotes); }}
+                          className={cn(
+                            "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1",
+                            isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
+                          )}
+                        >
+                          <FileText size={10} />
+                          {t('update.viewNotes')}
+                        </button>
+                        {pastNotes.length > 0 && (
+                          <button
+                            onClick={() => setPastNotesOpen(open => !open)}
+                            aria-expanded={pastNotesOpen}
+                            title={t('update.pastNotes')}
+                            className={cn(
+                              "absolute left-full top-1/2 -translate-y-1/2 ml-2 p-1 rounded-md transition-colors",
+                              isDarkMode ? "text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300" : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600"
+                            )}
+                          >
+                            <ChevronDown size={11} className={cn("transition-transform", pastNotesOpen && "rotate-180")} />
+                          </button>
+                        )}
+                      </div>
+                      {pastNotesOpen && pastNotes.length > 0 && (
+                        <div className={cn(
+                          "w-full mt-0.5 py-1 rounded-lg border max-h-28 overflow-y-auto flex flex-col",
+                          isDarkMode ? "border-zinc-700/70" : "border-zinc-200/80"
+                        )}>
+                          {pastNotes.map(entry => (
+                            <button
+                              key={entry.version}
+                              onClick={() => { setAboutOpen(false); openReleaseNotesTab(entry); }}
+                              className={cn(
+                                "mx-1 px-2 py-1 rounded-md text-[10px] font-medium text-left transition-colors flex items-center gap-1.5",
+                                isDarkMode ? "text-zinc-400 hover:bg-zinc-700/70" : "text-zinc-500 hover:bg-zinc-100"
+                              )}
+                            >
+                              <FileText size={9} className="shrink-0 opacity-60" />
+                              <span className="truncate">{t('update.releaseNotes')} v{entry.version}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -2237,15 +2296,7 @@ export default function App() {
       {/* 通用通知卡片（左下角；窄屏移到顶部避让拇指工具栏） */}
       <NotificationStack isDarkMode={isDarkMode} />
 
-      {/* 更新说明弹窗（只读 Markdown，更新重启后自动弹出；「关于」里可重看） */}
-      {releaseNotesOpen && releaseNotes && (
-        <ReleaseNotesModal
-          version={releaseNotes.version}
-          notes={releaseNotes.notes}
-          isDarkMode={isDarkMode}
-          onClose={() => setReleaseNotesOpen(false)}
-        />
-      )}
+      {/* 更新文档不再用弹窗：以只读标签页（预览视图）呈现，见 openReleaseNotesTab */}
 
       {/* 通用图片查看器（文件树点击图片文件；z 层高于弹窗） */}
       {imageViewer && (

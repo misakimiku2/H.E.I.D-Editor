@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   compareVersions, consumeStartupReleaseNotes, getIgnoredVersion, isNewerVersion,
-  loadReleaseNotes, parseLatestJson, saveReleaseNotes, setIgnoredVersion,
+  loadReleaseNotesList, MAX_RELEASE_NOTES, parseLatestJson, saveReleaseNotes, setIgnoredVersion,
   shouldNotifyUpdate, summarizeNotes,
 } from './update';
 
@@ -90,37 +90,80 @@ describe('忽略版本持久化', () => {
   });
 });
 
-describe('发行说明持久化', () => {
-  it('保存后可读回；notes 缺省存为空串', () => {
+describe('发行说明历史持久化', () => {
+  it('保存后最新在前；notes 缺省存为空串', () => {
     const s = fakeStorage();
-    saveReleaseNotes({ version: '1.2.1', notes: '# 更新说明' }, asStorage(s));
-    expect(loadReleaseNotes(asStorage(s))).toEqual({ version: '1.2.1', notes: '# 更新说明', shown: false });
-    saveReleaseNotes({ version: '1.2.2' }, asStorage(s));
-    expect(loadReleaseNotes(asStorage(s))!.notes).toBe('');
+    saveReleaseNotes({ version: '1.2.0', notes: '# v1.2.0' }, asStorage(s));
+    saveReleaseNotes({ version: '1.3.0', notes: '# v1.3.0' }, asStorage(s));
+    expect(loadReleaseNotesList(asStorage(s)).map(n => n.version)).toEqual(['1.3.0', '1.2.0']);
+    saveReleaseNotes({ version: '1.4.0' }, asStorage(s));
+    expect(loadReleaseNotesList(asStorage(s))[0]).toEqual({ version: '1.4.0', notes: '', shown: false });
+  });
+
+  it('同版本重复保存视为替换并重置 shown', () => {
+    const s = fakeStorage();
+    saveReleaseNotes({ version: '1.3.0', notes: '草稿' }, asStorage(s));
+    saveReleaseNotes({ version: '1.3.0', notes: '正式说明' }, asStorage(s));
+    const list = loadReleaseNotesList(asStorage(s));
+    expect(list).toHaveLength(1);
+    expect(list[0].notes).toBe('正式说明');
+    expect(list[0].shown).toBe(false);
+  });
+
+  it('超出容量上限丢弃最旧', () => {
+    const s = fakeStorage();
+    for (let i = 0; i <= MAX_RELEASE_NOTES; i++) {
+      saveReleaseNotes({ version: `1.0.${i}`, notes: `n${i}` }, asStorage(s));
+    }
+    const list = loadReleaseNotesList(asStorage(s));
+    expect(list).toHaveLength(MAX_RELEASE_NOTES);
+    expect(list[0].version).toBe(`1.0.${MAX_RELEASE_NOTES}`);
+    expect(list[list.length - 1].version).toBe('1.0.1');
   });
 
   it('consume：当前版本且未展示 → 返回并标记已展示；再次 consume 返回 null', () => {
     const s = fakeStorage();
-    saveReleaseNotes({ version: '1.2.1', notes: 'notes' }, asStorage(s));
-    const first = consumeStartupReleaseNotes('1.2.1', asStorage(s));
-    expect(first).toEqual({ version: '1.2.1', notes: 'notes', shown: false });
-    expect(loadReleaseNotes(asStorage(s))!.shown).toBe(true);
-    expect(consumeStartupReleaseNotes('1.2.1', asStorage(s))).toBe(null);
+    saveReleaseNotes({ version: '1.3.0', notes: 'notes' }, asStorage(s));
+    const first = consumeStartupReleaseNotes('1.3.0', asStorage(s));
+    expect(first).toEqual({ version: '1.3.0', notes: 'notes', shown: false });
+    expect(loadReleaseNotesList(asStorage(s))[0].shown).toBe(true);
+    expect(consumeStartupReleaseNotes('1.3.0', asStorage(s))).toBe(null);
   });
 
   it('consume：版本不匹配 / 无记录 / 损坏 JSON 返回 null 且不改动存储', () => {
     const s = fakeStorage();
-    saveReleaseNotes({ version: '1.2.1', notes: 'n' }, asStorage(s));
-    expect(consumeStartupReleaseNotes('1.3.0', asStorage(s))).toBe(null);
-    expect(loadReleaseNotes(asStorage(s))!.shown).toBe(false);
+    saveReleaseNotes({ version: '1.3.0', notes: 'n' }, asStorage(s));
+    expect(consumeStartupReleaseNotes('1.4.0', asStorage(s))).toBe(null);
+    expect(loadReleaseNotesList(asStorage(s))[0].shown).toBe(false);
 
     const empty = fakeStorage();
-    expect(consumeStartupReleaseNotes('1.2.1', asStorage(empty))).toBe(null);
+    expect(consumeStartupReleaseNotes('1.3.0', asStorage(empty))).toBe(null);
 
     const bad = fakeStorage();
     bad.store.set('heid-update-release-notes', 'garbage');
-    expect(loadReleaseNotes(asStorage(bad))).toBe(null);
-    expect(consumeStartupReleaseNotes('1.2.1', asStorage(bad))).toBe(null);
+    expect(loadReleaseNotesList(asStorage(bad))).toEqual([]);
+    expect(consumeStartupReleaseNotes('1.3.0', asStorage(bad))).toBe(null);
+  });
+
+  it('兼容旧版单对象格式（自动包装为单项列表）', () => {
+    const s = fakeStorage();
+    s.store.set('heid-update-release-notes', JSON.stringify({ version: '1.2.0', notes: '旧格式', shown: true }));
+    expect(loadReleaseNotesList(asStorage(s))).toEqual([
+      { version: '1.2.0', notes: '旧格式', shown: true },
+    ]);
+  });
+
+  it('损坏条目逐个跳过，不拖垮整份列表', () => {
+    const s = fakeStorage();
+    s.store.set('heid-update-release-notes', JSON.stringify([
+      { version: '1.3.0', notes: 'ok', shown: false },
+      { notes: 'no version' },
+      null,
+      'garbage',
+    ]));
+    expect(loadReleaseNotesList(asStorage(s))).toEqual([
+      { version: '1.3.0', notes: 'ok', shown: false },
+    ]);
   });
 });
 

@@ -51,8 +51,10 @@ Windows NSIS 构建（**关闭** `createUpdaterArtifacts`，无需 secrets）、
   - 发现新版本 → **窗口左下角弹出更新通知卡片**（通用通知系统 `lib/notifications.ts`）：
     点击卡片或「下载并安装」直接下载，完成后自动重启；「忽略此版本」持久化
     （localStorage `heid-update-ignored`，同版本不再弹，更新的版本仍会提示）；X 仅本次关闭。
-  - 安装时发行说明写入 localStorage `heid-update-release-notes`；更新重启后自动弹出一次
-    **只读更新说明文档**（Markdown 渲染，不可编辑/保存），关闭后可在「关于」→「查看更新说明」重看。
+  - 安装时发行说明写入 localStorage `heid-update-release-notes`（历史列表，最新在前，
+    上限 20 份）；更新重启后自动打开一次**只读更新文档标签页**（Markdown 预览视图，
+    不可编辑/保存，恒为预览；瞬态标签不进会话快照，重启不保留、不重复弹出）。
+    之后可在「关于」→「更新文档」重看最新一份；旁边折叠按钮展开可回看过往版本的文档。
 - **安卓（侧载）**：无原生更新器。经既有 `http_get` 命令抓取同一份 `latest.json`，
   比较版本号；有新版弹出通知卡片，「前往下载」跳转 Releases 页面手动安装 APK。
 - **浏览器模式**：无更新通道，所有检查直接跳过。
