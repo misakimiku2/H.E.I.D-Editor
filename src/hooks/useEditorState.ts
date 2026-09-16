@@ -3,7 +3,7 @@
  * recordContentChange 是枢纽——撤销历史与「软件内编辑」diff 时间线共用同一合并判定，
  * 内部时间线的落账经 options.onInternalEdit 由外层（useDiffTimelines）注入，避免双向依赖。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { InternalDiffEntry } from '../lib/diffTimeline';
 import { applyInternalEdit } from '../lib/diffTimeline';
 import {
@@ -70,8 +70,10 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
     }
   }, [ensureHistoryFor]);
 
-  /* 关闭/切换标签后激活态失效时，兜底选中最后一个标签 */
-  useEffect(() => {
+  /* 关闭/切换标签后激活态失效时，兜底选中最后一个标签。
+     必须 useLayoutEffect 在 paint 前纠正：用 useEffect 会先画出一帧「无激活标签」的欢迎页，
+     关闭大文档时卸载/重挂载开销大，这一帧肉眼可见 */
+  useLayoutEffect(() => {
     if (!tabs.find(t => t.id === activeTabId)) {
       setActiveTabId(tabs.length > 0 ? tabs[tabs.length - 1].id : '');
     }
@@ -144,6 +146,13 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
 
   const deleteTab = useCallback((tabId: string) => {
     historiesRef.current.delete(tabId);
+    /* 关闭的是激活标签：同一次更新里选好继任（与上方兜底同策略取最后一个），
+       避免「标签已删、active 仍指向旧 id」的中间帧渲染出欢迎页。
+       批量关闭循环里 tabsRef 可能滞后，漏网的由 useLayoutEffect 兜底在 paint 前纠正 */
+    if (activeTabIdRef.current === tabId) {
+      const remaining = tabsRef.current.filter(t => t.id !== tabId);
+      setActiveTabId(remaining.length > 0 ? remaining[remaining.length - 1].id : '');
+    }
     setTabs(prev => prev.filter(t => t.id !== tabId));
   }, []);
 
