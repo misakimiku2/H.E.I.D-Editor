@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
-import { ChevronRight, ListTree } from 'lucide-react';
+import { ChevronRight, FoldVertical, ListTree, UnfoldVertical } from 'lucide-react';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { activeHeadingOffset } from '../lib/markdownOutline';
 import type { MdHeading } from '../lib/markdownOutline';
 
@@ -24,6 +25,7 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
 }) {
   const t = useT();
   const [folded, setFolded] = useState<ReadonlySet<number>>(() => new Set());
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   if (headings.length === 0) {
     return (
       <div className={cn(
@@ -60,8 +62,34 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
       return next;
     });
   };
+  /* 右键菜单：全部展开/折叠按「有子标题」的条目计（含当前被隐藏的深层小节，
+     折叠全部后展开外层时内层保持折叠）。菜单项按当前状态置灰 */
+  const foldableOffsets = rows.filter(r => r.hasChildren).map(r => r.h.offset);
+  const menuItems: ContextMenuItem[] = [
+    {
+      icon: <UnfoldVertical size={13} />,
+      label: t('md.outlineUnfoldAll'),
+      disabled: folded.size === 0,
+      onSelect: () => setFolded(new Set()),
+    },
+    {
+      icon: <FoldVertical size={13} />,
+      label: t('md.outlineFoldAll'),
+      disabled: foldableOffsets.length === 0,
+      onSelect: () => setFolded(new Set(foldableOffsets)),
+    },
+  ];
   return (
-    <nav aria-label={t('md.outlineAria')} data-testid="md-outline" className="px-1.5 py-2">
+    <>
+      <nav
+        aria-label={t('md.outlineAria')}
+        data-testid="md-outline"
+        className="px-1.5 py-2"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
       {rows.map(({ h, hidden, hasChildren }, i) => {
         if (hidden) return null;
         const expanded = !folded.has(h.offset);
@@ -118,7 +146,15 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
           </div>
         );
       })}
-    </nav>
+      </nav>
+      {menu && (
+        <ContextMenu
+          menu={{ x: menu.x, y: menu.y, items: menuItems }}
+          isDarkMode={isDarkMode}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
   );
 });
 
