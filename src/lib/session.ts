@@ -27,6 +27,9 @@ export interface SessionState {
 const STORAGE_KEY = 'heid-session';
 const MD_VIEWS: SessionMdView[] = ['edit', 'split', 'preview'];
 
+/** 多窗口：主窗口沿用此键，子窗口用 heid-session:<label>（见 lib/sessionWindows） */
+export type SessionStorageKey = typeof STORAGE_KEY | `${typeof STORAGE_KEY}:${string}`;
+
 /* localStorage 在隐私模式 / 禁用 Cookie 下访问可能抛错，统一收敛为 null */
 function defaultStorage(): Storage | null {
   try {
@@ -36,12 +39,13 @@ function defaultStorage(): Storage | null {
   }
 }
 
-/** 读取上次会话；不存在或结构不合法时返回 null（非法条目逐条丢弃） */
-export function loadSessionState(storage: Storage | null = defaultStorage()): SessionState | null {
+/** 读取上次会话；不存在或结构不合法时返回 null（非法条目逐条丢弃）。
+    key 供多窗口按 label 隔离快照（主窗口缺省即旧键） */
+export function loadSessionState(storage: Storage | null = defaultStorage(), key: SessionStorageKey = STORAGE_KEY): SessionState | null {
   if (!storage) return null;
   let raw: string | null;
   try {
-    raw = storage.getItem(STORAGE_KEY);
+    raw = storage.getItem(key);
   } catch {
     return null;
   }
@@ -86,10 +90,10 @@ export function loadSessionState(storage: Storage | null = defaultStorage()): Se
 }
 
 /** 保存当前会话；storage 不可用时静默忽略（持久化失败不影响编辑功能） */
-export function saveSessionState(state: SessionState, storage: Storage | null = defaultStorage()): void {
+export function saveSessionState(state: SessionState, storage: Storage | null = defaultStorage(), key: SessionStorageKey = STORAGE_KEY): void {
   if (!storage) return;
   try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(state));
+    storage.setItem(key, JSON.stringify(state));
   } catch (e) {
     console.warn('[session] 保存会话失败:', e);
   }

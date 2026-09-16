@@ -4,7 +4,7 @@ import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
   GitCompare, Columns2, History, ChevronRight, ChevronLeft, ChevronDown, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
-  Table, Code, Braces, Wand2, Printer, RefreshCw,
+  Table, Code, Braces, Wand2, Printer, RefreshCw, AppWindow,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -57,6 +57,17 @@ import type { UrlImportResult } from './lib/urlImport';
 import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
 import { useLastPointer } from './hooks/useLastPointer';
+import { TabBar } from './components/TabBar';
+import { useWindowBootstrap } from './hooks/useWindowBootstrap';
+import { applyMove } from './lib/tabDragCore';
+import {
+  deserializeTab, isSessionPayload, isTabTransferPayload, makeDragId, makeTransferId,
+  serializeTab, EV_TAB_ADOPTED, EV_TAB_TRANSFER, type TabTransferPayload,
+} from './lib/tabTransfer';
+import {
+  createDocumentWindow, currentWindowLabel, listenTabEvent, sendToWindow, windowCount,
+} from './lib/windows';
+import { loadSessionForLabel, releaseWindowSession, safeLocalStorage } from './lib/sessionWindows';
 import { TopAppBar } from './components/mobile/TopAppBar';
 import { BottomToolbar } from './components/mobile/BottomToolbar';
 import { TabSheet } from './components/mobile/TabSheet';
@@ -183,7 +194,22 @@ export default function App() {
     autosaveIntervalSec: settings.autosaveIntervalSec,
     t,
   });
+
+  /* ---- 多窗口（浏览器式标签拖拽，仅桌面）：本窗口身份与启动载荷 ---- */
+  const [windowLabel] = useState(() => currentWindowLabel());
+  const isMain = windowLabel === 'main';
+  const canMultiWindow = isTauri && !IS_ANDROID_APP;
+  const bootstrap = useWindowBootstrap();
+  /* 启动快照：主窗口同步读本地；拖出/恢复的子窗口来自 Rust 暂存载荷 */
+  const startupSession = useMemo(() => {
+    if (!isTauri) return null;
+    if (!isMain) return bootstrap.payload && isSessionPayload(bootstrap.payload) ? bootstrap.payload.state : null;
+    return loadSessionForLabel(safeLocalStorage(), 'main');
+  }, [isMain, bootstrap.payload]);
   const { writeSessionSnapshot, hydrated, hadSession } = useSessionPersistence({
+    windowLabel,
+    startupSession,
+    startupReady: !isTauri || isMain || bootstrap.ready,
     tabsRef: editor.tabsRef,
     activeTabIdRef: editor.activeTabIdRef,
     setTabs: editor.setTabs,
@@ -191,6 +217,130 @@ export default function App() {
   });
   /* 会话恢复期间不画 welcome.ts 占位编辑器：主区域显示「恢复中」，完成后直接落到上次激活的文档 */
   const restoringSession = !hydrated && hadSession;
+
+  /* 栏内实时重排（dropIndex 为含被拖标签坐标的插入点，位置无变化时跳过提交） */
+  const handleMoveTab = useCallback((tabId: string, dropIndex: number) => {
+    const list = editor.tabsRef.current;
+    const next = applyMove(list, list.findIndex(t => t.id === tabId), dropIndex);
+    if (next) editor.setTabs(next);
+  }, [editor.setTabs, editor.tabsRef]);
+
+  /* 收下其他窗口拖来的标签（合并放下 / 拖出窗口的启动载荷）：
+     同路径已有标签时只聚焦不重复；先 ack 再落位，源窗口凭 ack 决定是否移除源标签 */
+  const handleAdoptTransfer = useCallback((payload: TabTransferPayload, insertIndex: number) => {
+    const ack = (ok: boolean) => void sendToWindow(payload.from, EV_TAB_ADOPTED, {
+      transferId: payload.transferId, dragId: payload.dragId, ok,
+    });
+    const tab = deserializeTab(payload.tab, true);
+    if (!tab) { ack(false); return; }
+    if (tab.path) {
+      const existing = editor.tabsRef.current.find(t => t.path === tab.path && !t.largePreview);
+      if (existing) {
+        if (!existing.isDirty && !existing.readOnly) {
+          /* 目标是干净标签：让位给拖来的缓冲（真·移动，未保存内容随标签走） */
+          editor.setTabs(prev => prev.map(t => t.id === existing.id ? { ...tab, id: existing.id } : t));
+        }
+        /* 目标自己也是脏标签：聚焦已有标签（源缓冲仍受草稿保护，不做静默覆盖） */
+        editor.setActiveTabId(existing.id);
+        ack(true);
+        return;
+      }
+    }
+    editor.setTabs(prev => {
+      const arr = prev.filter(t => !(t.id === INITIAL_WELCOME_ID && !t.isDirty));
+      const i = Math.max(0, Math.min(insertIndex, arr.length));
+      arr.splice(i, 0, tab);
+      return arr;
+    });
+    editor.setActiveTabId(tab.id);
+    ack(true);
+  }, [editor.setActiveTabId, editor.tabsRef, editor.setTabs]);
+
+  /* 拖出/合并的共同链路：序列化标签发往目标（null = 新建窗口装载），
+     等 ack（5s 超时兜底）成功后才移除源标签——失败则什么都不发生 */
+  const pendingTransfersRef = useRef(new Map<string, { tabId: string; wasOnlyTab: boolean; timer: number }>());
+  const startTransfer = useCallback(async (tabId: string, dragId: string, targetLabel: string | null) => {
+    const tab = editor.tabsRef.current.find(t => t.id === tabId);
+    if (!tab) return;
+    const transferId = makeTransferId();
+    const entry = { tabId, wasOnlyTab: editor.tabsRef.current.length === 1, timer: 0 };
+    entry.timer = window.setTimeout(() => {
+      pendingTransfersRef.current.delete(transferId);
+      appAlert(t('tabs.transferFailed'));
+    }, 5000);
+    pendingTransfersRef.current.set(transferId, entry);
+    const payload: TabTransferPayload = { kind: 'tab', from: windowLabel, transferId, dragId, tab: serializeTab(tab) };
+    const sent = targetLabel
+      ? await sendToWindow(targetLabel, EV_TAB_TRANSFER, payload)
+      : (await createDocumentWindow(windowLabel, payload)) !== null;
+    if (!sent) {
+      window.clearTimeout(entry.timer);
+      pendingTransfersRef.current.delete(transferId);
+      appAlert(t('tabs.transferFailed'));
+    }
+  }, [editor.tabsRef, t, windowLabel]);
+
+  const handleDetachTab = useCallback((tabId: string, dragId: string) => {
+    if (!canMultiWindow) return;
+    void startTransfer(tabId, dragId, null);
+  }, [canMultiWindow, startTransfer]);
+
+  const handleMergeDrop = useCallback((tabId: string, dragId: string, targetLabel: string) => {
+    void startTransfer(tabId, dragId, targetLabel);
+  }, [startTransfer]);
+
+  /* ack 回执：唯一标签已随新窗口落位 → 注销会话后自毁；否则移除源标签 */
+  useEffect(() => {
+    if (!canMultiWindow) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      const fn = await listenTabEvent<{ transferId?: string; ok?: boolean }>(EV_TAB_ADOPTED, (p) => {
+        if (!p || typeof p.transferId !== 'string') return;
+        const entry = pendingTransfersRef.current.get(p.transferId);
+        if (!entry) return;
+        window.clearTimeout(entry.timer);
+        pendingTransfersRef.current.delete(p.transferId);
+        if (!p.ok) return;
+        if (entry.wasOnlyTab) {
+          /* 内容已迁移，窗口已无未保存状态：清会话登记后自毁（destroy 不走关闭确认） */
+          releaseWindowSession(safeLocalStorage(), windowLabel, false);
+          void (async () => {
+            try {
+              const { getCurrentWindow } = await import('@tauri-apps/api/window');
+              await getCurrentWindow().destroy();
+            } catch (e) { console.error('空窗口自毁失败:', e); }
+          })();
+          return;
+        }
+        editor.deleteTab(entry.tabId);
+      });
+      if (disposed) fn();
+      else unlisten = fn;
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [canMultiWindow, editor.deleteTab, windowLabel]);
+
+  /* 拖出的子窗口装载启动载荷：整窗追加（新窗口初始只有 welcome 占位） */
+  useEffect(() => {
+    if (!isTauri || isMain) return;
+    const p = bootstrap.payload;
+    if (!p || !isTabTransferPayload(p)) return;
+    handleAdoptTransfer(p, editor.tabsRef.current.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bootstrap.payload, handleAdoptTransfer, isMain]);
+
+  /* 任务栏标题跟随激活文档（浏览器式；多窗口下各窗口可分辨） */
+  const activeTabTitle = editor.activeTab?.title;
+  useEffect(() => {
+    if (!isTauri || IS_ANDROID_APP) return;
+    void import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+      getCurrentWindow().setTitle(activeTabTitle ? `${activeTabTitle} - H.I.D.E` : 'H.I.D.E').catch(() => {});
+    });
+  }, [activeTabTitle]);
 
   /* 快照跟随标签页变化 */
   useEffect(() => {
@@ -264,6 +414,15 @@ export default function App() {
 
   /* 提醒与当前标签页联动：只统计激活文件自己的未处理条数（每标签独立，切换标签页即切换提醒） */
   const activePendingDiffs = editor.activeTab?.path ? (diff.diffTimelines[editor.activeTab.path]?.length ?? 0) : 0;
+
+  /* 脏且存在未处理外部 diff 的标签（TabBar 橙点提示） */
+  const conflictedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const t of editor.tabs) {
+      if (t.isDirty && t.path && (diff.diffTimelines[t.path]?.length ?? 0) > 0) ids.add(t.id);
+    }
+    return ids;
+  }, [editor.tabs, diff.diffTimelines]);
 
   /* ---- 查找 / 替换 / 跳转到行（编辑器内浮层 + 预览查找，弹出在指针位置）---- */
   const [findState, setFindState] = useState({ open: false, showReplace: false, goto: false });
@@ -461,11 +620,16 @@ export default function App() {
     hasTab: () => hasTabRef.current,
   });
 
-  /* ---- 退出确认：有未保存标签时弹应用内确认弹窗，返回是否允许关闭 ---- */
+  /* ---- 退出确认：有未保存标签时弹应用内确认弹窗，返回是否允许关闭 ----
+     多窗口：确认销毁前处置本窗口会话——最后一个窗口（= 退出应用）保留全部快照
+     供下次整体还原；否则清自己的快照并从清单注销（窗口没了，标签不应复活） */
   const confirmWindowClose = useCallback(async (): Promise<boolean> => {
     if (exitingRef.current) return false;
     const dirtyCount = editor.tabsRef.current.filter(t => t.isDirty).length;
-    if (dirtyCount === 0) return true;
+    if (dirtyCount === 0) {
+      if (canMultiWindow) releaseWindowSession(safeLocalStorage(), windowLabel, (await windowCount()) <= 1);
+      return true;
+    }
     const decision = await askDiscardConfirm(
       t('confirm.exitDirtyTitle', { n: dirtyCount }),
       t('confirm.exitNoSave'),
@@ -478,6 +642,7 @@ export default function App() {
         if (tb.isDirty) deleteDraftFor(tb);
       }
       writeSessionSnapshot();
+      if (canMultiWindow) releaseWindowSession(safeLocalStorage(), windowLabel, (await windowCount()) <= 1);
       return true;
     }
     /* 退出并保存：逐个落盘（有路径静默写盘，无路径走另存为对话框），
@@ -490,11 +655,12 @@ export default function App() {
         if (!ok) return false;
       }
       writeSessionSnapshot();
+      if (canMultiWindow) releaseWindowSession(safeLocalStorage(), windowLabel, (await windowCount()) <= 1);
       return true;
     } finally {
       exitingRef.current = false;
     }
-  }, [askDiscardConfirm, file.persistTab, writeSessionSnapshot, editor.tabsRef, t]);
+  }, [askDiscardConfirm, canMultiWindow, file.persistTab, windowLabel, writeSessionSnapshot, editor.tabsRef, t]);
   const confirmWindowCloseRef = useRef(confirmWindowClose);
   confirmWindowCloseRef.current = confirmWindowClose;
 
@@ -1137,76 +1303,23 @@ export default function App() {
           <span className="text-sm font-semibold tracking-tight" data-tauri-drag-region={!IS_ANDROID_APP}>H.I.D.E</span>
         </div>
 
-        {/* 标签页 */}
-        <div
-          data-tauri-drag-region={!IS_ANDROID_APP}
-          className="min-w-0 flex items-center gap-0.5 overflow-x-auto"
-          onWheel={(e) => {
-            /* 桌面滚轮→横滚（滚动条已隐藏）；触摸端走原生滑动 */
-            const el = e.currentTarget;
-            if (el.scrollWidth > el.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-              el.scrollLeft += e.deltaY;
-            }
-          }}
-          onContextMenu={(e) => {
-            /* 空白处右键：无锚点标签，只提供新建与全部关闭 */
-            e.preventDefault();
-            setTabMenu({ x: e.clientX, y: e.clientY, tabId: null });
-          }}
-        >
-          {editor.tabs.map((tab) => {
-            /* 脏且存在未处理外部 diff：橙色提示点（外圈样式区别于琥珀色脏状态点） */
-            const conflicted = tab.isDirty && !!tab.path && (diff.diffTimelines[tab.path]?.length ?? 0) > 0;
-            return (
-            <div
-              key={tab.id}
-              onClick={() => editor.setActiveTabId(tab.id)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setTabMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
-              }}
-              className={cn(
-                "px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-all group max-w-[180px] shrink-0",
-              editor.activeTabId === tab.id
-                ? (isDarkMode ? "bg-zinc-700 text-zinc-100" : "bg-zinc-200 text-zinc-800")
-                : (isDarkMode ? "text-zinc-500 hover:bg-zinc-700/50" : "text-zinc-500 hover:bg-zinc-100")
-              )}
-            >
-              <span
-                title={conflicted ? t('tab.conflictedTitle') : undefined}
-                className={cn(
-                "w-1.5 h-1.5 rounded-full shrink-0",
-                conflicted
-                  ? "bg-orange-500 ring-2 ring-orange-400/40"
-                  : tab.isDirty ? "bg-amber-500" : (editor.activeTabId === tab.id ? "bg-emerald-500" : (isDarkMode ? "bg-zinc-600" : "bg-zinc-300"))
-              )} />
-              <FileText size={12} className="shrink-0 opacity-60" />
-              <span className="truncate">{tab.title}</span>
-              <button
-                onClick={(e) => { e.stopPropagation(); void file.closeTab(tab.id); }}
-                className={cn(
-                  "p-0.5 rounded-sm hover:bg-zinc-500/20 transition-all shrink-0",
-                  IS_TOUCH_PRIMARY ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                )}
-              >
-                <X size={10} />
-              </button>
-            </div>
-            );
-          })}
-        </div>
-
-        <button
-          onClick={file.handleNewFile}
-          className={cn(
-            "p-1.5 rounded-md transition-colors shrink-0",
-            isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
-          )}
-          title={`${t('menu.newFile')} (Ctrl+N)`}
-        >
-          <Plus size={15} />
-        </button>
+        {/* 标签页：渲染与拖拽手势在 TabBar（栏内重排 / 拖出脱离成窗 / 跨窗口合并） */}
+        <TabBar
+          tabs={editor.tabs}
+          activeTabId={editor.activeTabId}
+          isDarkMode={isDarkMode}
+          conflictedIds={conflictedIds}
+          canDetach={canMultiWindow}
+          newTabTitle={`${t('menu.newFile')} (Ctrl+N)`}
+          onSelect={editor.setActiveTabId}
+          onCloseTab={(id) => { void file.closeTab(id); }}
+          onContextMenu={(x, y, tabId) => setTabMenu({ x, y, tabId })}
+          onNewTab={file.handleNewFile}
+          onMoveTab={handleMoveTab}
+          onDetachTab={handleDetachTab}
+          onMergeDrop={handleMergeDrop}
+          onAdoptTransfer={handleAdoptTransfer}
+        />
 
         <div className="flex-1 h-full" data-tauri-drag-region={!IS_ANDROID_APP} />
 
@@ -2249,9 +2362,16 @@ export default function App() {
         >
           {([
             { icon: <Plus size={13} />, label: t('tabs.new'), action: () => file.handleNewFile(), disabled: false },
+            /* 拖拽之外的「移到新窗口」入口（拖出唯一标签等价关窗，故单标签时置灰） */
+            ...(canMultiWindow ? [{
+              icon: <AppWindow size={13} />,
+              label: t('tabs.moveToNewWindow'),
+              action: () => { if (tabMenu?.tabId) void startTransfer(tabMenu.tabId, makeDragId(), null); },
+              disabled: !tabMenu.tabId || editor.tabs.length <= 1,
+            }] : []),
             { icon: <X size={13} />, label: t('tabs.closeOthers'), action: () => void file.closeOtherTabs(tabMenu.tabId!), disabled: !tabMenu.tabId || editor.tabs.length <= 1 },
             { icon: <Trash2 size={13} />, label: t('tabs.closeAll'), action: () => void file.closeAllTabs(), disabled: editor.tabs.length === 0 },
-          ] as const).map(({ icon, label, action, disabled }) => (
+          ]).map(({ icon, label, action, disabled }) => (
             <button
               key={label}
               onClick={() => { setTabMenu(null); action(); }}

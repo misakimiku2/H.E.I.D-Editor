@@ -579,6 +579,8 @@ const zh = {
   'update.downloadFailed': '更新失败',
   'update.notesEmpty': '本次更新没有附带说明。',
   'tabs.new': '新建标签页',
+  'tabs.moveToNewWindow': '移到新窗口',
+  'tabs.transferFailed': '在新窗口打开失败，标签已保留在原窗口。',
   'tabs.closeOthers': '关闭其他标签页',
   'tabs.closeAll': '关闭所有标签页',
 
@@ -1202,6 +1204,8 @@ const en: Record<MessageKey, string> = {
   'update.downloadFailed': 'Update failed',
   'update.notesEmpty': 'No release notes were provided for this update.',
   'tabs.new': 'New Tab',
+  'tabs.moveToNewWindow': 'Move to New Window',
+  'tabs.transferFailed': 'Failed to open in a new window. The tab was kept in place.',
   'tabs.closeOthers': 'Close Other Tabs',
   'tabs.closeAll': 'Close All Tabs',
 

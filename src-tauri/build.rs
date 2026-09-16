@@ -22,6 +22,11 @@ fn main() {
             "fs_delete",
             "fs_reveal",
             "search_in_dir",
+            "create_document_window",
+            "take_window_bootstrap",
+            "window_under_cursor",
+            "send_to_window",
+            "window_count",
         ])),
     )
     .expect("failed to run tauri-build");

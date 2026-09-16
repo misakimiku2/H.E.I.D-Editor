@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口权限（全平台）：文件读写与系统对话框",
-  "windows": ["main"],
+  "description": "主窗口与拖出子窗口权限（全平台）：文件读写、系统对话框与多窗口标签传输",
+  "windows": ["main", "win-*"],
   "permissions": [
     "core:default",
     "dialog:default",
@@ -18,11 +18,17 @@
     "allow-read-line-window",
     "allow-read-byte-window",
     "allow-file-size",
+    "allow-create-document-window",
+    "allow-take-window-bootstrap",
+    "allow-window-under-cursor",
+    "allow-send-to-window",
+    "allow-window-count",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-start-dragging",
+    "core:window:allow-set-title",
     {
       "identifier": "fs:allow-read-dir",
       "allow": [{ "path": "**" }]

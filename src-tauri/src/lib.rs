@@ -7,6 +7,8 @@ mod large_file;
 mod render;
 #[cfg(desktop)]
 mod search;
+#[cfg(desktop)]
+mod windows;
 
 /// 单实例与文件关联的启动路径：首实例从 argv 收集（NSIS「打开方式」/ 拖到快捷方式传入），
 /// 二次启动经 single-instance 回调转发给已运行实例（聚焦窗口 + heid-open-paths 事件）。
@@ -54,9 +56,13 @@ mod launch {
     }
 
     /// 单实例回调：二次启动不开启新进程，聚焦已有窗口并转发待打开路径
-    /// （argv 由 single-instance 插件以 Vec<String> 传入）
+    /// （argv 由 single-instance 插件以 Vec<String> 传入；
+    ///   多窗口下 main 可能已被关闭，回退聚焦任一现存窗口）
     pub fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, _cwd: String) {
-        if let Some(w) = app.get_webview_window("main") {
+        let target = app
+            .get_webview_window("main")
+            .or_else(|| app.webview_windows().into_values().next());
+        if let Some(w) = target {
             let _ = w.unminimize();
             let _ = w.show();
             let _ = w.set_focus();
@@ -117,6 +123,12 @@ mod theme_icon {
         Ok(())
     }
 
+    /// 按窗口当前主题套用任务栏图标（新窗口创建时调用一次；主窗口另有常驻监听）
+    pub fn apply_current(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+        let dark = matches!(window.theme(), Ok(tauri::Theme::Dark));
+        apply(window, dark)
+    }
+
     pub fn setup(app: &tauri::AppHandle) -> tauri::Result<()> {
         let window = app.get_webview_window("main").expect("main window missing");
         let dark = matches!(window.theme(), Ok(tauri::Theme::Dark));
@@ -147,7 +159,8 @@ pub fn run() {
         /* 窗口状态记忆：窗口创建时恢复上次的位置/尺寸/最大化，应用退出时自动保存 */
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(launch::LaunchPaths::default())
-        .manage(large_file::LargeFileIndex::default());
+        .manage(large_file::LargeFileIndex::default())
+        .manage(windows::WindowBootstrap::default());
 
     builder
         .invoke_handler(tauri::generate_handler![
@@ -165,6 +178,16 @@ pub fn run() {
             fsops::fs_reveal,
             #[cfg(desktop)]
             take_launch_paths,
+            #[cfg(desktop)]
+            windows::create_document_window,
+            #[cfg(desktop)]
+            windows::take_window_bootstrap,
+            #[cfg(desktop)]
+            windows::window_under_cursor,
+            #[cfg(desktop)]
+            windows::send_to_window,
+            #[cfg(desktop)]
+            windows::window_count,
             #[cfg(desktop)]
             large_file::probe_large_file,
             #[cfg(desktop)]
