@@ -39,6 +39,8 @@ export interface OverlayActions {
 
 export interface PlatformIntegrationOptions {
   openPathIntoTab: (path: string) => Promise<void>;
+  /** 拖入窗口的文件（File 对象，无磁盘路径） */
+  onDropFiles?: (files: File[]) => void;
   tabsRef: RefObject<{ isDirty: boolean }[]>;
   confirmWindowCloseRef: RefObject<() => Promise<boolean>>;
   overlayState: OverlayState;
@@ -46,8 +48,10 @@ export interface PlatformIntegrationOptions {
 }
 
 export function usePlatformIntegration({
-  openPathIntoTab, tabsRef, confirmWindowCloseRef, overlayState, overlayActions,
+  openPathIntoTab, onDropFiles, tabsRef, confirmWindowCloseRef, overlayState, overlayActions,
 }: PlatformIntegrationOptions) {
+  const onDropFilesRef = useRef(onDropFiles);
+  onDropFilesRef.current = onDropFiles;
   /* ---- 文件关联与单实例（桌面）：首实例启动路径经 take_launch_paths 取走；
      二次实例启动由 Rust 侧聚焦窗口并转发 heid-open-paths 事件 ---- */
   useEffect(() => {
@@ -80,32 +84,30 @@ export function usePlatformIntegration({
     };
   }, [openPathIntoTab]);
 
-  /* ---- Tauri: drag files onto the window to open them ---- */
+  /* ---- 拖文件入窗口打开（HTML5 DnD）：窗口已禁用 tauri 拖放拦截
+     （dragDropEnabled: false，为标签原生拖拽让路），文件经页面 drop 事件接收 ---- */
   useEffect(() => {
-    if (!isTauri) return;
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    (async () => {
-      try {
-        const { listen } = await import('@tauri-apps/api/event');
-        const fn = await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
-          const paths = event.payload?.paths || [];
-          const exts = new Set(READ_EXTENSIONS);
-          paths
-            .filter(p => exts.has('.' + (p.split('.').pop()?.toLowerCase() || '')))
-            .forEach(p => openPathIntoTab(p));
-        });
-        if (disposed) fn();
-        else unlisten = fn;
-      } catch (e) {
-        console.error('drag-drop listener failed:', e);
-      }
-    })();
-    return () => {
-      disposed = true;
-      unlisten?.();
+    const onDragOver = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
     };
-  }, [openPathIntoTab]);
+    const onDrop = (e: DragEvent) => {
+      if (!e.dataTransfer?.types.includes('Files')) return;
+      e.preventDefault();
+      const exts = new Set(READ_EXTENSIONS);
+      const files = Array.from(e.dataTransfer.files).filter(f => {
+        const ext = '.' + (f.name.split('.').pop()?.toLowerCase() || '');
+        return exts.has(ext);
+      });
+      if (files.length > 0) onDropFilesRef.current?.(files);
+    };
+    document.addEventListener('dragover', onDragOver);
+    document.addEventListener('drop', onDrop);
+    return () => {
+      document.removeEventListener('dragover', onDragOver);
+      document.removeEventListener('drop', onDrop);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ---- 全局链接导航守卫：渲染内容里的 <a>（预览正文、导入的来源链接等）不允许让应用 WebView 真实导航 ----
      http(s) 交给系统浏览器打开，其余非锚点协议（javascript: / 相对路径 / 空链接）直接拦截。

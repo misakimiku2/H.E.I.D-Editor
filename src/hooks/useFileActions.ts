@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import {
   pickAndReadFile, readLocalPath, saveFileToDisk, androidPickFiles, isTauri, READ_EXTENSIONS,
+  openedFromBytes,
   type OpenedFile,
 } from '../lib/fileIO';
 import {
@@ -209,6 +210,43 @@ export function useFileActions({
     if (path) addRecent(path, name);
   }, [addRecent, openPathIntoTab, setTabs, t]);
 
+  /** 拖放的 File 对象打开为无路径标签(保存走另存为;超大文件提示拒绝) */
+  const openDroppedFiles = useCallback(async (files: File[]) => {
+    for (const file of files) {
+      if (file.size > LARGE_FILE_MAX_BYTES) {
+        appAlert(t('open.errTooLarge', { size: formatBytes(file.size), max: formatBytes(LARGE_FILE_MAX_BYTES) }));
+        continue;
+      }
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const opened = openedFromBytes(bytes, { name: file.name, path: null, handle: null });
+        const language = detectLanguageFromPath(file.name);
+        const newTab: FileTab = {
+          id: nextTabId(),
+          title: file.name,
+          path: null,
+          handle: null,
+          content: opened.content,
+          originalContent: opened.content,
+          language,
+          isDirty: false,
+          readOnly: !!opened.binary,
+          mdView: language === 'markdown' ? 'preview' : 'edit',
+          encoding: opened.encoding,
+          bom: opened.bom,
+          eol: opened.eol,
+          originalEol: opened.eol,
+          binary: opened.binary,
+          large: opened.content.length > LARGE_FILE_CHARS,
+        };
+        setTabs(prev => [...prev, newTab]);
+        setActiveTabIdRef.current(newTab.id);
+      } catch (e) {
+        console.error('打开拖放文件失败:', file.name, e);
+        appAlert(t('open.errGeneric', { msg: e instanceof Error ? e.message : String(e) }));
+      }
+    }
+  }, [setTabs, setActiveTabIdRef, t]);
   const handleNewFile = useCallback(() => {
     const newTab = makeNewUntitled();
     setTabs(prev => [...prev, newTab]);
@@ -408,6 +446,7 @@ export function useFileActions({
     saving, savingRef,
     recentFiles, setRecentFiles,
     openPathIntoTab,
+    openDroppedFiles,
     handleOpenFile, handleNewFile,
     persistTab,
     handleSave, handleSaveAs, handleRevert,

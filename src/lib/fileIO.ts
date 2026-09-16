@@ -184,6 +184,12 @@ export async function pickAndReadFile(): Promise<OpenedFile | null> {
   });
 }
 
+/** 拖放的 File 对象 → OpenedFile:无磁盘路径(保存走另存为),编码自动检测 */
+export async function readDroppedFile(file: File): Promise<OpenedFile> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return openedFromBytes(bytes, { name: file.name, path: null, handle: null });
+}
+
 export interface SaveResult {
   ok: boolean;
   savedPath: string | null;

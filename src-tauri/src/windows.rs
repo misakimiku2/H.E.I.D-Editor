@@ -87,6 +87,8 @@ fn build_and_place(
         .shadow(true)
         .resizable(true)
         .min_inner_size(720.0, 480.0)
+        /* 与主窗口一致:禁用 tauri 拖放拦截,页面级 HTML5 拖拽(标签/合并)才可用 */
+        .disable_drag_drop_handler()
         /* 先隐藏:定位到释放点后再显示 */
         .visible(false);
 

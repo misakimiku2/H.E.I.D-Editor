@@ -733,6 +733,7 @@ export default function App() {
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
+    onDropFiles: (files) => void file.openDroppedFiles(files),
     tabsRef: editor.tabsRef,
     confirmWindowCloseRef,
     overlayState,
