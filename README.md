@@ -6,7 +6,7 @@
 
 **Highlighting Intelligent Document Editor**
 
-秒开的轻量代码 / 文档编辑器 —— 安装包约 2.4 MB，深浅色主题，30+ 语言语法高亮，Markdown / CSV / SVG / 图片开箱即用
+秒开的轻量代码 / 文档编辑器 —— 安装包约 5-6 MB，深浅色主题，30+ 语言语法高亮，Markdown / CSV / SVG / 图片开箱即用
 
 [![Release](https://img.shields.io/github/v/release/misakimiku2/H.E.I.D-Editor?logo=github)](https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest)
 [![CI](https://github.com/misakimiku2/H.E.I.D-Editor/actions/workflows/ci.yml/badge.svg)](https://github.com/misakimiku2/H.E.I.D-Editor/actions/workflows/ci.yml)
