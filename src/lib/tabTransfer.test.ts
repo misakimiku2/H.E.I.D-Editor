@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { serializeTab, deserializeTab, isTabTransferPayload, isSessionPayload, EV_TAB_DRAG_HOVER, EV_TAB_DRAG_LEAVE, EV_TAB_TRANSFER, EV_TAB_ADOPTED, makeTransferId } from './tabTransfer';
+import { serializeTab, deserializeTab, isTabTransferPayload, isSessionPayload, EV_TAB_ADOPTED, makeTransferId } from './tabTransfer';
 import { makeUntitledTab, makeWelcomeTab } from './tabModel';
 
 /** 构造一个带句柄与跳转请求的完整标签(handle 为浏览器 API,不可跨窗口序列化) */
@@ -80,9 +80,7 @@ describe('载荷类型守卫', () => {
 
 describe('事件名与 id', () => {
   it('事件名常量使用 heid- 前缀命名空间', () => {
-    for (const ev of [EV_TAB_DRAG_HOVER, EV_TAB_DRAG_LEAVE, EV_TAB_TRANSFER, EV_TAB_ADOPTED]) {
-      expect(ev.startsWith('heid-tab-')).toBe(true);
-    }
+    expect(EV_TAB_ADOPTED.startsWith('heid-tab-')).toBe(true);
   });
 
   it('makeTransferId 唯一(同批多次调用不重复)', () => {

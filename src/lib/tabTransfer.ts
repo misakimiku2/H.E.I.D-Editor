@@ -33,13 +33,7 @@ export type WindowBootstrapPayload = TabTransferPayload | SessionPayload;
 
 /* ---- 跨窗口事件名(Rust emit_to → 前端 listen) ---- */
 
-/** 拖拽悬停在目标窗口标签条上:{ dragId, x, y }(x/y 为目标窗口内容区逻辑坐标) */
-export const EV_TAB_DRAG_HOVER = 'heid-tab-drag-hover';
-/** 拖拽离开目标窗口标签条:{ dragId } */
-export const EV_TAB_DRAG_LEAVE = 'heid-tab-drag-leave';
-/** 放下合并:{ from, transferId, dragId, tab, insertIndex } */
-export const EV_TAB_TRANSFER = 'heid-tab-transfer';
-/** 目标窗口回执给源窗口:{ transferId, dragId, ok } */
+/** 目标窗口收下标签后回执给源窗口:{ transferId, dragId, ok } */
 export const EV_TAB_ADOPTED = 'heid-tab-adopted';
 
 const MD_VIEWS: MdViewMode[] = ['edit', 'split', 'preview'];

@@ -160,7 +160,8 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(launch::LaunchPaths::default())
         .manage(large_file::LargeFileIndex::default())
-        .manage(windows::WindowBootstrap::default());
+        .manage(windows::WindowBootstrap::default())
+        .manage(windows::PendingTabDrag::default());
 
     builder
         .invoke_handler(tauri::generate_handler![
@@ -183,11 +184,16 @@ pub fn run() {
             #[cfg(desktop)]
             windows::take_window_bootstrap,
             #[cfg(desktop)]
-            windows::window_under_cursor,
             #[cfg(desktop)]
             windows::send_to_window,
             #[cfg(desktop)]
             windows::window_count,
+            #[cfg(desktop)]
+            windows::begin_tab_drag,
+            #[cfg(desktop)]
+            windows::consume_pending_drag,
+            #[cfg(desktop)]
+            windows::finish_tab_drag,
             #[cfg(desktop)]
             large_file::probe_large_file,
             #[cfg(desktop)]

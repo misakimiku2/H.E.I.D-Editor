@@ -16,9 +16,13 @@
 
 - **新窗口形态 = 同进程新 WebviewWindow**。应用已启用 single-instance 插件,
   真·第二进程会被弹回;浏览器多窗口同为单进程多窗口,行为一致、开销最小。
-- **拖拽 = 指针事件自绘**,不用 HTML5 DnD(后者无法检测「拖出窗口」)。
-  `setPointerCapture` 使指针移出源窗口后事件仍派发给源窗口,
-  源窗口借此轮询 Rust「光标落在哪个窗口」实现跨窗口合并定位。
+- **拖拽 = 原生 HTML5 DnD(OLE)**(v2 修订;v1 曾用指针自绘+浮影,
+  但 DOM 画不到窗外,越窗后指针上空无一物,不符合桌面端直觉):
+  dragstart 时 setDragImage(标签元素)——系统渲染的拖拽图像全局跟随光标(记事本式);
+  栏内重排由 dragover 实时驱动;跨窗口合并由目标窗口直接收 dragover/drop,
+  命中测试交给 OS,天然无重叠窗口歧义;标签载荷经 Rust 暂存区(PendingTabDrag)
+  传递,不依赖跨实例 dataTransfer;脱离落点 = 光标位置(cursor_position),
+  新窗定位后按所在显示器夹紧,先隐藏定位再显示避免闪帧。
 - **跨窗口通信统一经 Rust 命令转发**(`emit_to`),避免为每个新窗口标签补前端事件权限。
 - **会话快照按窗口隔离**:主窗口沿用 `heid-session`(老用户无感迁移),
   子窗口写 `heid-session:<label>`,清单键 `heid-session:manifest` 登记窗口列表。

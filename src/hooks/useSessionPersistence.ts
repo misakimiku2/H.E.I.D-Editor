@@ -122,6 +122,8 @@ export function useSessionPersistence({
     saveSessionForLabel(safeLocalStorage(), windowLabel, {
       tabs: tabsRef.current.flatMap((t): SessionState['tabs'] => {
         if (t.id === RELEASE_NOTES_TAB_ID) return [];
+        /* 未被编辑过的初始 welcome 占位页不进快照:纯占位窗口不应在重启后复活 */
+        if (t.id === INITIAL_WELCOME_ID && !t.isDirty) return [];
         if (t.path) return [{ kind: 'file' as const, path: t.path, mdView: t.mdView }];
         /* 脏的无路径标签：内容在草稿（lib/drafts），快照只记 draft 标志；
            用户确认「不保存」退出时草稿与快照条目一并清除（见 confirmWindowClose / closeTab） */

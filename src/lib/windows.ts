@@ -4,7 +4,7 @@
  */
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isTauri } from './fileIO';
-import type { WindowBootstrapPayload } from './tabTransfer';
+import type { TabTransferPayload, WindowBootstrapPayload } from './tabTransfer';
 
 /** 当前窗口 label（main / win-N）；非 Tauri 返回 'main'，会话键逻辑无需分支 */
 export function currentWindowLabel(): string {
@@ -53,20 +53,53 @@ export async function takeWindowBootstrap(): Promise<WindowBootstrapPayload | nu
   }
 }
 
-export interface CursorHit {
-  label: string;
-  x: number;
-  y: number;
+/* ---- 原生标签拖拽的载荷暂存（dragstart 登记 / drop 消费 / dragend 收尾） ---- */
+
+/** 拖拽开始：源窗口登记标签载荷（目标窗口 drop 时消费） */
+export async function beginTabDrag(payload: TabTransferPayload): Promise<void> {
+  if (!isTauri) return;
+  try {
+    await invoke('begin_tab_drag', { payload });
+  } catch (e) {
+    console.error('[windows] 登记拖拽载荷失败:', e);
+  }
 }
 
-/** 全局光标命中测试（含本窗口，调用方按 label 过滤）；不在任何窗口上返回 null */
-export async function windowUnderCursor(): Promise<CursorHit | null> {
+/** 目标窗口 drop：消费暂存载荷（拿不到说明拖拽已被别处处理或已取消） */
+export async function consumePendingDrag(): Promise<TabTransferPayload | null> {
   if (!isTauri) return null;
   try {
-    return await invoke<CursorHit | null>('window_under_cursor');
-  } catch {
+    return await invoke<TabTransferPayload | null>('consume_pending_drag');
+  } catch (e) {
+    console.error('[windows] 消费拖拽载荷失败:', e);
     return null;
   }
+}
+
+export type TabDragFinishAction = 'detached' | 'consumed';
+
+/** 源窗口 dragend 收尾：载荷未被其它窗口消费 → 脱离成窗到光标位置；
+    已被消费 → 返回 'consumed'（源标签移除由目标窗口的 ack 负责） */
+export async function finishTabDrag(grab: { grabDx: number; grabDy: number }): Promise<TabDragFinishAction | null> {
+  if (!isTauri) return null;
+  try {
+    const r = await invoke<{ action: TabDragFinishAction }>('finish_tab_drag', {
+      grabDx: grab.grabDx,
+      grabDy: grab.grabDy,
+    });
+    return r.action;
+  } catch (e) {
+    console.error('[windows] 拖拽收尾失败:', e);
+    return null;
+  }
+}
+
+/** 取消进行中的拖拽（栏内重排完成时调用）：暂存区清空即可 */
+export async function cancelTabDrag(): Promise<void> {
+  if (!isTauri) return;
+  try {
+    await invoke('consume_pending_drag');
+  } catch { /* 静默 */ }
 }
 
 /** 向指定窗口转发标签协议事件（Rust 白名单校验）；失败返回 false */

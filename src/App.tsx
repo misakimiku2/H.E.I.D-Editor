@@ -62,11 +62,11 @@ import { useWindowBootstrap } from './hooks/useWindowBootstrap';
 import { applyMove } from './lib/tabDragCore';
 import {
   deserializeTab, isSessionPayload, isTabTransferPayload, makeDragId, makeTransferId,
-  serializeTab, EV_TAB_ADOPTED, EV_TAB_TRANSFER, type TabTransferPayload,
+  serializeTab, EV_TAB_ADOPTED, type TabTransferPayload,
 } from './lib/tabTransfer';
 import {
-  createDocumentWindow, currentWindowLabel, listenTabEvent, sendToWindow, windowCount,
-  type WindowDropPoint,
+  beginTabDrag, cancelTabDrag, consumePendingDrag, createDocumentWindow, currentWindowLabel,
+  finishTabDrag, listenTabEvent, sendToWindow, windowCount,
 } from './lib/windows';
 import { loadSessionForLabel, releaseWindowSession, safeLocalStorage } from './lib/sessionWindows';
 import { TopAppBar } from './components/mobile/TopAppBar';
@@ -257,10 +257,11 @@ export default function App() {
     ack(true);
   }, [editor.setActiveTabId, editor.tabsRef, editor.setTabs]);
 
-  /* 拖出/合并的共同链路：序列化标签发往目标（null = 新建窗口装载），
-     等 ack（5s 超时兜底）成功后才移除源标签——失败则什么都不发生 */
+  /* 「移到新窗口」链路：新建窗口装载标签,等 ack（5s 超时兜底）成功后才移除源标签;
+     栏内/跨窗的原生拖拽走 handleNativeDragStart/End(载荷经 Rust 暂存区) */
   const pendingTransfersRef = useRef(new Map<string, { tabId: string; wasOnlyTab: boolean; timer: number }>());
-  const startTransfer = useCallback(async (tabId: string, dragId: string, targetLabel: string | null, drop?: WindowDropPoint) => {
+  const nativeTransferIdRef = useRef<string | null>(null);
+  const startTransfer = useCallback(async (tabId: string, dragId: string) => {
     const tab = editor.tabsRef.current.find(t => t.id === tabId);
     if (!tab) return;
     const transferId = makeTransferId();
@@ -271,9 +272,7 @@ export default function App() {
     }, 5000);
     pendingTransfersRef.current.set(transferId, entry);
     const payload: TabTransferPayload = { kind: 'tab', from: windowLabel, transferId, dragId, tab: serializeTab(tab) };
-    const sent = targetLabel
-      ? await sendToWindow(targetLabel, EV_TAB_TRANSFER, payload)
-      : (await createDocumentWindow(windowLabel, payload, drop)) !== null;
+    const sent = (await createDocumentWindow(windowLabel, payload)) !== null;
     if (!sent) {
       window.clearTimeout(entry.timer);
       pendingTransfersRef.current.delete(transferId);
@@ -281,14 +280,56 @@ export default function App() {
     }
   }, [editor.tabsRef, t, windowLabel]);
 
-  const handleDetachTab = useCallback((tabId: string, dragId: string, drop: WindowDropPoint) => {
-    if (!canMultiWindow) return;
-    void startTransfer(tabId, dragId, null, drop);
-  }, [canMultiWindow, startTransfer]);
+  /* 原生拖拽开始:登记载荷(目标窗口 drop 时消费),同时登记 ack 匹配项 */
+  const handleNativeDragStart = useCallback((tabId: string) => {
+    const tab = editor.tabsRef.current.find(t => t.id === tabId);
+    if (!tab) return;
+    const transferId = makeTransferId();
+    nativeTransferIdRef.current = transferId;
+    pendingTransfersRef.current.set(transferId, {
+      tabId, wasOnlyTab: editor.tabsRef.current.length === 1, timer: 0,
+    });
+    void beginTabDrag({
+      kind: 'tab', from: windowLabel, transferId, dragId: makeDragId(), tab: serializeTab(tab),
+    });
+  }, [editor.tabsRef, windowLabel]);
 
-  const handleMergeDrop = useCallback((tabId: string, dragId: string, targetLabel: string) => {
-    void startTransfer(tabId, dragId, targetLabel);
-  }, [startTransfer]);
+  /* 原生拖拽结束:落在本窗口标签条 = 重排完成(撤销暂存);
+     落在别处 = 交由 Rust 收尾——其它窗口已收下(ack 处理)或脱离成窗到光标位置 */
+  const handleNativeDragEnd = useCallback((tabId: string, handled: boolean, grab: { grabDx: number; grabDy: number }) => {
+    const transferId = nativeTransferIdRef.current;
+    nativeTransferIdRef.current = null;
+    if (handled) {
+      if (transferId) pendingTransfersRef.current.delete(transferId);
+      void cancelTabDrag();
+      return;
+    }
+    void (async () => {
+      const action = await finishTabDrag(grab);
+      if (action === 'consumed') return; /* ack 监听器负责移除源标签 */
+      if (!action) {
+        if (transferId) pendingTransfersRef.current.delete(transferId);
+        appAlert(t('tabs.transferFailed'));
+        return;
+      }
+      /* detached:新窗口装载后回 ack;5s 未回执提示失败、标签保留 */
+      const entry = transferId ? pendingTransfersRef.current.get(transferId) : undefined;
+      if (entry) {
+        entry.timer = window.setTimeout(() => {
+          if (transferId) pendingTransfersRef.current.delete(transferId);
+          appAlert(t('tabs.transferFailed'));
+        }, 5000);
+      }
+    })();
+  }, [t]);
+
+  /* 其它窗口把标签放到本窗口标签条:消费暂存载荷并收下(ack 回执给源窗口) */
+  const handleAdoptForeignDrop = useCallback((insertIndex: number) => {
+    void (async () => {
+      const payload = await consumePendingDrag();
+      if (payload) handleAdoptTransfer(payload, insertIndex);
+    })();
+  }, [handleAdoptTransfer]);
 
   /* ack 回执：唯一标签已随新窗口落位 → 注销会话后自毁；否则移除源标签 */
   useEffect(() => {
@@ -1317,9 +1358,9 @@ export default function App() {
           onContextMenu={(x, y, tabId) => setTabMenu({ x, y, tabId })}
           onNewTab={file.handleNewFile}
           onMoveTab={handleMoveTab}
-          onDetachTab={handleDetachTab}
-          onMergeDrop={handleMergeDrop}
-          onAdoptTransfer={handleAdoptTransfer}
+          onNativeDragStart={handleNativeDragStart}
+          onNativeDragEnd={handleNativeDragEnd}
+          onAdoptForeignDrop={handleAdoptForeignDrop}
         />
 
         <div className="flex-1 h-full" data-tauri-drag-region={!IS_ANDROID_APP} />
@@ -2367,7 +2408,7 @@ export default function App() {
             ...(canMultiWindow ? [{
               icon: <AppWindow size={13} />,
               label: t('tabs.moveToNewWindow'),
-              action: () => { if (tabMenu?.tabId) void startTransfer(tabMenu.tabId, makeDragId(), null); },
+              action: () => { if (tabMenu?.tabId) void startTransfer(tabMenu.tabId, makeDragId()); },
               disabled: !tabMenu.tabId || editor.tabs.length <= 1,
             }] : []),
             { icon: <X size={13} />, label: t('tabs.closeOthers'), action: () => void file.closeOtherTabs(tabMenu.tabId!), disabled: !tabMenu.tabId || editor.tabs.length <= 1 },
