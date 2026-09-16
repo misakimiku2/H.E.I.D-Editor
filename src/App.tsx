@@ -66,6 +66,7 @@ import {
 } from './lib/tabTransfer';
 import {
   createDocumentWindow, currentWindowLabel, listenTabEvent, sendToWindow, windowCount,
+  type WindowDropPoint,
 } from './lib/windows';
 import { loadSessionForLabel, releaseWindowSession, safeLocalStorage } from './lib/sessionWindows';
 import { TopAppBar } from './components/mobile/TopAppBar';
@@ -259,7 +260,7 @@ export default function App() {
   /* 拖出/合并的共同链路：序列化标签发往目标（null = 新建窗口装载），
      等 ack（5s 超时兜底）成功后才移除源标签——失败则什么都不发生 */
   const pendingTransfersRef = useRef(new Map<string, { tabId: string; wasOnlyTab: boolean; timer: number }>());
-  const startTransfer = useCallback(async (tabId: string, dragId: string, targetLabel: string | null) => {
+  const startTransfer = useCallback(async (tabId: string, dragId: string, targetLabel: string | null, drop?: WindowDropPoint) => {
     const tab = editor.tabsRef.current.find(t => t.id === tabId);
     if (!tab) return;
     const transferId = makeTransferId();
@@ -272,7 +273,7 @@ export default function App() {
     const payload: TabTransferPayload = { kind: 'tab', from: windowLabel, transferId, dragId, tab: serializeTab(tab) };
     const sent = targetLabel
       ? await sendToWindow(targetLabel, EV_TAB_TRANSFER, payload)
-      : (await createDocumentWindow(windowLabel, payload)) !== null;
+      : (await createDocumentWindow(windowLabel, payload, drop)) !== null;
     if (!sent) {
       window.clearTimeout(entry.timer);
       pendingTransfersRef.current.delete(transferId);
@@ -280,9 +281,9 @@ export default function App() {
     }
   }, [editor.tabsRef, t, windowLabel]);
 
-  const handleDetachTab = useCallback((tabId: string, dragId: string) => {
+  const handleDetachTab = useCallback((tabId: string, dragId: string, drop: WindowDropPoint) => {
     if (!canMultiWindow) return;
-    void startTransfer(tabId, dragId, null);
+    void startTransfer(tabId, dragId, null, drop);
   }, [canMultiWindow, startTransfer]);
 
   const handleMergeDrop = useCallback((tabId: string, dragId: string, targetLabel: string) => {

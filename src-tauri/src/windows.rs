@@ -15,6 +15,43 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindo
 #[derive(Default)]
 pub struct WindowBootstrap(Mutex<HashMap<String, Value>>);
 
+/// 拖拽释放点(前端内容区逻辑坐标 + 抓取点在标签内的偏移):
+/// 用于把新窗口定位到鼠标释放处
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropPoint {
+    pub client_x: f64,
+    pub client_y: f64,
+    pub grab_dx: f64,
+    pub grab_dy: f64,
+}
+
+/// 依据释放点计算新窗口外框位置(逻辑坐标):全局点 = 源窗内容区原点 + 客户端坐标,
+/// 再减去抓取偏移,使标签落点即新窗标签条位置;并夹紧到该点所在显示器内
+fn drop_position(window: &WebviewWindow, ww: &WebviewWindow, drop: &DropPoint) -> Option<tauri::LogicalPosition<f64>> {
+    let sf = window.scale_factor().ok()?;
+    let inner = window.inner_position().ok()?;
+    let gx = inner.x as f64 / sf + drop.client_x;
+    let gy = inner.y as f64 / sf + drop.client_y;
+    let mut wx = gx - drop.grab_dx;
+    let mut wy = gy - drop.grab_dy;
+
+    /* 夹紧到释放点所在显示器:窗口右缘留 8px、顶缘留 8px、底缘至少让出 60px(标题栏可见) */
+    if let Ok(Some(monitor)) = ww.monitor_from_point(gx * sf, gy * sf) {
+        let mp = monitor.position();
+        let ms = monitor.size();
+        let (mx, my) = (mp.x as f64 / sf, mp.y as f64 / sf);
+        let (mw, mh) = (ms.width as f64 / sf, ms.height as f64 / sf);
+        let (ww_l, _wh_l) = ww
+            .inner_size()
+            .map(|s| (s.width as f64 / sf, s.height as f64 / sf))
+            .unwrap_or((1000.0, 640.0));
+        wx = wx.clamp(mx + 8.0, (mx + mw - ww_l - 8.0).max(mx + 8.0));
+        wy = wy.clamp(my + 8.0, (my + mh - 60.0).max(my + 8.0));
+    }
+    Some(tauri::LogicalPosition::new(wx, wy))
+}
+
 /// 创建文档窗口。必须为 async 命令:同步命令在主线程执行,
 /// WebviewWindowBuilder::build() 要等主线程事件循环处理建窗消息,会自死锁
 /// (Windows 上表现为窗口壳出现但 webview 永远白屏)。
@@ -23,6 +60,7 @@ pub async fn create_document_window(
     app: AppHandle,
     window: WebviewWindow,
     payload: Value,
+    drop: Option<DropPoint>,
 ) -> Result<String, String> {
     /* label 取最小空闲 win-N:数值稳定 → window-state 插件按 label 还原上次几何 */
     let existing = app.webview_windows();
@@ -42,7 +80,9 @@ pub async fn create_document_window(
         .decorations(false)
         .shadow(true)
         .resizable(true)
-        .min_inner_size(720.0, 480.0);
+        .min_inner_size(720.0, 480.0)
+        /* 先隐藏:定位到释放点后再显示,避免在旧位置闪一帧 */
+        .visible(false);
 
     /* 几何继承源窗口(最大化源给默认尺寸居中),位置按现存窗口数级联偏移,
        避免连拖多个标签时新窗完全叠在源窗上 */
@@ -66,13 +106,25 @@ pub async fn create_document_window(
         }
     }
 
-    let ww = builder.build().map_err(|e| {
-        /* 建窗失败清掉暂存载荷,避免泄漏 */
-        if let Ok(mut map) = app.state::<WindowBootstrap>().0.lock() {
-            map.remove(&label);
+    let ww = builder
+        .build()
+        .map_err(|e| {
+            /* 建窗失败清掉暂存载荷,避免泄漏 */
+            if let Ok(mut map) = app.state::<WindowBootstrap>().0.lock() {
+                map.remove(&label);
+            }
+            e.to_string()
+        })?;
+
+    /* 定位:拖拽释放点优先(标签落点即新窗标签条),无释放点(会话恢复)沿用
+       builder 的继承+级联位置——window-state 插件在 on_window_ready 阶段
+       已按 label 恢复过历史几何,无 drop 时不覆盖 */
+    if let Some(drop) = &drop {
+        if let Some(pos) = drop_position(&window, &ww, drop) {
+            let _ = ww.set_position(pos);
         }
-        e.to_string()
-    })?;
+    }
+    let _ = ww.show();
 
     /* 任务栏图标跟随当前主题(主窗口由 theme_icon::setup 常驻监听,新窗口创建时套用一次) */
     let _ = super::theme_icon::apply_current(&ww);

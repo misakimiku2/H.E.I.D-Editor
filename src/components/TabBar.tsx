@@ -62,8 +62,9 @@ export interface TabBarProps {
   onNewTab: () => void;
   /** 栏内实时重排：dropIndex 为「含被拖标签」坐标的插入点（tabDragCore 语义） */
   onMoveTab: (tabId: string, dropIndex: number) => void;
-  /** 拖出脱离（含拖到无窗口区域松手）：新建窗口装载 */
-  onDetachTab: (tabId: string, dragId: string) => void;
+  /** 拖出脱离（含拖到无窗口区域松手）：新建窗口装载;drop 为释放点与抓取偏移,
+      供后端把新窗口定位到鼠标释放处 */
+  onDetachTab: (tabId: string, dragId: string, drop: { clientX: number; clientY: number; grabDx: number; grabDy: number }) => void;
   /** 拖到其他窗口标签条松手：并入目标窗口 */
   onMergeDrop: (tabId: string, dragId: string, targetLabel: string) => void;
   /** 收下其他窗口拖来的标签（App 负责插入与 ack） */
@@ -135,8 +136,11 @@ export function TabBar({
     const d = dragRef.current;
     const ghost = ghostRef.current;
     if (!d || !ghost) return;
-    ghost.style.left = `${clientX - d.grabDX}px`;
-    ghost.style.top = `${clientY - d.grabDY}px`;
+    /* 指针出窗后 DOM 画不到视口外:浮影夹在窗口边缘(留 6px),保持「标签跟手」的可见反馈 */
+    const gx = Math.max(6, Math.min(clientX - d.grabDX, window.innerWidth - d.tabWidth - 6));
+    const gy = Math.max(6, Math.min(clientY - d.grabDY, window.innerHeight - 34));
+    ghost.style.left = `${gx}px`;
+    ghost.style.top = `${gy}px`;
   };
 
   const handleTabPointerDown = (e: React.PointerEvent<HTMLDivElement>, tabId: string) => {
@@ -275,7 +279,9 @@ export function TabBar({
       } else if (d.mergeTarget) {
         onMergeDrop(d.tabId, d.dragId, d.mergeTarget);
       } else {
-        onDetachTab(d.tabId, d.dragId);
+        onDetachTab(d.tabId, d.dragId, {
+          clientX: d.lastX, clientY: d.lastY, grabDx: d.grabDX, grabDy: d.grabDY,
+        });
       }
     }
     clearMergeTarget(d);

@@ -21,11 +21,21 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return invoke<T>(cmd, args);
 }
 
-/** 新建文档窗口（载荷：单标签传输或整份会话快照），返回新窗口 label；失败返回 null */
-export async function createDocumentWindow(source: string, payload: WindowBootstrapPayload): Promise<string | null> {
+/** 释放点信息:前端内容区坐标 + 抓取点在标签内的偏移,后端换算全局屏幕坐标定位新窗口。
+    字段名与 Rust DropPoint 的 serde camelCase 对齐(grabDx/grabDy,非 grabDX) */
+export interface WindowDropPoint {
+  clientX: number;
+  clientY: number;
+  grabDx: number;
+  grabDy: number;
+}
+
+/** 新建文档窗口（载荷：单标签传输或整份会话快照），返回新窗口 label；失败返回 null。
+    drop 传入释放点时,新窗口定位到鼠标释放处（并夹紧到显示器内） */
+export async function createDocumentWindow(source: string, payload: WindowBootstrapPayload, drop?: WindowDropPoint): Promise<string | null> {
   if (!isTauri) return null;
   try {
-    return await invoke<string>('create_document_window', { source, payload });
+    return await invoke<string>('create_document_window', { source, payload, drop: drop ?? null });
   } catch (e) {
     console.error('[windows] 创建文档窗口失败:', e);
     return null;
