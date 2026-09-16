@@ -978,9 +978,11 @@ export default function App() {
       if (isTauri && !IS_ANDROID_APP) {
         const { readImage } = await import('@tauri-apps/plugin-clipboard-manager');
         const img = await readImage() as any;
-        const w = typeof img.width === 'function' ? await img.width() : img.width;
-        const h = typeof img.height === 'function' ? await img.height() : img.height;
+        /* 核心 Image 是 Rust 资源句柄：rgba() 与 size() 都是异步方法（没有 width/height 属性） */
         const rgba = typeof img.rgba === 'function' ? await img.rgba() : img.rgba;
+        const size = typeof img.size === 'function' ? await img.size() : img.size;
+        const w = size?.width;
+        const h = size?.height;
         if (!rgba || !w || !h) return null;
         blob = await rgbaToPngBlob(new Uint8ClampedArray(rgba), w, h);
       } else if (!isTauri && navigator.clipboard?.read) {
@@ -1693,48 +1695,43 @@ export default function App() {
             )}
             {/* 行容器恒定：预览槽位恒挂 key（跨视图/跨标签保活不重挂） */}
             <div className="relative flex flex-1 overflow-hidden">
-              {/* Markdown 大纲：贴左缘的浮动小窗（毛玻璃，与右键菜单同底），左侧垂直居中。
-                  收起时是贴窗口左缘的 ">" 把手，展开后面板出现、把手变 "<" 贴面板右缘（手机无此面板） */}
+              {/* Markdown 大纲：贴右缘的浮动小窗（毛玻璃，与右键菜单同底），右侧垂直居中。
+                  收起时是贴窗口右缘的 "<" 把手；展开后面板在左、把手变 ">" 贴面板右缘。
+                  高度自适应内容，上限为视图高度减去上下各 40px，超出即面板内滚动；
+                  展开/收起带宽度 + 透明度过渡（手机无此面板） */}
               {isMarkdown && !isPhone && outlineOpen && (
-                <div className="absolute left-0 top-1/2 z-30 flex -translate-y-1/2 items-center" data-testid="md-outline-pop">
-                  {!outlineCollapsed && (
+                <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex items-center" data-testid="md-outline-pop">
+                  <div className="pointer-events-auto flex items-center">
                     <div
                       className={cn(
-                        'flex w-60 flex-col overflow-hidden rounded-r-xl border border-l-0 shadow-xl backdrop-blur-md',
-                        isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
+                        'overflow-x-hidden overflow-y-auto overscroll-contain rounded-l-xl border border-r-0 shadow-xl backdrop-blur-md transition-all duration-200 ease-out',
+                        outlineCollapsed
+                          ? 'w-0 border-transparent opacity-0'
+                          : (isDarkMode ? 'w-60 border-zinc-700/70 bg-zinc-800/70 opacity-100' : 'w-60 border-zinc-200/80 bg-white/70 opacity-100'),
                       )}
-                      style={{ maxHeight: 'calc(100% - 32px)' }}
+                      style={{ maxHeight: 'calc(100% - 80px)' }}
                     >
-                      <div className={cn(
-                        'flex shrink-0 items-center gap-1.5 px-3 pb-1 pt-2.5 text-xs font-semibold',
-                        isDarkMode ? 'text-zinc-300' : 'text-zinc-600',
-                      )}>
-                        <ListTree size={13} />
-                        {t('md.outline')}
-                      </div>
-                      <div className="overflow-auto overscroll-contain pb-1.5">
-                        <MarkdownOutline
-                          headings={mdOutline}
-                          isDarkMode={isDarkMode}
-                          activeOffset={outlineActiveOffset}
-                          onJump={handleOutlineJump}
-                        />
-                      </div>
+                      <MarkdownOutline
+                        headings={mdOutline}
+                        isDarkMode={isDarkMode}
+                        activeOffset={outlineActiveOffset}
+                        onJump={handleOutlineJump}
+                      />
                     </div>
-                  )}
-                  <button
-                    className={cn(
-                      'flex h-11 w-5 items-center justify-center border border-l-0 shadow-md backdrop-blur-md transition-colors',
-                      outlineCollapsed ? 'rounded-r-lg' : 'rounded-r-md',
-                      isDarkMode
-                        ? 'border-zinc-700/70 bg-zinc-800/70 text-zinc-400 hover:text-zinc-200'
-                        : 'border-zinc-200/80 bg-white/70 text-zinc-500 hover:text-zinc-700',
-                    )}
-                    title={outlineCollapsed ? t('md.outlineExpand') : t('md.outlineCollapse')}
-                    onClick={() => setOutlineCollapsed(c => !c)}
-                  >
-                    {outlineCollapsed ? <ChevronRight size={13} /> : <ChevronLeft size={13} />}
-                  </button>
+                    <button
+                      className={cn(
+                        'flex h-11 w-5 shrink-0 items-center justify-center border shadow-md backdrop-blur-md transition-colors',
+                        outlineCollapsed ? 'rounded-l-lg' : 'rounded-l-md border-l-0',
+                        isDarkMode
+                          ? 'border-zinc-700/70 bg-zinc-800/70 text-zinc-400 hover:text-zinc-200'
+                          : 'border-zinc-200/80 bg-white/70 text-zinc-500 hover:text-zinc-700',
+                      )}
+                      title={outlineCollapsed ? t('md.outlineExpand') : t('md.outlineCollapse')}
+                      onClick={() => setOutlineCollapsed(c => !c)}
+                    >
+                      {outlineCollapsed ? <ChevronLeft size={13} /> : <ChevronRight size={13} />}
+                    </button>
+                  </div>
                 </div>
               )}
               {/* 预览保活槽位：不可见时仅 display:none，不卸载 */}

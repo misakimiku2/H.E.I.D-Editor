@@ -577,7 +577,7 @@ const zh = {
   'ctx.cut': '剪切',
   'ctx.copy': '复制',
   'ctx.paste': '粘贴',
-  'ctx.pasteImage': '粘贴图片',
+  'ctx.pasteImage': '粘贴 图片',
   'ctx.selectAll': '全选',
   'ctx.find': '查找 / 替换',
   'ctx.toggleComment': '切换行注释',

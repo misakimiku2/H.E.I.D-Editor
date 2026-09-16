@@ -1261,21 +1261,24 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     items.push(
       { icon: <Scissors size={13} />, label: tr('ctx.cut'), shortcut: 'Ctrl+X', disabled: readOnly || !hasSel, onSelect: run(cutSelectionText) },
       { icon: <Copy size={13} />, label: tr('ctx.copy'), shortcut: 'Ctrl+C', disabled: !hasSel, onSelect: run(copySelectionText) },
-      { icon: <ClipboardPaste size={13} />, label: tr('ctx.paste'), shortcut: 'Ctrl+V', disabled: readOnly || !pasteAvailable, onSelect: run(pasteFromClipboard) },
-      ...(onPasteImageRef.current ? [{
-        icon: <ImagePlus size={13} />,
-        label: tr('ctx.pasteImage'),
-        disabled: readOnly,
+      /* 单一粘贴项：markdown（onPasteImage 提供）时标签为「粘贴 图片」——
+         Windows 剪贴板同一时刻只有一种内容，先试读图（有图落盘插入），
+         无图 / 读图失败回退普通文本粘贴；非 markdown 维持纯文本粘贴 */
+      {
+        icon: <ClipboardPaste size={13} />,
+        label: onPasteImageRef.current ? tr('ctx.pasteImage') : tr('ctx.paste'),
+        shortcut: 'Ctrl+V',
+        disabled: readOnly || !pasteAvailable,
         onSelect: run(async (v: EditorView) => {
-          const insert = await onPasteImageRef.current?.();
-          if (!insert) return;
+          const insert = onPasteImageRef.current ? await onPasteImageRef.current() : null;
+          if (!insert) { await pasteFromClipboard(v); return; }
           const pos = v.state.selection.main.head;
           /* 含空白/括号的地址用尖括号包裹（与 Ctrl+V 直贴同一格式） */
           const text = /[()\s]/.test(insert) ? `![](<${insert}>)` : `![](${insert})`;
           v.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length } });
           v.focus();
         }),
-      }] : []),
+      },
       { icon: <TextSelect size={13} />, label: tr('ctx.selectAll'), shortcut: 'Ctrl+A', onSelect: run(v => { selectAll(v); v.focus(); }), separatorBefore: true },
       { icon: <Search size={13} />, label: tr('ctx.find'), shortcut: 'Ctrl+F', disabled: !onFindOpen, onSelect: () => onFindOpen?.() },
     );
