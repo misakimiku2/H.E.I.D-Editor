@@ -85,3 +85,39 @@ export async function savePastedImage(blob: Blob, mime: string, docDir: string, 
   await writeFile(`${dir}${sep}${stem}.${ext}`, bytes);
   return `assets/${stem}.${ext}`;
 }
+
+/** 剪贴板 RGBA 像素 → PNG Blob（Tauri readImage 只给原始像素，经 canvas 编码） */
+export async function rgbaToPngBlob(rgba: Uint8ClampedArray, width: number, height: number): Promise<Blob | null> {
+  if (!rgba || width <= 0 || height <= 0) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
+  return new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/png'));
+}
+
+/**
+ * 受管理的本地图片：只有本应用生成进 assets/ 的文件名（paste-时间戳 / remote-urlhash）
+ * 才允许「从文档删除后自动清理」，用户手工引用的其他图片一律不动。
+ */
+const MANAGED_ASSET_RE = /^assets\/(?:paste-\d{8}-\d{6}(?:-\d+)?|remote-[0-9a-f]{8})\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+
+/** 收集 markdown 里引用的受管理图片（相对路径口径） */
+export function collectManagedImages(md: string): Set<string> {
+  const out = new Set<string>();
+  const re = /!\[[^\]]*\]\(\s*<?([^)>\s]+)>?(?:\s+"[^"]*")?\s*\)/g;
+  for (const m of md.matchAll(re)) {
+    if (MANAGED_ASSET_RE.test(m[1])) out.add(m[1]);
+  }
+  return out;
+}
+
+/** 编辑后消失的受管理图片（旧引用 − 新引用；撤销写回则不算消失） */
+export function removedManagedImages(oldMd: string, newMd: string): string[] {
+  const before = collectManagedImages(oldMd);
+  if (before.size === 0) return [];
+  const after = collectManagedImages(newMd);
+  return Array.from(before).filter(u => !after.has(u));
+}

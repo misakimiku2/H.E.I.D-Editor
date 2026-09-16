@@ -8,7 +8,7 @@ import { Tag, tags as t, highlightTree, type Highlighter } from '@lezer/highligh
 import { EditorState, Extension, StateEffect, StateField, RangeSet } from '@codemirror/state';
 import {
   Type,
-  Undo2, Redo2, Scissors, Copy, ClipboardPaste, TextSelect, Search, MessageSquareQuote,
+  Undo2, Redo2, Scissors, Copy, ClipboardPaste, TextSelect, Search, MessageSquareQuote, ImagePlus,
   CaseUpper, CaseLower, ArrowUpNarrowWide, ArrowDownWideNarrow, ListX, Eraser,
   CopyPlus, ArrowUp, ArrowDown, Trash2, Regex, FoldVertical, UnfoldVertical,
 } from 'lucide-react';
@@ -320,6 +320,8 @@ export interface CodeEditorProps {
   onJumpDone?: () => void;
   /** 提供（markdown 标签页）时拦截粘贴图片：返回插入文本（相对路径 / data URI），null 放弃 */
   onImagePaste?: (file: File) => Promise<string | null>;
+  /** 提供（markdown 标签页）时右键菜单出现「粘贴图片」：从系统剪贴板读图并落盘，返回插入文本 */
+  onPasteImage?: () => Promise<string | null>;
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({
@@ -343,6 +345,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   jumpTo,
   onJumpDone,
   onImagePaste,
+  onPasteImage,
 }) => {
   /* tags 以 t 导入（@lezer/highlight），翻译函数让位使用别名 tr */
   const tr = useT();
@@ -397,6 +400,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onCursorRef.current = onCursor;
   const onImagePasteRef = useRef(onImagePaste);
   onImagePasteRef.current = onImagePaste;
+  const onPasteImageRef = useRef(onPasteImage);
+  onPasteImageRef.current = onPasteImage;
   /* 查找浮层状态镜像进 ref：编辑器 keymap 的 Escape 需要同步读到最新值 */
   const findOpenRef = useRef(!!find?.open);
   findOpenRef.current = !!find?.open;
@@ -1257,6 +1262,20 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       { icon: <Scissors size={13} />, label: tr('ctx.cut'), shortcut: 'Ctrl+X', disabled: readOnly || !hasSel, onSelect: run(cutSelectionText) },
       { icon: <Copy size={13} />, label: tr('ctx.copy'), shortcut: 'Ctrl+C', disabled: !hasSel, onSelect: run(copySelectionText) },
       { icon: <ClipboardPaste size={13} />, label: tr('ctx.paste'), shortcut: 'Ctrl+V', disabled: readOnly || !pasteAvailable, onSelect: run(pasteFromClipboard) },
+      ...(onPasteImageRef.current ? [{
+        icon: <ImagePlus size={13} />,
+        label: tr('ctx.pasteImage'),
+        disabled: readOnly,
+        onSelect: run(async (v: EditorView) => {
+          const insert = await onPasteImageRef.current?.();
+          if (!insert) return;
+          const pos = v.state.selection.main.head;
+          /* 含空白/括号的地址用尖括号包裹（与 Ctrl+V 直贴同一格式） */
+          const text = /[()\s]/.test(insert) ? `![](<${insert}>)` : `![](${insert})`;
+          v.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length } });
+          v.focus();
+        }),
+      }] : []),
       { icon: <TextSelect size={13} />, label: tr('ctx.selectAll'), shortcut: 'Ctrl+A', onSelect: run(v => { selectAll(v); v.focus(); }), separatorBefore: true },
       { icon: <Search size={13} />, label: tr('ctx.find'), shortcut: 'Ctrl+F', disabled: !onFindOpen, onSelect: () => onFindOpen?.() },
     );

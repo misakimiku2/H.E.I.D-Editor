@@ -109,13 +109,21 @@ const MarkdownImage = React.memo<{
 
   if (loadError) {
     return (
-      <span style={{
-        display: 'block', margin: '1.5rem auto', maxWidth: '100%', padding: '2rem',
-        textAlign: 'center', borderRadius: '0.5rem',
-        background: isDarkMode ? 'rgba(39,39,42,0.5)' : 'rgba(244,244,245,0.8)',
-        border: `1px dashed ${isDarkMode ? '#52525b' : '#d4d4d8'}`,
-        color: isDarkMode ? '#a1a1aa' : '#71717a', fontSize: '0.875rem'
-      }}>
+      <span
+        style={{
+          display: 'block', margin: '1.5rem auto', maxWidth: '100%', padding: '2rem',
+          textAlign: 'center', borderRadius: '0.5rem',
+          background: isDarkMode ? 'rgba(39,39,42,0.5)' : 'rgba(244,244,245,0.8)',
+          border: `1px dashed ${isDarkMode ? '#52525b' : '#d4d4d8'}`,
+          color: isDarkMode ? '#a1a1aa' : '#71717a', fontSize: '0.875rem'
+        }}
+        onContextMenu={(e) => {
+          if (!onMenu) return;
+          e.preventDefault();
+          e.stopPropagation();
+          onMenu(e, { resolvedSrc: imgSrc || '', alt: alt || '', srcStart, srcEnd });
+        }}
+      >
         <span style={{ fontSize: '1.5rem', marginBottom: '0.5rem', display: 'block' }}>🖼️</span>
         <span style={{ display: 'block' }}>{(alt || '').split('|||LOCAL-FILE:')[0] || t('image.defaultName')}</span>
         <span style={{ fontSize: '0.75rem', marginTop: '0.25rem', opacity: 0.7, display: 'block' }}>{loadError}</span>

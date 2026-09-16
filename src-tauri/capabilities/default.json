@@ -44,6 +44,7 @@
     },
     "fs:allow-unwatch",
     "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-read-image",
     "clipboard-manager:allow-write-text",
     "allow-fs-mkdir",
     "allow-fs-rename",

@@ -4,7 +4,7 @@
  * 落盘链路（Tauri invoke + plugin-fs）不做单测，桌面手工验收。
  */
 import { describe, expect, it } from 'vitest';
-import { assetsDirOf, extFromMime, imageFileFromClipboard, pasteImageStem } from './markdownImagePaste';
+import { assetsDirOf, collectManagedImages, extFromMime, imageFileFromClipboard, pasteImageStem, removedManagedImages } from './markdownImagePaste';
 import { joinRelativeSrc, normalizeLocalSrc } from './imageSrc';
 
 describe('extFromMime', () => {
@@ -88,5 +88,32 @@ describe('normalizeLocalSrc（图片 src 归一）', () => {
     expect(normalizeLocalSrc('data:image/png;base64,xx')).toBe('data:image/png;base64,xx');
     expect(normalizeLocalSrc('')).toBe('');
     expect(normalizeLocalSrc('assets/%E5%9B%BE.png')).toBe('assets/图.png');
+  });
+});
+
+describe('collectManagedImages / removedManagedImages（受管理图片清理）', () => {
+  it('只收集本应用生成的 assets 文件名，用户手工引用不动', () => {
+    const md = [
+      '![](assets/paste-20260916-183157.png)',
+      '![](assets/remote-ab12cd34.jpg)',
+      '![x](assets/paste-20260916-183157-2.png)',
+      '![](assets/my-own-photo.png)',
+      '![y](https://x/remote-1122334455.png)',
+      '![](<assets/paste-20260917-090000.webp>)',
+    ].join('\n');
+    const got = collectManagedImages(md);
+    expect(got.has('assets/paste-20260916-183157.png')).toBe(true);
+    expect(got.has('assets/remote-ab12cd34.jpg')).toBe(true);
+    expect(got.has('assets/paste-20260916-183157-2.png')).toBe(true);
+    expect(got.has('assets/paste-20260917-090000.webp')).toBe(true);
+    expect(got.has('assets/my-own-photo.png')).toBe(false);
+  });
+
+  it('removedManagedImages 返回被删除的引用，撤销写回后不算消失', () => {
+    const old = '![](assets/paste-20260916-183157.png)\n![](assets/remote-ab12cd34.jpg)';
+    expect(removedManagedImages(old, '![](assets/remote-ab12cd34.jpg)'))
+      .toEqual(['assets/paste-20260916-183157.png']);
+    expect(removedManagedImages(old, old)).toEqual([]);
+    expect(removedManagedImages('', old)).toEqual([]);
   });
 });
