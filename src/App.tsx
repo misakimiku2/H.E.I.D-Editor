@@ -4,7 +4,7 @@ import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
   GitCompare, Columns2, History, ChevronRight, ChevronLeft, ChevronDown, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
-  Table, Code, Braces, Wand2, Printer, ImageDown, RefreshCw,
+  Table, Code, Braces, Wand2, Printer, RefreshCw,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -30,7 +30,7 @@ import { resolveImageSrc, ImageForbiddenError } from './lib/imageSrc';
 import { appAlert, registerAppAlert } from './lib/appAlert';
 import { showNotification } from './lib/notifications';
 import { savePastedImage, blobToDataUrl, rgbaToPngBlob, collectManagedImages, removedManagedImages, DATA_URI_MAX_BYTES } from './lib/markdownImagePaste';
-import { localizeRemoteImages, type LocalizeIo } from './lib/imageLocalize';
+import { localizeRemoteImages, collectRemoteImages, type LocalizeIo } from './lib/imageLocalize';
 import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDoc';
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
@@ -632,7 +632,8 @@ export default function App() {
     }
   }, [editor.activeTab, isDarkMode, t]);
 
-  /* ---- 图片本地化：下载 markdown 里的远程图源到 assets/ 并替换为相对路径（桌面） ---- */
+  /* ---- 图片本地化：下载 markdown 里的远程图源到 assets/ 并替换为相对路径（桌面）。
+     进度与结果统一走右下角通知卡片（同 id 原地替换）：运行中显示进度条，完成后同卡片变汇总 ---- */
   const canLocalizeImages = isTauri && !IS_ANDROID_APP;
   const handleLocalizeImages = useCallback(async () => {
     const tab = editor.activeTab;
@@ -641,7 +642,13 @@ export default function App() {
       showNotification({ kind: 'info', title: t('md.localizeTitle'), message: t('md.localizeNeedSave'), timeoutMs: 4000 });
       return;
     }
+    /* 前置预检：无远程图源直接提示，避免进度卡片一闪而过 */
+    if (collectRemoteImages(tab.content).length === 0) {
+      showNotification({ kind: 'info', title: t('md.localizeTitle'), message: t('md.localizeNoRemote'), timeoutMs: 4000 });
+      return;
+    }
     const dir = dirNameOf(tab.path);
+    console.info(`[localize] 开始：${tab.path}，落盘目录 ${dir}`);
     const io: LocalizeIo = {
       download: async (url) => {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -656,23 +663,31 @@ export default function App() {
       },
     };
     try {
-      const res = await localizeRemoteImages(tab.content, io);
-      if (res.ok.length === 0 && res.failed.length === 0) {
-        showNotification({ kind: 'info', title: t('md.localizeTitle'), message: t('md.localizeNoRemote'), timeoutMs: 4000 });
-        return;
-      }
+      /* 固定 id：运行中每张图原地更新进度条与失败明细，完成后同卡片替换为汇总（自动消失） */
+      const ntfId = 'localize-images';
+      const base = { id: ntfId, kind: 'info' as const, title: t('md.localizeTitle') };
+      showNotification({ ...base, message: t('md.localizeProgress', { i: 0, n: 0 }), progress: { done: 0, total: 0 }, failures: [] });
+      const res = await localizeRemoteImages(tab.content, io, (done, total, _current, failures) => {
+        showNotification({
+          ...base,
+          message: t('md.localizeProgress', { i: done, n: total }),
+          progress: { done, total },
+          failures: [...failures],
+        });
+      });
       if (res.md !== tab.content) editor.updateTabContent(tab.id, res.md, { major: true });
-      const message = res.failed.length > 0
+      const summary = res.failed.length > 0
         ? t('md.localizeDone', { n: res.ok.length, m: res.failed.length })
         : t('md.localizeAllDone', { n: res.ok.length });
       showNotification({
-        kind: res.failed.length ? 'info' : 'success',
-        title: t('md.localizeTitle'),
-        message,
-        timeoutMs: 6000,
+        ...base,
+        kind: res.failed.length > 0 ? 'info' : 'success',
+        message: res.skipped > 0 ? `${summary}，${t('md.localizeSkipped', { n: res.skipped })}` : summary,
+        failures: res.failed,
+        timeoutMs: res.failed.length > 0 ? 12000 : 6000,
       });
     } catch (e: any) {
-      showNotification({ kind: 'error', title: t('md.localizeTitle'), message: t('md.localizeErr', { msg: e?.message ?? String(e) }) });
+      showNotification({ kind: 'error', title: t('md.localizeTitle'), message: t('md.localizeErr', { msg: e?.message ?? String(e) }), timeoutMs: 6000 });
     }
   }, [editor, t]);
 
@@ -876,6 +891,7 @@ export default function App() {
         onUndo={editor.handleUndo}
         onRedo={editor.handleRedo}
         onScroller={(el) => { attachPreviewScroller(el); previewScrollElRef.current = el; }}
+        onLocalizeImages={canLocalizeImages ? () => { void handleLocalizeImages(); } : undefined}
         findOpen={previewVisible && effectiveView === 'preview' && findState.open ? true : undefined}
         onFindClose={closeFind}
         getPointer={getPointer}
@@ -983,7 +999,9 @@ export default function App() {
   }, [saveMarkdownImageBlob]);
 
   /* ---- 删除文档中的受管理图片后自动清理本地文件（粘贴/本地化生成的 assets 文件） ----
-     防抖 8s：撤销把引用写回则放弃删除；仅桌面；只删本应用生成的文件名 */
+     防抖 8s：撤销把引用写回则放弃删除；仅桌面；只删本应用生成的文件名。
+     引用检查两级：先查内存里打开的标签页，再后台扫描目录下全部 md 文件
+     （读盘经 Tauri IPC 在原生线程完成，主线程仅子串匹配，命中即止不阻塞 UI） */
   const assetCleanupTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const scheduleRemovedAssetCleanup = useCallback((docDir: string, oldMd: string, newMd: string) => {
     if (!isTauri || IS_ANDROID_APP || !docDir) return;
@@ -996,15 +1014,29 @@ export default function App() {
       if (prev) clearTimeout(prev);
       timers.set(key, setTimeout(() => {
         timers.delete(key);
-        const stillReferenced = editor.tabsRef.current.some(tb =>
-          tb.path && dirNameOf(tb.path) === docDir && collectManagedImages(tb.content).has(rel));
-        if (stillReferenced) return;
-        const dir = docDir.replace(/[\\/]+$/, '');
-        const sep = dir.includes('\\') ? '\\' : '/';
         void (async () => {
+          const referencedInOpenTabs = () => editor.tabsRef.current.some(tb =>
+            tb.path && dirNameOf(tb.path) === docDir && collectManagedImages(tb.content).has(rel));
+          if (referencedInOpenTabs()) return;
+          const dir = docDir.replace(/[\\/]+$/, '');
+          const sep = dir.includes('\\') ? '\\' : '/';
+          try {
+            const { readDir, readTextFile } = await import('@tauri-apps/plugin-fs');
+            for (const entry of await readDir(dir)) {
+              if (entry.isDirectory || !entry.name || !(/\.md$/i.test(entry.name) || /\.markdown$/i.test(entry.name))) continue;
+              if ((await readTextFile(`${dir}${sep}${entry.name}`)).includes(rel)) {
+                console.info('[assets] 保留：目录内仍被引用', rel, '←', entry.name);
+                return;
+              }
+              if (referencedInOpenTabs()) return; /* 扫描期间引用被写回（撤销） */
+            }
+          } catch (e) {
+            console.warn('[assets] 引用扫描失败，保守保留文件:', rel, e);
+            return;
+          }
           try {
             const { invoke } = await import('@tauri-apps/api/core');
-            await invoke('fs_delete', { path: `${dir}${sep}${rel.replaceAll('/', sep)}`, is_dir: false });
+            await invoke('fs_delete', { path: `${dir}${sep}${rel.replaceAll('/', sep)}`, isDir: false });
           } catch (e) {
             console.warn('清理已删除图片失败:', rel, e);
           }
@@ -1517,20 +1549,6 @@ export default function App() {
               <FileDown size={14} />
               {t('export.htmlMenu')}
             </button>
-            {canLocalizeImages && (
-              <button
-                onClick={() => { setMenuOpen(false); void handleLocalizeImages(); }}
-                disabled={!isMarkdown || !activeTab?.path || !!activeTab?.binary}
-                className={cn(
-                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
-                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
-                )}
-                title={t('md.localizeMenu')}
-              >
-                <ImageDown size={14} />
-                {t('md.localize')}
-              </button>
-            )}
             {canPrint && (
               <button
                 onClick={() => { setMenuOpen(false); void handlePrint(); }}

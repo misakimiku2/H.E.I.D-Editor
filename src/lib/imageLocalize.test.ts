@@ -92,4 +92,16 @@ describe('localizeRemoteImages（io 桩）', () => {
     expect(res.skipped).toBe(5);
     expect(download).toHaveBeenCalledTimes(LOCALIZE_MAX_IMAGES);
   });
+
+  it('onProgress：开始报 0/total，每张后报 done/total 与失败明细', async () => {
+    const md = '![a](https://x/1.png)\n![b](https://x/2.png)';
+    const download = vi.fn((url: string) =>
+      url.includes('1.png') ? Promise.reject(new Error('404')) : okDownload(url));
+    const onProgress = vi.fn();
+    await localizeRemoteImages(md, { download, save: saveOk }, onProgress);
+    expect(onProgress).toHaveBeenCalledTimes(3);
+    expect(onProgress).toHaveBeenNthCalledWith(1, 0, 2, 'https://x/1.png', []);
+    expect(onProgress).toHaveBeenNthCalledWith(2, 1, 2, 'https://x/1.png', [{ url: 'https://x/1.png', reason: '404' }]);
+    expect(onProgress).toHaveBeenNthCalledWith(3, 2, 2, 'https://x/2.png', [{ url: 'https://x/1.png', reason: '404' }]);
+  });
 });

@@ -26,11 +26,20 @@ const KIND_ACCENT: Record<NotificationKind, string> = {
   update: 'text-blue-500',
 };
 
+/** 失败明细里展示短名（URL 最后一段，去查询参数），完整地址放悬停 title */
+function failureLabel(url: string): string {
+  try {
+    return new URL(url).pathname.split('/').filter(Boolean).pop() ?? url;
+  } catch {
+    return url;
+  }
+}
+
 function NotificationCard({ notification, isDarkMode }: {
   notification: AppNotification;
   isDarkMode: boolean;
 }) {
-  const { kind, title, message, actions, onCardClick, closable = true, timeoutMs } = notification;
+  const { kind, title, message, progress, failures, actions, onCardClick, closable = true, timeoutMs } = notification;
   const Icon = KIND_ICON[kind];
 
   /* 自动消失：条目对象身份变化（同 id 替换）时重置计时 */
@@ -60,6 +69,32 @@ function NotificationCard({ notification, isDarkMode }: {
             )}>
               {message}
             </p>
+          )}
+          {progress && (
+            <div className="mt-1.5 flex items-center gap-1.5">
+              <div className={cn("h-1 flex-1 rounded-full overflow-hidden", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")}>
+                <div
+                  className="h-full rounded-full bg-blue-500 transition-[width] duration-200"
+                  style={{ width: progress.total > 0 ? `${Math.round((progress.done / progress.total) * 100)}%` : '0%' }}
+                />
+              </div>
+              <span className={cn("text-[10px] tabular-nums shrink-0", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+                {progress.done}/{progress.total}
+              </span>
+            </div>
+          )}
+          {failures && failures.length > 0 && (
+            <div className={cn(
+              "mt-1.5 flex flex-col gap-1 rounded-lg p-2 max-h-24 overflow-auto heid-scroll text-[10px] leading-4",
+              isDarkMode ? "bg-zinc-900/60" : "bg-zinc-100/90",
+            )}>
+              {failures.map((f, i) => (
+                <div key={i} className="flex items-baseline gap-1.5 min-w-0" title={`${f.url} —— ${f.reason}`}>
+                  <span className="truncate min-w-0">{failureLabel(f.url)}</span>
+                  <span className="shrink-0 text-red-400">{f.reason}</span>
+                </div>
+              ))}
+            </div>
           )}
           {actions && actions.length > 0 && (
             <div className="mt-2 flex justify-end gap-1.5 flex-wrap">

@@ -10,6 +10,7 @@
     "allow-read-text-file",
     "allow-write-text-file",
     "allow-http-get",
+    "allow-http-get-binary",
     "allow-open-external",
     "allow-render-page",
     "allow-take-launch-paths",

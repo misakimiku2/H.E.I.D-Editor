@@ -7,6 +7,7 @@ fn main() {
             "read_text_file",
             "write_text_file",
             "http_get",
+            "http_get_binary",
             "open_external",
             "render_page",
             "render_result",

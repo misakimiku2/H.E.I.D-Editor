@@ -5,8 +5,9 @@
  * 网络与落盘经注入的 io 接口隔离，编排层错误逐张跳过并计数。
  */
 
-/** 单文档处理上限：防御整页图床（sprite 之类的极端场景）拖垮会话 */
-export const LOCALIZE_MAX_IMAGES = 50;
+/** 单文档处理上限：防御整页图床（sprite 之类的极端场景）把会话拖成无限串行下载；
+ * 有进度弹窗后该值只需兜底，正常文档（几十张）不会触顶 */
+export const LOCALIZE_MAX_IMAGES = 200;
 
 export interface RemoteImage {
   url: string;
@@ -73,19 +74,37 @@ export interface LocalizeOutcome {
   /** 替换后的全文（零成功时与原文相同） */
   md: string;
   ok: string[];
-  failed: { url: string; reason: string }[];
+  failed: LocalizeFailure[];
   /** 达到上限被跳过的张数 */
   skipped: number;
 }
 
+/** 单张失败项 */
+export interface LocalizeFailure {
+  url: string;
+  reason: string;
+}
+
+/** 进度回调：done/total 为张数进度，current 是刚处理完的图源，failures 是至今的失败明细 */
+export type LocalizeProgressFn = (
+  done: number,
+  total: number,
+  current: string,
+  failures: readonly LocalizeFailure[],
+) => void;
+
 /**
  * 逐张本地化：每张独立 try（失败跳过计数），全部结果汇总返回。
  * saveDirIo 决定落盘位置——调用方传「目录」由 io 拼绝对路径（assets/ 前缀已含在 relPath）。
+ * onProgress 供进度弹窗展示（开始时先报 0/total）；过程打 `[localize]` 前缀日志
+ * （DevTools console 可见），与 Rust 侧 stderr 日志对应。
  */
-export async function localizeRemoteImages(md: string, io: LocalizeIo): Promise<LocalizeOutcome> {
+export async function localizeRemoteImages(md: string, io: LocalizeIo, onProgress?: LocalizeProgressFn): Promise<LocalizeOutcome> {
   const all = collectRemoteImages(md);
   const targets = all.slice(0, LOCALIZE_MAX_IMAGES);
   const skipped = all.length - targets.length;
+  console.info(`[localize] 收集到 ${all.length} 个远程图源，处理前 ${targets.length} 个${skipped > 0 ? `（超出上限跳过 ${skipped} 个）` : ''}`);
+  onProgress?.(0, targets.length, targets[0]?.url ?? '', []);
   let out = md;
   const ok: string[] = [];
   const failed: { url: string; reason: string }[] = [];
@@ -99,9 +118,14 @@ export async function localizeRemoteImages(md: string, io: LocalizeIo): Promise<
       await io.save(rel, bytes);
       out = replaceImageUrl(out, url, rel);
       ok.push(url);
+      console.info(`[localize] ✓ ${url} → ${rel}（${bytes.length} 字节，ct=${dl.contentType || '未知'}）`);
     } catch (e: any) {
-      failed.push({ url, reason: String(e?.message ?? e) });
+      const reason = String(e?.message ?? e);
+      failed.push({ url, reason });
+      console.warn(`[localize] ✗ ${url} —— ${reason}`);
     }
+    onProgress?.(ok.length + failed.length, targets.length, url, [...failed]);
   }
+  console.info(`[localize] 完成：成功 ${ok.length}，失败 ${failed.length}${skipped > 0 ? `，跳过 ${skipped}` : ''}`);
   return { md: out, ok, failed, skipped };
 }

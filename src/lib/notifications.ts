@@ -22,6 +22,10 @@ export interface AppNotification {
   title: string;
   /** 次要说明（纯文本，渲染层截断展示） */
   message?: string;
+  /** 确定型进度条（图片本地化等长任务的逐张进度）；缺省无进度条 */
+  progress?: { done: number; total: number };
+  /** 失败明细（逐张任务的失败项）；缺省不渲染列表 */
+  failures?: { url: string; reason: string }[];
   actions?: NotificationAction[];
   /** 点击卡片主体时触发（如更新卡片直接开始下载）；缺省卡片整体无点击态 */
   onCardClick?: () => void;

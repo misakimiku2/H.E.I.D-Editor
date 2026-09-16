@@ -3,7 +3,8 @@
  * NotificationStack 冒烟：store 直连渲染
  * ① 标题/说明/动作按钮按 store 内容渲染；
  * ② 动作点击回调触发且不冒泡成卡片点击；关闭按钮移除卡片（store 同步清空）；
- * ③ timeoutMs 到时自动消失（fake timers）；closable=false 不渲染关闭按钮。
+ * ③ timeoutMs 到时自动消失（fake timers）；closable=false 不渲染关闭按钮；
+ * ④ progress 渲染进度条与 n/total，缺省无进度条。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React, { act } from 'react';
@@ -105,5 +106,31 @@ describe('NotificationStack', () => {
     render(<NotificationStack isDarkMode={false} />);
     act(() => { dismissNotification('d1'); });
     expect(container!.textContent).not.toContain('失败');
+  });
+
+  it('progress 渲染进度条与 n/total，缺省不渲染', () => {
+    showNotification({ id: 'g1', kind: 'info', title: '图片本地化', progress: { done: 12, total: 50 } });
+    render(<NotificationStack isDarkMode={false} />);
+    expect(container!.textContent).toContain('12/50');
+    const fill = container!.querySelector('.bg-blue-500') as HTMLElement | null;
+    expect(fill).not.toBeNull();
+    expect(fill!.style.width).toBe('24%');
+
+    act(() => { dismissNotification('g1'); showNotification({ id: 'g2', kind: 'success', title: '完成' }); });
+    expect(container!.querySelector('.bg-blue-500')).toBeNull();
+  });
+
+  it('failures 渲染短名 + 原因明细，完整地址在悬停 title', () => {
+    showNotification({
+      id: 'f1', kind: 'info', title: '图片本地化',
+      message: '已本地化 9 张图片（1 张失败）',
+      failures: [{ url: 'https://gf2.mcc.wiki/image/misc/Icon_Crit.png?x=1', reason: '服务器返回 HTTP 404' }],
+    });
+    render(<NotificationStack isDarkMode={false} />);
+    expect(container!.textContent).toContain('Icon_Crit.png');
+    expect(container!.textContent).toContain('服务器返回 HTTP 404');
+    const row = [...container!.querySelectorAll('[title]')].find(el =>
+      (el.getAttribute('title') ?? '').startsWith('https://gf2.mcc.wiki'))!;
+    expect(row).toBeTruthy();
   });
 });

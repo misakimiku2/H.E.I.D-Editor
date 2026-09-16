@@ -1659,11 +1659,34 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     onChangeRef.current?.(val, meta);
   }, []);
 
+  /* wrapper 只吃挂载初值：外部内容替换（撤销/重做、还原到磁盘、外部修改、本地化等）
+     由下方 effect 以「最小差异」局部替换接管。wrapper 自带的同步是整篇重置，
+     视口会被钳回文档顶部（在文档底部撤销粘贴时表现为直接滚到顶） */
+  const initialValueRef = useRef(value);
+
+  /* 外部内容替换 → 新旧文本取公共前/后缀，只 dispatch 变化的中间段：
+     CM 按普通编辑映射滚动与选区，滚动位置与光标自然保留 */
+  useEffect(() => {
+    const view = viewReadyRef.current;
+    if (!view) return;
+    const cur = view.state.doc.toString();
+    if (cur === value) return;
+    let start = 0;
+    const minLen = Math.min(cur.length, value.length);
+    while (start < minLen && cur.charCodeAt(start) === value.charCodeAt(start)) start++;
+    let endCur = cur.length;
+    let endVal = value.length;
+    while (endCur > start && endVal > start && cur.charCodeAt(endCur - 1) === value.charCodeAt(endVal - 1)) {
+      endCur--; endVal--;
+    }
+    view.dispatch({ changes: { from: start, to: endCur, insert: value.slice(start, endVal) } });
+  }, [value, viewReady]);
+
   return (
     <div className="relative h-full w-full" onContextMenu={handleEditorContextMenu}>
       <CodeMirror
         ref={cmRef}
-        value={value}
+        value={initialValueRef.current}
         onChange={handleValueChange}
         extensions={extensions}
         readOnly={!editable}

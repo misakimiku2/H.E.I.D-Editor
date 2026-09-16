@@ -9,7 +9,7 @@ import { remarkGfmStrict, remarkInlineExt } from '../lib/remarkExt';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, ghcolors } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers, Workflow, Pencil, Maximize2, Minimize2 } from 'lucide-react';
+import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers, Workflow, Pencil, Maximize2, Minimize2, ImageDown } from 'lucide-react';
 import { renderMermaidSvg } from '../lib/mermaid';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP } from '../lib/platform';
@@ -22,6 +22,7 @@ import { useDragScroll } from '../hooks/useDragScroll';
 import { useT } from '../lib/i18nContext';
 import { parseLangBlocks } from '../lib/markdownLangs';
 import { applyImageTab, applySelectionTab } from '../lib/markdownTabs';
+import { collectRemoteImages } from '../lib/imageLocalize';
 
 /** 页签文档按块渲染时，块 md 的全文起始偏移（右键选区映射回源码用） */
 const BlockBaseContext = createContext(0);
@@ -602,8 +603,11 @@ const InsertMenu = React.memo<{
   onTable: () => void;
   onImage: () => void;
   onDiagram: () => void;
+  /** 图片本地化入口（桌面端才传入；无远程图片时按钮置灰） */
+  onLocalize?: () => void;
+  canLocalize: boolean;
   onClose: () => void;
-}>(({ x, y, isDarkMode, onTable, onImage, onDiagram, onClose }) => {
+}>(({ x, y, isDarkMode, onTable, onImage, onDiagram, onLocalize, canLocalize, onClose }) => {
   const t = useT();
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -630,7 +634,7 @@ const InsertMenu = React.memo<{
   }, [onClose]);
 
   const left = Math.max(4, Math.min(x, window.innerWidth - 176));
-  const top = Math.max(4, Math.min(y, window.innerHeight - 148));
+  const top = Math.max(4, Math.min(y, window.innerHeight - 182));
 
   return (
     <div
@@ -676,6 +680,23 @@ const InsertMenu = React.memo<{
         <Workflow size={13} />
         {t('md.mermaid')}
       </button>
+      {onLocalize && (
+        <>
+          <div className={cn("my-1 mx-2 border-t", isDarkMode ? "border-zinc-700/60" : "border-zinc-200/80")} />
+          <button
+            onClick={onLocalize}
+            disabled={!canLocalize}
+            title={canLocalize ? t('md.localizeMenu') : t('md.localizeDisabled')}
+            className={cn(
+              "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+              isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+            )}
+          >
+            <ImageDown size={13} />
+            {t('md.localize')}
+          </button>
+        </>
+      )}
     </div>
   );
 });
@@ -700,6 +721,8 @@ interface MarkdownPreviewProps {
   onRedo?: () => void;
   /** 滚动容器回调（分屏同步滚动用） */
   onScroller?: (el: HTMLDivElement | null) => void;
+  /** 图片本地化入口（桌面 Tauri 才传入）；插入菜单里无远程图片时置灰 */
+  onLocalizeImages?: () => void;
   /** true 时渲染预览查找浮层（只搜渲染后的文本） */
   findOpen?: boolean;
   onFindClose?: () => void;
@@ -750,7 +773,7 @@ export interface MarkdownPreviewHandle {
 }
 
 export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle, MarkdownPreviewProps>(({
-  content, docKey, isDarkMode, baseDir, onChange, canUndo, canRedo, onUndo, onRedo, onScroller,
+  content, docKey, isDarkMode, baseDir, onChange, canUndo, canRedo, onUndo, onRedo, onScroller, onLocalizeImages,
   findOpen, onFindClose, getPointer,
 }, ref) => {
   const t = useT();
@@ -760,6 +783,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const [imageModal, setImageModal] = useState<SourceSnippet | null>(null);
   const [tableAction, setTableAction] = useState<TableAction | null>(null);
   const [cellEdit, setCellEdit] = useState<CellEdit | null>(null);
+  /* 插入菜单的「图片本地化」仅在文档含远程图源时可用 */
+  const canLocalizeImages = useMemo(() => collectRemoteImages(content).length > 0, [content]);
 
   /* 顶栏「插入表格/插入图片」入口（移动端编辑视图下也能插入） */
   React.useImperativeHandle(ref, () => ({
@@ -1659,6 +1684,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           onTable={handleInsertTable}
           onImage={() => { setImageModal(buildSourceSnippet(content, blankMenu.insertAt)); setBlankMenu(null); }}
           onDiagram={handleInsertDiagram}
+          onLocalize={onLocalizeImages ? () => { setBlankMenu(null); onLocalizeImages(); } : undefined}
+          canLocalize={canLocalizeImages}
           onClose={closeBlankMenu}
         />
       )}
