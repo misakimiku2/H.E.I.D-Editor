@@ -17,7 +17,7 @@ import { detectDelimiter, delimiterLabel, parseCsv, CSV_GRID_MAX_CHARS, CSV_GRID
 import { kindFromPath, formatStructured, indentFromSettings, TREE_MAX_CHARS, type StructKind } from './lib/jsonTree';
 import type { JsonViewMode } from './lib/tabModel';
 import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
-import { MarkdownOutline } from './components/MarkdownOutline';
+import { MarkdownOutlineLive } from './components/MarkdownOutline';
 import { extractHeadings, type MdHeading } from './lib/markdownOutline';
 import { WindowControls } from './components/WindowControls';
 import { DiffModal } from './components/DiffModal';
@@ -815,52 +815,18 @@ export default function App() {
   /* 预览当前是否处于可见形态（分屏 / 纯预览） */
   const previewVisible = isMarkdown && (effectiveView === 'split' || effectiveView === 'preview');
 
-  /* ---- Markdown 大纲侧栏：标题提取 + 点击分流（预览滚动 / 编辑器跳转）；收展由预览右缘常驻把手负责 ---- */
+  /* ---- Markdown 大纲侧栏：标题提取 + 点击分流（预览滚动 / 编辑器跳转）；收展由预览右缘常驻把手负责 ----
+     滚动跟随高亮由 MarkdownOutlineLive 自持（仅展开时监听预览滚动）：
+     高亮不能放 App 级 state——预览每帧都可能滚动，跨标题就全量重渲染 App，
+     并击穿预览 memo 触发全篇 markdown 重解析，分屏快速滚动会明显掉帧 */
   const [outlineOpen, setOutlineOpen] = useState(false);
-  /* 大纲滚动跟随：预览滚到某标题附近时高亮对应条目（预览保活容器上监听滚动） */
-  const [outlineActiveOffset, setOutlineActiveOffset] = useState<number | null>(null);
   const previewScrollElRef = useRef<HTMLDivElement | null>(null);
-  const headingElsRef = useRef<Array<{ offset: number; top: number }> | null>(null);
-  const headingElsVersionRef = useRef('');
+  const getPreviewScroller = useCallback(() => previewScrollElRef.current, []);
   const mdOutline = useMemo(
     () => (isMarkdown && activeTab ? extractHeadings(activeTab.content) : []),
     [isMarkdown, activeTab?.content, activeTab],
   );
   const outlineJumpSeqRef = useRef(0);
-  /* 预览滚动 → 当前标题（视口顶部阈值上方最近的标题）→ 大纲高亮 */
-  const updateOutlineActive = useCallback(() => {
-    const scroller = previewScrollElRef.current;
-    if (!scroller) return;
-    const version = mdAliveTab?.content ?? '';
-    let els = headingElsRef.current;
-    if (!els || headingElsVersionRef.current !== version) {
-      els = Array.from(
-        scroller.querySelectorAll<HTMLElement>(
-          'h1[data-md-start],h2[data-md-start],h3[data-md-start],h4[data-md-start],h5[data-md-start],h6[data-md-start]',
-        ),
-      )
-        .map(el => ({ offset: Number(el.dataset.mdStart), top: el.offsetTop }))
-        .sort((a, b) => a.top - b.top);
-      headingElsRef.current = els;
-      headingElsVersionRef.current = version;
-    }
-    if (els.length === 0) { setOutlineActiveOffset(null); return; }
-    const top = scroller.scrollTop;
-    let active = els[0].offset;
-    for (const h of els) {
-      if (h.top <= top + 96) active = h.offset;
-      else break;
-    }
-    setOutlineActiveOffset(prev => (prev === active ? prev : active));
-  }, [mdAliveTab?.content]);
-  useEffect(() => {
-    const el = previewScrollElRef.current;
-    if (!el) return;
-    el.addEventListener('scroll', updateOutlineActive, { passive: true });
-    updateOutlineActive();
-    return () => el.removeEventListener('scroll', updateOutlineActive);
-  }, [updateOutlineActive, previewVisible]);
-  useEffect(() => { headingElsRef.current = null; }, [mdOutline]);
   const handleOutlineJump = useCallback((h: MdHeading) => {
     if (previewVisible) previewRef.current?.scrollToOffset(h.offset);
     if (editorVisible) {
@@ -1715,12 +1681,15 @@ export default function App() {
                               : 'w-0 border-transparent opacity-0',
                           )}
                         >
-                          <MarkdownOutline
-                            headings={mdOutline}
-                            isDarkMode={isDarkMode}
-                            activeOffset={outlineActiveOffset}
-                            onJump={handleOutlineJump}
-                          />
+                          {outlineOpen ? (
+                            <MarkdownOutlineLive
+                              getScroller={getPreviewScroller}
+                              version={mdAliveTab?.content ?? ''}
+                              headings={mdOutline}
+                              isDarkMode={isDarkMode}
+                              onJump={handleOutlineJump}
+                            />
+                          ) : null}
                         </div>
                       </div>
                     </div>

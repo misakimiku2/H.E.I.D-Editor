@@ -31,6 +31,22 @@ const BlockBaseContext = createContext(0);
 const remarkPlugins = [remarkGfmStrict, remarkMath, remarkEmoji, remarkInlineExt];
 const rehypePlugins = [rehypeKatex];
 
+/* 单块渲染记忆化：md 源串与 components 都不变就跳过 ReactMarkdown 重建。
+   react-markdown v10 的 Markdown 组件内部无任何缓存，每次渲染都完整重跑
+   remark/rehype 管道（含代码高亮）；而上层 App 任意 setState（光标、大纲高亮等）
+   都会以内联闭包 props 击穿本组件的外层 memo——没有这层，分屏滚动/打字期间
+   每次重渲染都等于全篇重新解析，是同步滚动掉帧的大头 */
+const MdBlock = React.memo(function MdBlock({ md, components }: {
+  md: string;
+  components: Record<string, any>;
+}) {
+  return (
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components as any}>
+      {md}
+    </ReactMarkdown>
+  );
+});
+
 /* 把源码偏移量写到 DOM 上，供右键时把选区映射回源码。
    页签文档按块渲染，remark 的偏移相对块字符串——用 context 注入块的
    原文起始偏移，保证 data-md-* 始终是全文坐标 */
@@ -1502,9 +1518,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
             processedBlocks.map((processed, i) => {
               const block = langBlocks[i];
               const content = (
-                <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={mdComponents as any}>
-                  {processed.md}
-                </ReactMarkdown>
+                <MdBlock md={processed.md} components={mdComponents} />
               );
               if (block.type !== 'tabs') {
                 return (
@@ -1541,9 +1555,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
               );
             })
           ) : (
-            <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={mdComponents as any}>
-              {renderedContent}
-            </ReactMarkdown>
+            <MdBlock md={renderedContent} components={mdComponents} />
           )}
         </div>
       </div>

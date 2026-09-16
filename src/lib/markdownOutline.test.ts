@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractHeadings } from './markdownOutline';
+import { activeHeadingOffset, extractHeadings } from './markdownOutline';
 
 describe('extractHeadings', () => {
   it('ATX 标题：层级、文本、行号与偏移', () => {
@@ -48,5 +48,31 @@ describe('extractHeadings', () => {
   it('空文档与纯文本返回空', () => {
     expect(extractHeadings('')).toHaveLength(0);
     expect(extractHeadings('just\ntext\n')).toHaveLength(0);
+  });
+});
+
+describe('activeHeadingOffset（滚动跟随）', () => {
+  /* 按 top 升序的标题位置表（offset 沿用 extractHeadings 的全文偏移语义） */
+  const els = [
+    { offset: 0, top: 0 },
+    { offset: 120, top: 400 },
+    { offset: 300, top: 900 },
+  ];
+
+  it('无标题返回 null，未越过阈值时高亮第一个', () => {
+    expect(activeHeadingOffset([], 0)).toBeNull();
+    expect(activeHeadingOffset(els, 0)).toBe(0);
+  });
+
+  it('视口顶部 96px 阈值上方最近的标题胜出', () => {
+    /* top=400 在 scrollTop=304 时恰好触及阈值（400 = 304 + 96） */
+    expect(activeHeadingOffset(els, 303)).toBe(0);
+    expect(activeHeadingOffset(els, 304)).toBe(120);
+    expect(activeHeadingOffset(els, 803)).toBe(120);
+    expect(activeHeadingOffset(els, 804)).toBe(300);
+  });
+
+  it('滚过最后标题后保持最后一个', () => {
+    expect(activeHeadingOffset(els, 5000)).toBe(300);
   });
 });

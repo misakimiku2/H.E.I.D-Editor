@@ -44,3 +44,24 @@ export function extractHeadings(md: string): MdHeading[] {
   }
   return out;
 }
+
+/** 视口顶部判定阈值：标题顶边越过视口顶 96px 以内都算「正在看」（与右键菜单跳转口径一致） */
+const ACTIVE_THRESHOLD_PX = 96;
+
+/**
+ * 滚动跟随（纯函数）：按预览 scrollTop 算出当前应高亮的标题 offset。
+ * els 为按 top 升序的标题位置表（querySelectorAll('[data-md-start]') 的产物），
+ * 取视口顶部阈值上方最近的标题；无标题返回 null。
+ */
+export function activeHeadingOffset(
+  els: Array<{ offset: number; top: number }>,
+  scrollTop: number,
+): number | null {
+  if (els.length === 0) return null;
+  let active = els[0].offset;
+  for (const h of els) {
+    if (h.top <= scrollTop + ACTIVE_THRESHOLD_PX) active = h.offset;
+    else break;
+  }
+  return active;
+}

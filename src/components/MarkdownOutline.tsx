@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { ListTree } from 'lucide-react';
+import { activeHeadingOffset } from '../lib/markdownOutline';
 import type { MdHeading } from '../lib/markdownOutline';
 
 /**
@@ -63,3 +64,54 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
     </nav>
   );
 });
+
+/**
+ * 大纲滚动跟随容器：自带预览滚动监听与当前标题状态，仅在大纲展开时挂载
+ * （收起时零监听开销）。独立成组件是性能考量——预览每帧都可能滚动，
+ * 高亮变化若放在 App 级 setState 会全量重渲染 App，进而击穿预览 memo
+ * 触发全篇 markdown 重解析，分屏快速滚动时表现为明显掉帧。
+ * version 为文档内容：变化后重新查询标题元素（缓存策略与原 App 实现一致）。
+ */
+export function MarkdownOutlineLive({ getScroller, version, headings, isDarkMode, onJump }: {
+  getScroller: () => HTMLElement | null;
+  version: string;
+  headings: MdHeading[];
+  isDarkMode: boolean;
+  onJump: (h: MdHeading) => void;
+}) {
+  const [activeOffset, setActiveOffset] = useState<number | null>(null);
+  const elsRef = useRef<Array<{ offset: number; top: number }> | null>(null);
+  const versionRef = useRef('');
+
+  useEffect(() => {
+    const el = getScroller();
+    if (!el) return;
+    if (!elsRef.current || versionRef.current !== version) {
+      elsRef.current = Array.from(
+        el.querySelectorAll<HTMLElement>(
+          'h1[data-md-start],h2[data-md-start],h3[data-md-start],h4[data-md-start],h5[data-md-start],h6[data-md-start]',
+        ),
+      )
+        .map(node => ({ offset: Number(node.dataset.mdStart), top: node.offsetTop }))
+        .sort((a, b) => a.top - b.top);
+      versionRef.current = version;
+    }
+    const els = elsRef.current;
+    const update = () => {
+      const active = activeHeadingOffset(els, el.scrollTop);
+      setActiveOffset(prev => (prev === active ? prev : active));
+    };
+    el.addEventListener('scroll', update, { passive: true });
+    update();
+    return () => el.removeEventListener('scroll', update);
+  }, [getScroller, version]);
+
+  return (
+    <MarkdownOutline
+      headings={headings}
+      isDarkMode={isDarkMode}
+      activeOffset={activeOffset}
+      onJump={onJump}
+    />
+  );
+}

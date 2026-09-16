@@ -226,6 +226,10 @@ JSON/YAML 结构树视图、十六进制查看、打印/导出 PDF、SVG 工作�
 > 跨块选区整块误包 → 移除 rewrite 收敛到 img 组件解析、行内操作按"块内选中文本"逐块应用）；
 > 右键菜单新增「粘贴图片」（markdown 专属：剪贴板读图 → assets 落盘 → 插入相对路径）；
 > 加载失败的图片同样可右键删除/剪切；从文档删除受管理图片（paste-/remote- 命名）8s 后自动清理本地文件。
+> 分屏同步滚动掉帧修复：react-markdown v10 的 Markdown 组件内部无缓存，App 级任意 setState
+> （打字光标 / 大纲高亮）经内联闭包 props 击穿预览 memo 后全篇重跑 remark/rehype——
+> 按块 MdBlock 记忆化（md 源串与 components 不变即跳过重解析）；大纲滚动跟随从 App 下沉到
+> MarkdownOutlineLive（仅展开时挂载并监听预览滚动，高亮变化只重渲染大纲自身）。
 
 > 同批次候选（有余力再做）：剪贴板监控（Notepad3 PasteBoard 式的「最小化粘贴板」），
 > 做成设置项默认关闭，避免打扰；「复制为富文本（保留高亮）」与之同源，可一并考虑。
