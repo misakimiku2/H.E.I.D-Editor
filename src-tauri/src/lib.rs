@@ -152,6 +152,7 @@ pub fn run() {
             read_text_file,
             write_text_file,
             http::http_get,
+            http::http_get_binary,
             external::open_external,
             render::render_page,
             render::render_result,

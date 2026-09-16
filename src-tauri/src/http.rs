@@ -119,6 +119,49 @@ pub async fn http_get(url: String) -> Result<HttpGetResult, String> {
     .map_err(|e| format!("抓取任务失败：{e}"))?
 }
 
+#[derive(serde::Serialize)]
+pub struct HttpBinaryResult {
+    /// 响应体（base64）：图片本地化用，前端解码后写盘
+    pub base64: String,
+    pub content_type: String,
+}
+
+/// 抓取二进制资源（图片本地化）：与 http_get 同一护栏（仅 http/https、超时、5MB 上限）。
+/// 文本内容（检测不含 NUL）视为失败——本命令只面向二进制资源。
+#[tauri::command]
+pub async fn http_get_binary(url: String) -> Result<HttpBinaryResult, String> {
+    validate_url(&url)?;
+    let target = strip_fragment(url.trim()).to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .build();
+        let res = match agent.get(&target).call() {
+            Ok(res) => res,
+            Err(ureq::Error::Status(code, _)) => return Err(format!("服务器返回 HTTP {code}")),
+            Err(e) => return Err(format!("下载失败：{e}")),
+        };
+        let content_type = res.header("content-type").unwrap_or("").to_string();
+        let mut body = Vec::new();
+        res.into_reader()
+            .take(MAX_BODY_BYTES + 1)
+            .read_to_end(&mut body)
+            .map_err(|e| format!("读取响应失败：{e}"))?;
+        if body.len() as u64 > MAX_BODY_BYTES {
+            return Err("图片超过 5MB 上限".into());
+        }
+        // 纯文本大概率不是图片（如错误页），与 http_get 的二进制判定相反使用
+        if !body.contains(&0u8) {
+            return Err("响应不是二进制内容（疑似非图片）".into());
+        }
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&body);
+        Ok(HttpBinaryResult { base64: b64, content_type })
+    })
+    .await
+    .map_err(|e| format!("下载任务失败：{e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::{strip_fragment, validate_url};
