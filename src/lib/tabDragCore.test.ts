@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { insertionIndex, applyMove, DRAG_THRESHOLD_PX } from './tabDragCore';
+import { insertionIndex, applyMove, gapIndexFromRects, DRAG_THRESHOLD_PX } from './tabDragCore';
 
 /* 标签条矩形桩:等宽 100px,从 0 起 */
 const rects = (n: number) => Array.from({ length: n }, (_, i) => ({ left: i * 100, right: i * 100 + 100 }));
@@ -57,5 +57,34 @@ describe('DRAG_THRESHOLD_PX', () => {
   it('阈值存在且为小正值(防误触,点击不进拖拽)', () => {
     expect(DRAG_THRESHOLD_PX).toBeGreaterThan(0);
     expect(DRAG_THRESHOLD_PX).toBeLessThanOrEqual(10);
+  });
+});
+
+describe('gapIndexFromRects(三分位占位判定)', () => {
+  const r = rects(3); // [0,100) [100,200) [200,300)
+
+  it('左三分之一 → 插到该标签前', () => {
+    expect(gapIndexFromRects(r, 10, 0)).toBe(0);
+    expect(gapIndexFromRects(r, 110, 0)).toBe(1);  // 第二个标签左 1/3
+  });
+
+  it('右三分之一 → 插到该标签后', () => {
+    expect(gapIndexFromRects(r, 90, 0)).toBe(1);
+    expect(gapIndexFromRects(r, 190, 0)).toBe(2);
+  });
+
+  it('中间三分之一 → 粘滞保持 prev(占位符不闪烁)', () => {
+    expect(gapIndexFromRects(r, 150, 1)).toBe(1);  /* 悬在 tab1 中段,prev=1 */
+    expect(gapIndexFromRects(r, 150, 2)).toBe(2);  /* prev=2 紧邻,粘滞 */
+    expect(gapIndexFromRects(r, 150, 0)).toBe(2);  /* prev 与之无关:就近右半 */
+  });
+
+  it('越出最右 → 追加到末尾', () => {
+    expect(gapIndexFromRects(r, 500, 0)).toBe(3);
+    expect(gapIndexFromRects(r, 290, 0)).toBe(3);  // 最后一个标签右 1/3
+  });
+
+  it('空列表返回 prev(负值收敛为 0 由调用方保证)', () => {
+    expect(gapIndexFromRects([], 5, 0)).toBe(0);
   });
 });

@@ -1,22 +1,29 @@
 /**
  * 标签条（桌面布局）：渲染 + 原生 HTML5 拖拽（浏览器/记事本式）。
- * 拖起瞬间由系统渲染拖拽图像(setDragImage)——图像跟随全局光标,越出窗口也不消失,
- * 与桌面端直觉一致;松手在标签条外即脱离,拖到其它 H.I.D.E 窗口标签条上即合并
+ * 拖起瞬间由系统渲染拖拽图像(setDragImage)——图像跟随全局光标,越出窗口也不消失;
+ * 松手在标签条外即脱离,拖到其它 H.I.D.E 窗口标签条上即合并
  * (目标窗口直接收到 dragover/drop,由 OS 命中测试,无重叠窗口歧义)。
- * 标签载荷经 Rust 暂存区(tabTransfer 协议)在窗口间传递;插入指示线/悬停高亮
- * 内聚在本组件,重排/脱离/合并真正发生时才经回调上抛。
+ *
+ * 悬停指示为「空占位符 + 让位动画」:指针进入标签左右各三分之一区域,
+ * 占位符出现在该处、其余标签以过渡动画让位(中间三分之一粘滞防抖);
+ * 松手后标签落进占位符;拖走则让位复位。文档级 dragover/drop 对自家
+ * MIME 拖拽全程放行(否则光标为🚫),脱离语义=任意位置松手皆可。
  * 纯逻辑见 lib/tabDragCore;事件与载荷协议见 lib/tabTransfer。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FileText, Plus, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
-import { insertionIndex, type RectLike } from '../lib/tabDragCore';
+import { gapIndexFromRects } from '../lib/tabDragCore';
 import type { FileTab } from '../lib/tabModel';
 import { useT } from '../lib/i18nContext';
 
 /** 本应用自定义拖拽 MIME 标记:用于区分「我们的标签拖拽」与外部拖入(文件/文本) */
 const HEID_TAB_MIME = 'application/x-heid-tab';
+/** 外源合并占位符宽度(px) */
+const FOREIGN_GAP_W = 96;
+/** 标签条 flex 间距(gap-0.5) */
+const STRIP_GAP = 2;
 
 export interface TabBarProps {
   tabs: FileTab[];
@@ -44,7 +51,7 @@ export interface TabBarProps {
 
 interface ForeignHover {
   index: number;
-  /** 插入指示线在滚动内容坐标系里的 x */
+  /** 占位符在滚动内容坐标系里的左缘 x */
   caretX: number;
 }
 
@@ -55,32 +62,22 @@ export function TabBar({
 }: TabBarProps) {
   const t = useT();
   const stripRef = useRef<HTMLDivElement | null>(null);
-  const suppressClickRef = useRef(false);
   /* 本窗口正在进行的原生拖拽(dragstart→dragend 之间有效) */
-  const nativeDragRef = useRef<{ tabId: string; grabDx: number; grabDy: number } | null>(null);
+  const nativeDragRef = useRef<{
+    tabId: string; grabDx: number; grabDy: number; tabWidth: number; dropIndex: number; startIndex: number;
+  } | null>(null);
   /* 本次原生拖拽是否已在本窗口标签条上完成放置(重排) */
   const ownDropHandledRef = useRef(false);
-  const [dragView, setDragView] = useState<{ tabId: string; dropIndex: number; caretX: number | null } | null>(null);
+  /* 拖拽起始时各标签宽度(数组序),用于占位符定位 */
+  const widthsRef = useRef<number[]>([]);
+  const suppressClickRef = useRef(false);
+
+  const [dragView, setDragView] = useState<{ tabId: string; dropIndex: number; gapW: number } | null>(null);
   const [foreign, setForeign] = useState<ForeignHover | null>(null);
 
-  /* 最新的悬停位置/标签数供拖放落点读取:经 ref 中转 */
+  /* 最新的悬停落点供 drop 读取:经 ref 中转 */
   const foreignRef = useRef<ForeignHover | null>(null);
   foreignRef.current = foreign;
-  const tabsRefLen = useRef(tabs.length);
-  tabsRefLen.current = tabs.length;
-
-  const freshRects = (strip: HTMLDivElement) =>
-    Array.from(strip.querySelectorAll<HTMLElement>('[data-tab-id]')).map(el => {
-      const r = el.getBoundingClientRect();
-      return { left: r.left, right: r.right };
-    });
-
-  /* 指示线 x(滚动内容坐标系:可absolute 子元素随内容横滚) */
-  const caretXFromRects = (strip: HTMLDivElement, rects: RectLike[], index: number): number => {
-    const stripLeft = strip.getBoundingClientRect().left;
-    const base = index < rects.length ? rects[index].left : rects[rects.length - 1]?.right ?? stripLeft;
-    return base - stripLeft + strip.scrollLeft;
-  };
 
   /* ---- 原生拖拽:本窗口作为拖拽源 ---- */
 
@@ -95,9 +92,12 @@ export function TabBar({
     e.dataTransfer.setData(HEID_TAB_MIME, tabId);
     e.dataTransfer.effectAllowed = 'move';
     try { e.dataTransfer.setDragImage(el, Math.max(0, grabDx), Math.max(0, grabDy)); } catch { /* 退回默认图像 */ }
-    nativeDragRef.current = { tabId, grabDx, grabDy };
+    const startIndex = tabs.findIndex(tb => tb.id === tabId);
+    nativeDragRef.current = { tabId, grabDx, grabDy, tabWidth: rect.width, dropIndex: startIndex, startIndex };
+    widthsRef.current = Array.from(stripRef.current?.querySelectorAll<HTMLElement>('[data-tab-id]') ?? [])
+      .map(wEl => wEl.getBoundingClientRect().width);
     ownDropHandledRef.current = false;
-    setDragView({ tabId, dropIndex: tabs.findIndex(tb => tb.id === tabId), caretX: null });
+    setDragView({ tabId, dropIndex: startIndex, gapW: rect.width });
     onNativeDragStart(tabId);
   };
 
@@ -108,47 +108,64 @@ export function TabBar({
     if (!own) return;
     const handled = ownDropHandledRef.current;
     ownDropHandledRef.current = false;
+    if (handled && own.dropIndex !== own.startIndex) onMoveTab(own.tabId, own.dropIndex);
     onNativeDragEnd(own.tabId, handled, { grabDx: own.grabDx, grabDy: own.grabDy });
   };
 
   /* ---- 标签条作为放置目标:自身重排 + 收下其它窗口的标签 ---- */
 
+  const freshRects = (strip: HTMLDivElement) =>
+    Array.from(strip.querySelectorAll<HTMLElement>('[data-tab-id]'))
+      .map(el => el.getBoundingClientRect())
+      .filter(r => r.right - r.left > 4) /* 折叠中的源标签不计入插入点判定 */;
+
+  const caretXFromRects = (strip: HTMLDivElement, rects: { left: number; right: number }[], index: number): number => {
+    const stripLeft = strip.getBoundingClientRect().left;
+    const base = index < rects.length ? rects[index].left : rects[rects.length - 1]?.right ?? stripLeft;
+    return base - stripLeft + strip.scrollLeft;
+  };
+
   const handleStripDragOver = (e: React.DragEvent) => {
     const strip = stripRef.current;
     if (!strip) return;
     if (e.dataTransfer.types.includes('Files')) return; /* 文件拖放交给系统打开通道 */
+    const own = nativeDragRef.current;
     const rects = freshRects(strip);
-    if (nativeDragRef.current) {
-      /* 自家标签:实时重排 + 插入指示 */
+    if (own) {
+      /* 自家标签:三分位判定落点(占位符),dragend 时提交重排 */
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      const idx = insertionIndex(rects, e.clientX);
-      onMoveTab(nativeDragRef.current.tabId, idx);
-      setDragView({ tabId: nativeDragRef.current.tabId, dropIndex: idx, caretX: caretXFromRects(strip, rects, idx) });
+      const idx = gapIndexFromRects(rects, e.clientX, own.dropIndex);
+      if (idx !== own.dropIndex) {
+        own.dropIndex = idx;
+        setDragView(v => (v && v.tabId === own.tabId ? { ...v, dropIndex: idx } : v));
+      }
       return;
     }
-    /* 其它窗口的标签悬停:显示插入指示,允许放置 */
-    const index = insertionIndex(rects, e.clientX);
+    /* 其它窗口的标签悬停:显示占位符,允许放置 */
+    const prev = foreignRef.current?.index ?? tabs.length;
+    const idx = gapIndexFromRects(rects, e.clientX, prev);
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    setForeign({ index, caretX: caretXFromRects(strip, rects, index) });
+    const stripLeft = strip.getBoundingClientRect().left;
+    const base = idx < rects.length ? rects[idx].left : rects[rects.length - 1]?.right ?? stripLeft;
+    setForeign({ index: idx, caretX: base - stripLeft + strip.scrollLeft });
   };
 
   const handleStripDragLeave = (e: React.DragEvent) => {
     if (e.relatedTarget && stripRef.current?.contains(e.relatedTarget as Node)) return;
     setForeign(null);
-    setDragView(v => (v ? { ...v, caretX: null } : v));
   };
 
   const handleStripDrop = (e: React.DragEvent) => {
     if (e.dataTransfer.types.includes('Files')) return; /* 文件拖放交给系统打开通道 */
     e.preventDefault();
     if (nativeDragRef.current) {
-      ownDropHandledRef.current = true; /* 重排已在 dragover 中实时完成 */
+      ownDropHandledRef.current = true; /* 重排在 dragend 时提交 */
       return;
     }
     setForeign(null);
-    onAdoptForeignDrop(foreignRef.current?.index ?? tabsRefLen.current);
+    onAdoptForeignDrop(foreignRef.current?.index ?? tabs.length);
   };
 
   /* 外源悬停指示超过 600ms 无刷新即过期清除(源异常时的兜底) */
@@ -158,10 +175,23 @@ export function TabBar({
     return () => window.clearTimeout(t);
   }, [foreign]);
 
+  /* 文档级放行自家 MIME 拖拽:任何位置松手都有效(=脱离),光标不再显示🚫 */
+  useEffect(() => {
+    if (!canDetach) return;
+    const accept = (e: DragEvent) => {
+      if (!e.dataTransfer?.types.includes(HEID_TAB_MIME)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    };
+    document.addEventListener('dragover', accept);
+    document.addEventListener('drop', accept);
+    return () => {
+      document.removeEventListener('dragover', accept);
+      document.removeEventListener('drop', accept);
+    };
+  }, [canDetach]);
+
   const dragTab = dragView ? tabs.find(tb => tb.id === dragView.tabId) : null;
-  const showOwnCaret = !!dragView
-    && dragView.caretX != null
-    && dragView.dropIndex !== tabs.findIndex(tb => tb.id === dragView.tabId);
 
   return (
     <>
@@ -188,70 +218,96 @@ export function TabBar({
           onContextMenu(e.clientX, e.clientY, null);
         }}
       >
-        {tabs.map((tab) => {
-          /* 脏且存在未处理外部 diff：橙色提示点（外圈样式区别于琥珀色脏状态点） */
-          const conflicted = conflictedIds.has(tab.id);
-          const dragging = dragView?.tabId === tab.id;
-          return (
-            <div
-              key={tab.id}
-              data-tab-id={tab.id}
-              draggable={!IS_TOUCH_PRIMARY}
-              onClick={() => {
-                if (suppressClickRef.current) { suppressClickRef.current = false; return; }
-                onSelect(tab.id);
-              }}
-              onDragStart={(e) => handleTabDragStart(e, tab.id)}
-              onDragEnd={handleTabDragEnd}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onContextMenu(e.clientX, e.clientY, tab.id);
-              }}
-              className={cn(
-                "px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-all group max-w-[180px] shrink-0",
-                dragging && "opacity-40",
-                activeTabId === tab.id
-                  ? (isDarkMode ? "bg-zinc-700 text-zinc-100" : "bg-zinc-200 text-zinc-800")
-                  : (isDarkMode ? "text-zinc-500 hover:bg-zinc-700/50" : "text-zinc-500 hover:bg-zinc-100")
-              )}
-            >
-              <span
-                title={conflicted ? t('tab.conflictedTitle') : undefined}
+        {(() => {
+          /* 逐标签计算让位:被拖标签折叠腾位,折叠列表中其后的标签右移一个占位宽 */
+          let collapsed = 0;
+          return tabs.map((tab, i) => {
+            const isDragged = dragView?.tabId === tab.id;
+            const collapsedIdx = collapsed;
+            if (!isDragged) collapsed += 1;
+            const dragging = isDragged;
+            const conflicted = conflictedIds.has(tab.id);
+            let shift = 0;
+            if (dragView && !isDragged && collapsedIdx >= dragView.dropIndex) shift = dragView.gapW;
+            if (foreign && !dragView && i >= foreign.index) shift = FOREIGN_GAP_W;
+            return (
+              <div
+                key={tab.id}
+                data-tab-id={tab.id}
+                draggable={!IS_TOUCH_PRIMARY}
+                onClick={() => {
+                  if (suppressClickRef.current) { suppressClickRef.current = false; return; }
+                  onSelect(tab.id);
+                }}
+                onDragStart={(e) => handleTabDragStart(e, tab.id)}
+                onDragEnd={handleTabDragEnd}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onContextMenu(e.clientX, e.clientY, tab.id);
+                }}
+                style={dragging ? { width: 0, minWidth: 0, paddingLeft: 0, paddingRight: 0, opacity: 0, transform: shift ? `translateX(${shift}px)` : undefined }
+                  : shift ? { transform: `translateX(${shift}px)` } : undefined}
                 className={cn(
-                  "w-1.5 h-1.5 rounded-full shrink-0",
-                  conflicted
-                    ? "bg-orange-500 ring-2 ring-orange-400/40"
-                    : tab.isDirty ? "bg-amber-500" : (activeTabId === tab.id ? "bg-emerald-500" : (isDarkMode ? "bg-zinc-600" : "bg-zinc-300"))
-                )} />
-              <FileText size={12} className="shrink-0 opacity-60" />
-              <span className="truncate">{tab.title}</span>
-              <button
-                onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
-                className={cn(
-                  "p-0.5 rounded-sm hover:bg-zinc-500/20 transition-all shrink-0",
-                  IS_TOUCH_PRIMARY ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                  "px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-all group max-w-[180px] shrink-0 overflow-hidden",
+                  dragging && "opacity-0",
+                  activeTabId === tab.id
+                    ? (isDarkMode ? "bg-zinc-700 text-zinc-100" : "bg-zinc-200 text-zinc-800")
+                    : (isDarkMode ? "text-zinc-500 hover:bg-zinc-700/50" : "text-zinc-500 hover:bg-zinc-100")
                 )}
               >
-                <X size={10} />
-              </button>
-            </div>
+                <span
+                  title={conflicted ? t('tab.conflictedTitle') : undefined}
+                  className={cn(
+                    "w-1.5 h-1.5 rounded-full shrink-0",
+                    conflicted
+                      ? "bg-orange-500 ring-2 ring-orange-400/40"
+                      : tab.isDirty ? "bg-amber-500" : (activeTabId === tab.id ? "bg-emerald-500" : (isDarkMode ? "bg-zinc-600" : "bg-zinc-300"))
+                  )} />
+                <FileText size={12} className="shrink-0 opacity-60" />
+                <span className="truncate">{tab.title}</span>
+                <button
+                  onClick={(e2) => { e2.stopPropagation(); onCloseTab(tab.id); }}
+                  className={cn(
+                    "p-0.5 rounded-sm hover:bg-zinc-500/20 transition-all shrink-0",
+                    IS_TOUCH_PRIMARY ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                  )}
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            );
+          });
+        })()}
+
+        {/* 自家拖拽:空占位符(虚线框指示落点;dragend 提交重排后由真实标签归位) */}
+        {dragView && dragTab && (() => {
+          let acc = 0;
+          let taken = 0;
+          for (let i = 0; i < tabs.length && taken < dragView.dropIndex; i++) {
+            if (tabs[i].id === dragView.tabId) continue;
+            acc += (widthsRef.current[i] ?? 0) + STRIP_GAP;
+            taken += 1;
+          }
+          return (
+            <div
+              className={cn(
+                "absolute top-1 bottom-1 rounded-md border border-dashed pointer-events-none",
+                isDarkMode ? "border-emerald-400/50 bg-emerald-500/10" : "border-emerald-500/60 bg-emerald-500/10"
+              )}
+              style={{ left: acc, width: dragView.gapW }}
+            />
           );
-        })}
+        })()}
 
-        {/* 自家拖拽的插入指示线(滚动内容坐标系,随内容横滚) */}
-        {dragView && showOwnCaret && (
+        {/* 外源拖拽:空占位符 */}
+        {foreign && (
           <div
-            className="absolute top-1 bottom-1 w-0.5 rounded-full bg-emerald-500 pointer-events-none"
-            style={{ left: dragView.caretX! - 1 }}
-          />
-        )}
-
-        {/* 外源拖拽的插入指示线 */}
-        {foreign && !dragView && (
-          <div
-            className="absolute top-1 bottom-1 w-0.5 rounded-full bg-emerald-500 pointer-events-none"
-            style={{ left: foreign.caretX - 1 }}
+            className={cn(
+              "absolute top-1 bottom-1 rounded-md border border-dashed pointer-events-none",
+              isDarkMode ? "border-emerald-400/50 bg-emerald-500/10" : "border-emerald-500/60 bg-emerald-500/10"
+            )}
+            style={{ left: foreign.caretX, width: FOREIGN_GAP_W }}
           />
         )}
       </div>
