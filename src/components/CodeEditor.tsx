@@ -20,7 +20,7 @@ import { FindReplaceBar } from './FindReplaceBar';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { findHighlightExtension } from '../lib/editorSearch';
 import { readClipboardText, writeClipboardText, clipboardReadPermissionState, isTauriRuntime } from '../lib/fileOps';
-import { imageFileFromClipboard } from '../lib/markdownImagePaste';
+import { clipboardHasImage as detectClipboardHasImage, imageFileFromClipboard } from '../lib/markdownImagePaste';
 import { loadLanguageExtension } from '../lib/codemirror';
 import { parseColorLiteral, serializeColorLiteral } from '../lib/colorLiteral';
 import type { Rgba } from '../lib/colorMath';
@@ -414,6 +414,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const [mdMenu, setMdMenu] = useState<{ x: number; y: number; from: number; to: number; text: string } | null>(null);
   /* 通用右键菜单（非 markdown 格式化路径都走这里；minimap/行号随容器一并接管） */
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const [clipboardHasImage, setClipboardHasImage] = useState(false);
   /* 粘贴项可用性：菜单打开后异步探测一次（无权限时置灰，探测期间按可用展示）。
      Tauri 内走插件读剪贴板探测；浏览器改用只读权限查询 —— readText 探测本身
      就会弹「查看剪贴板」授权框 */
@@ -1229,6 +1230,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     e.preventDefault();
     const view = viewReadyRef.current;
     if (!view) return;
+    /* markdown（onPasteImage 提供）时异步探测剪贴板内容，菜单标签随结果在
+       「粘贴 / 粘贴 图片」间切换（探测落地时菜单已打开，state 驱动刷新） */
+    if (onPasteImageRef.current) {
+      void detectClipboardHasImage().then(has => setClipboardHasImage(has));
+    }
     const { from, to } = view.state.selection.main;
     if (markdownMenu && from !== to) {
       setMdMenu({ x: e.clientX, y: e.clientY, from, to, text: view.state.sliceDoc(from, to) });
@@ -1266,7 +1272,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
          无图 / 读图失败回退普通文本粘贴；非 markdown 维持纯文本粘贴 */
       {
         icon: <ClipboardPaste size={13} />,
-        label: onPasteImageRef.current ? tr('ctx.pasteImage') : tr('ctx.paste'),
+        label: (onPasteImageRef.current && clipboardHasImage) ? tr('ctx.pasteImage') : tr('ctx.paste'),
         shortcut: 'Ctrl+V',
         disabled: readOnly || !pasteAvailable,
         onSelect: run(async (v: EditorView) => {

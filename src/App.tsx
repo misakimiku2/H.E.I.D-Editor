@@ -1694,50 +1694,49 @@ export default function App() {
               </div>
             )}
             {/* 行容器恒定：预览槽位恒挂 key（跨视图/跨标签保活不重挂） */}
-            <div className="relative flex flex-1 overflow-hidden">
-              {/* Markdown 大纲：贴右缘的浮动小窗（毛玻璃，与右键菜单同底），右侧垂直居中。
-                  收起时是贴窗口右缘的 "<" 把手；展开后面板在左、把手变 ">" 贴面板右缘。
-                  高度自适应内容，上限为视图高度减去上下各 40px，超出即面板内滚动；
-                  展开/收起带宽度 + 透明度过渡（手机无此面板） */}
-              {isMarkdown && !isPhone && outlineOpen && (
-                <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex items-center" data-testid="md-outline-pop">
-                  <div className="pointer-events-auto flex items-center">
-                    <div
-                      className={cn(
-                        'overflow-x-hidden overflow-y-auto overscroll-contain rounded-l-xl border border-r-0 shadow-xl backdrop-blur-md transition-all duration-200 ease-out',
-                        outlineCollapsed
-                          ? 'w-0 border-transparent opacity-0'
-                          : (isDarkMode ? 'w-60 border-zinc-700/70 bg-zinc-800/70 opacity-100' : 'w-60 border-zinc-200/80 bg-white/70 opacity-100'),
-                      )}
-                      style={{ maxHeight: 'calc(100% - 80px)' }}
-                    >
-                      <MarkdownOutline
-                        headings={mdOutline}
-                        isDarkMode={isDarkMode}
-                        activeOffset={outlineActiveOffset}
-                        onJump={handleOutlineJump}
-                      />
-                    </div>
-                    <button
-                      className={cn(
-                        'flex h-11 w-5 shrink-0 items-center justify-center border shadow-md backdrop-blur-md transition-colors',
-                        outlineCollapsed ? 'rounded-l-lg' : 'rounded-l-md border-l-0',
-                        isDarkMode
-                          ? 'border-zinc-700/70 bg-zinc-800/70 text-zinc-400 hover:text-zinc-200'
-                          : 'border-zinc-200/80 bg-white/70 text-zinc-500 hover:text-zinc-700',
-                      )}
-                      title={outlineCollapsed ? t('md.outlineExpand') : t('md.outlineCollapse')}
-                      onClick={() => setOutlineCollapsed(c => !c)}
-                    >
-                      {outlineCollapsed ? <ChevronLeft size={13} /> : <ChevronRight size={13} />}
-                    </button>
-                  </div>
-                </div>
-              )}
-              {/* 预览保活槽位：不可见时仅 display:none，不卸载 */}
+            <div className="flex flex-1 overflow-hidden">
+              {/* 预览保活槽位：不可见时仅 display:none，不卸载；大纲弹窗贴预览视图右缘 */}
               {mdAliveTab && (
-                <div key="md-preview-slot" className={cn("min-w-0 overflow-hidden", previewVisible ? "flex-1" : "hidden")}>
+                <div key="md-preview-slot" className={cn("relative min-w-0 overflow-hidden", previewVisible ? "flex-1" : "hidden")}>
                   {renderMdPreview()}
+                  {/* Markdown 大纲：贴预览视图右缘的毛玻璃小窗（手机无此面板）。
+                      收起时是贴右缘的 "<" 把手；展开后面板在其左、把手变 ">"。
+                      高度自适应内容，上限为视图高度减上下各 40px（容器 top/bottom-10 定高，
+                      面板 max-h-full 才能生效），超出即面板内滚动；展开/收起带过渡动画 */}
+                  {isMarkdown && !isPhone && outlineOpen && previewVisible && (
+                    <div className="absolute bottom-10 right-0 top-10 z-30 flex justify-end" data-testid="md-outline-pop">
+                      <div className="flex h-full items-center">
+                        <button
+                          className={cn(
+                            'flex h-11 w-5 shrink-0 items-center justify-center border shadow-md backdrop-blur-md transition-colors',
+                            outlineCollapsed ? 'rounded-r-lg border-l-0' : 'rounded-l-md',
+                            isDarkMode
+                              ? 'border-zinc-700/70 bg-zinc-800/70 text-zinc-400 hover:text-zinc-200'
+                              : 'border-zinc-200/80 bg-white/70 text-zinc-500 hover:text-zinc-700',
+                          )}
+                          title={outlineCollapsed ? t('md.outlineExpand') : t('md.outlineCollapse')}
+                          onClick={() => setOutlineCollapsed(c => !c)}
+                        >
+                          {outlineCollapsed ? <ChevronLeft size={13} /> : <ChevronRight size={13} />}
+                        </button>
+                        <div
+                          className={cn(
+                            'max-h-full overflow-y-auto overscroll-contain border shadow-xl backdrop-blur-md transition-all duration-200 ease-out',
+                            outlineCollapsed
+                              ? 'w-0 border-transparent opacity-0'
+                              : (isDarkMode ? 'w-60 rounded-r-xl border-zinc-700/70 bg-zinc-800/70 opacity-100' : 'w-60 rounded-r-xl border-zinc-200/80 bg-white/70 opacity-100'),
+                          )}
+                        >
+                          <MarkdownOutline
+                            headings={mdOutline}
+                            isDarkMode={isDarkMode}
+                            activeOffset={outlineActiveOffset}
+                            onJump={handleOutlineJump}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
               {isLargePreview ? (

@@ -121,3 +121,26 @@ export function removedManagedImages(oldMd: string, newMd: string): string[] {
   const after = collectManagedImages(newMd);
   return Array.from(before).filter(u => !after.has(u));
 }
+
+/**
+ * 剪贴板当前是否为图片（右键菜单据此在「粘贴 / 粘贴 图片」间切换标签）。
+ * 桌面：先读文本（有文字即非图片，Windows 剪贴板单一内容），再试读图（无图抛错）；
+ * 浏览器：navigator.clipboard.read 看类型。任何失败按非图片处理。
+ */
+export async function clipboardHasImage(): Promise<boolean> {
+  try {
+    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+      const { readText } = await import('@tauri-apps/plugin-clipboard-manager');
+      const text = await readText();
+      if (text && text.length > 0) return false;
+      const { readImage } = await import('@tauri-apps/plugin-clipboard-manager');
+      await readImage();
+      return true;
+    }
+    if (!navigator.clipboard?.read) return false;
+    const items = await navigator.clipboard.read();
+    return items.some(i => i.types.some(t => t.startsWith('image/')));
+  } catch {
+    return false;
+  }
+}
