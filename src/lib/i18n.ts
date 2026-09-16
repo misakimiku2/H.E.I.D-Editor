@@ -484,6 +484,8 @@ const zh = {
 
   'md.outlineCollapse': '收起大纲',
   'md.outlineExpand': '展开大纲',
+  'md.outlineFold': '折叠小节',
+  'md.outlineUnfold': '展开小节',
   'md.pasteTitle': '粘贴图片',
   'md.localizeTitle': '图片本地化',
   'md.outlineAria': 'Markdown 大纲',
@@ -1094,6 +1096,8 @@ const en: Record<MessageKey, string> = {
 
   'md.outlineCollapse': 'Collapse outline',
   'md.outlineExpand': 'Expand outline',
+  'md.outlineFold': 'Fold section',
+  'md.outlineUnfold': 'Unfold section',
   'md.pasteTitle': 'Paste image',
   'md.localizeTitle': 'Localize images',
   'md.outlineAria': 'Markdown outline',

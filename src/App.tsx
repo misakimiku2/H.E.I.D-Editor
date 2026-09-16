@@ -1681,15 +1681,14 @@ export default function App() {
                               : 'w-0 border-transparent opacity-0',
                           )}
                         >
-                          {outlineOpen ? (
-                            <MarkdownOutlineLive
-                              getScroller={getPreviewScroller}
-                              version={mdAliveTab?.content ?? ''}
-                              headings={mdOutline}
-                              isDarkMode={isDarkMode}
-                              onJump={handleOutlineJump}
-                            />
-                          ) : null}
+                          <MarkdownOutlineLive
+                            enabled={outlineOpen}
+                            getScroller={getPreviewScroller}
+                            version={mdAliveTab?.content ?? ''}
+                            headings={mdOutline}
+                            isDarkMode={isDarkMode}
+                            onJump={handleOutlineJump}
+                          />
                         </div>
                       </div>
                     </div>

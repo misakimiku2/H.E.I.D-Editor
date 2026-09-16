@@ -1,15 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
-import { ListTree } from 'lucide-react';
+import { ChevronRight, ListTree } from 'lucide-react';
 import { activeHeadingOffset } from '../lib/markdownOutline';
 import type { MdHeading } from '../lib/markdownOutline';
 
 /**
  * Markdown 大纲：按层级缩进列出标题，点击回调交由 App 分流
  * （预览滚动 / 编辑器跳转）。activeOffset 为滚动跟随的当前标题
- * （App 侧监听预览滚动算出），高亮与悬停均按右键菜单项口径
+ * （MarkdownOutlineLive 监听预览滚动算出），高亮与悬停均按右键菜单项口径
  * （左右留间隔、圆角、同色底）。
+ * 有子标题的条目带折叠钮（箭头指向：展开朝下、折叠朝右），折叠后隐藏
+ * 全部更深层级、直到出现同级或更浅级标题；折叠状态保存在本组件内，
+ * 面板收起再展开不丢失。
  */
 export const MarkdownOutline = React.memo(function MarkdownOutline({
   headings, isDarkMode, activeOffset, onJump,
@@ -20,6 +23,7 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
   onJump: (h: MdHeading) => void;
 }) {
   const t = useT();
+  const [folded, setFolded] = useState<ReadonlySet<number>>(() => new Set());
   if (headings.length === 0) {
     return (
       <div className={cn(
@@ -36,16 +40,40 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
     if (level === 2) return 'font-medium';
     return '';
   };
+  /* 逐条扫描出可见性：hideLevel 记录最近一个被折叠标题的层级，
+     后续更深层级隐藏，遇到同级/更浅级即收束；有子标题 ⇔ 紧邻下一条层级更深。
+     隐藏条目不渲染，但保留原数组下标作为 testid/key 基准 */
+  const rows: Array<{ h: MdHeading; hidden: boolean; hasChildren: boolean }> = [];
+  let hideLevel: number | null = null;
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (hideLevel !== null && h.level <= hideLevel) hideLevel = null;
+    const hidden = hideLevel !== null;
+    if (!hidden && folded.has(h.offset)) hideLevel = h.level;
+    rows.push({ h, hidden, hasChildren: i + 1 < headings.length && headings[i + 1].level > h.level });
+  }
+  const toggleFold = (offset: number) => {
+    setFolded(prev => {
+      const next = new Set(prev);
+      if (next.has(offset)) next.delete(offset);
+      else next.add(offset);
+      return next;
+    });
+  };
   return (
-    <nav aria-label={t('md.outlineAria')} data-testid="md-outline" className="px-1.5">
-      {headings.map((h, i) => {
+    <nav aria-label={t('md.outlineAria')} data-testid="md-outline" className="px-1.5 py-2">
+      {rows.map(({ h, hidden, hasChildren }, i) => {
+        if (hidden) return null;
+        const expanded = !folded.has(h.offset);
         const active = activeOffset != null && h.offset === activeOffset;
         return (
-          <button
+          <div
             key={`${h.offset}-${i}`}
             data-testid={`md-outline-item-${i}`}
+            role="button"
+            tabIndex={0}
             className={cn(
-              'mb-0.5 block w-full truncate rounded-lg px-2.5 py-1.5 text-left text-xs leading-5 transition-colors',
+              'mb-0.5 flex w-full items-center gap-0.5 rounded-lg py-1.5 pr-2.5 text-left text-xs leading-5 transition-colors',
               levelColor(h.level),
               active
                 ? (isDarkMode ? 'bg-zinc-600/70 text-zinc-100' : 'bg-zinc-200/70 text-zinc-900')
@@ -56,9 +84,38 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
             style={{ paddingLeft: 10 + (h.level - 1) * 12 }}
             title={h.text || `H${h.level}`}
             onClick={() => onJump(h)}
+            onKeyDown={(e) => {
+              /* 焦点在折叠钮上时的 Enter/空格由按钮自己处理，避免二次触发跳转 */
+              if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                e.preventDefault();
+                onJump(h);
+              }
+            }}
           >
-            {h.text || `H${h.level}`}
-          </button>
+            {hasChildren ? (
+              <button
+                type="button"
+                aria-label={expanded ? t('md.outlineFold') : t('md.outlineUnfold')}
+                title={expanded ? t('md.outlineFold') : t('md.outlineUnfold')}
+                className={cn(
+                  'flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition-colors',
+                  isDarkMode ? 'hover:bg-zinc-600/70' : 'hover:bg-zinc-300/70',
+                )}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleFold(h.offset);
+                }}
+              >
+                <ChevronRight
+                  size={12}
+                  className={cn('transition-transform duration-150', expanded && 'rotate-90')}
+                />
+              </button>
+            ) : (
+              <span className="h-5 w-5 shrink-0" aria-hidden />
+            )}
+            <span className="truncate">{h.text || `H${h.level}`}</span>
+          </div>
         );
       })}
     </nav>
@@ -66,13 +123,16 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
 });
 
 /**
- * 大纲滚动跟随容器：自带预览滚动监听与当前标题状态，仅在大纲展开时挂载
- * （收起时零监听开销）。独立成组件是性能考量——预览每帧都可能滚动，
- * 高亮变化若放在 App 级 setState 会全量重渲染 App，进而击穿预览 memo
- * 触发全篇 markdown 重解析，分屏快速滚动时表现为明显掉帧。
+ * 大纲滚动跟随容器：自带预览滚动监听与当前标题状态。enabled=false（面板收起）
+ * 时只卸掉滚动监听、组件保持挂载——高亮与折叠状态都不丢，重新展开即恢复。
+ * 独立成组件是性能考量——预览每帧都可能滚动，高亮变化若放在 App 级 setState
+ * 会全量重渲染 App，进而击穿预览 memo 触发全篇 markdown 重解析，分屏快速
+ * 滚动时表现为明显掉帧。
  * version 为文档内容：变化后重新查询标题元素（缓存策略与原 App 实现一致）。
  */
-export function MarkdownOutlineLive({ getScroller, version, headings, isDarkMode, onJump }: {
+export function MarkdownOutlineLive({ enabled, getScroller, version, headings, isDarkMode, onJump }: {
+  /** 大纲面板是否展开；收起时暂停滚动跟随（组件保持挂载以保留折叠状态） */
+  enabled: boolean;
   getScroller: () => HTMLElement | null;
   version: string;
   headings: MdHeading[];
@@ -84,6 +144,7 @@ export function MarkdownOutlineLive({ getScroller, version, headings, isDarkMode
   const versionRef = useRef('');
 
   useEffect(() => {
+    if (!enabled) return;
     const el = getScroller();
     if (!el) return;
     if (!elsRef.current || versionRef.current !== version) {
@@ -104,7 +165,7 @@ export function MarkdownOutlineLive({ getScroller, version, headings, isDarkMode
     el.addEventListener('scroll', update, { passive: true });
     update();
     return () => el.removeEventListener('scroll', update);
-  }, [getScroller, version]);
+  }, [enabled, getScroller, version]);
 
   return (
     <MarkdownOutline
