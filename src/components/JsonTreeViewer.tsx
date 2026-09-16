@@ -20,6 +20,8 @@ export interface JsonTreeViewerProps {
   isDarkMode: boolean;
   /** 解析失败横幅里的「切回文本视图」回调（不提供则只显示错误） */
   onFallbackText?: () => void;
+  /** 滚动容器回调（分屏同步滚动用，与编辑器按比例联动） */
+  onScroller?: (el: HTMLDivElement | null) => void;
 }
 
 /** 折叠态以节点路径 id 记（父 id + '/' + 子下标），同一标签内随解析结果稳定 */
@@ -147,7 +149,7 @@ const NodeRow = React.memo(function NodeRow({
 });
 
 export const JsonTreeViewer = React.memo(function JsonTreeViewer({
-  content, kind, isDarkMode, onFallbackText,
+  content, kind, isDarkMode, onFallbackText, onScroller,
 }: JsonTreeViewerProps) {
   const t = useT();
   const [tree, setTree] = useState<JsonNode | null>(null);
@@ -279,7 +281,10 @@ export const JsonTreeViewer = React.memo(function JsonTreeViewer({
       </div>
 
       {/* 树主体（长文档纵向滚动） */}
-      <div className={cn('flex-1 overflow-auto p-2 font-mono', isDarkMode ? 'bg-zinc-900' : 'bg-white')}>
+      <div
+        ref={onScroller}
+        className={cn('flex-1 overflow-auto p-2 font-mono', isDarkMode ? 'bg-zinc-900' : 'bg-white')}
+      >
         <NodeRow
           node={tree}
           id={ROOT_ID}

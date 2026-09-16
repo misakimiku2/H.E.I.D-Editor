@@ -5,21 +5,24 @@ import { ListTree } from 'lucide-react';
 import type { MdHeading } from '../lib/markdownOutline';
 
 /**
- * Markdown 大纲侧栏：按层级缩进列出标题，点击回调交由 App 分流
- * （预览滚动 / 编辑器跳转）。纯展示组件，标题提取在父级完成。
+ * Markdown 大纲：按层级缩进列出标题，点击回调交由 App 分流
+ * （预览滚动 / 编辑器跳转）。activeOffset 为滚动跟随的当前标题
+ * （App 侧监听预览滚动算出），高亮与悬停均按右键菜单项口径
+ * （左右留间隔、圆角、同色底）。
  */
 export const MarkdownOutline = React.memo(function MarkdownOutline({
-  headings, isDarkMode, onJump,
+  headings, isDarkMode, activeOffset, onJump,
 }: {
   headings: MdHeading[];
   isDarkMode: boolean;
+  activeOffset?: number | null;
   onJump: (h: MdHeading) => void;
 }) {
   const t = useT();
   if (headings.length === 0) {
     return (
       <div className={cn(
-        'flex flex-col items-center justify-center gap-2 text-xs px-4 py-6 text-center',
+        'flex flex-col items-center justify-center gap-2 px-4 py-8 text-center text-xs',
         isDarkMode ? 'text-zinc-600' : 'text-zinc-400',
       )}>
         <ListTree size={20} />
@@ -28,27 +31,35 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
     );
   }
   const levelColor = (level: number) => {
-    if (level === 1) return isDarkMode ? 'text-zinc-100 font-semibold' : 'text-zinc-900 font-semibold';
-    if (level === 2) return isDarkMode ? 'text-zinc-300 font-medium' : 'text-zinc-700 font-medium';
-    return isDarkMode ? 'text-zinc-400' : 'text-zinc-500';
+    if (level === 1) return 'font-semibold';
+    if (level === 2) return 'font-medium';
+    return '';
   };
   return (
-    <nav aria-label={t('md.outlineAria')} data-testid="md-outline" className="py-1 pb-2">
-      {headings.map((h, i) => (
-        <button
-          key={`${h.offset}-${i}`}
-          data-testid={`md-outline-item-${i}`}
-          className={cn(
-            'block w-full text-left text-xs leading-6 truncate px-3 hover:bg-zinc-500/10 transition-colors',
-            levelColor(h.level),
-          )}
-          style={{ paddingLeft: 12 + (h.level - 1) * 14 }}
-          title={h.text || `H${h.level}`}
-          onClick={() => onJump(h)}
-        >
-          {h.text || `H${h.level}`}
-        </button>
-      ))}
+    <nav aria-label={t('md.outlineAria')} data-testid="md-outline" className="px-1.5">
+      {headings.map((h, i) => {
+        const active = activeOffset != null && h.offset === activeOffset;
+        return (
+          <button
+            key={`${h.offset}-${i}`}
+            data-testid={`md-outline-item-${i}`}
+            className={cn(
+              'mb-0.5 block w-full truncate rounded-lg px-2.5 py-1.5 text-left text-xs leading-5 transition-colors',
+              levelColor(h.level),
+              active
+                ? (isDarkMode ? 'bg-zinc-600/70 text-zinc-100' : 'bg-zinc-200/70 text-zinc-900')
+                : (isDarkMode
+                  ? 'text-zinc-400 hover:bg-zinc-600/70 hover:text-zinc-200'
+                  : 'text-zinc-500 hover:bg-zinc-200/70 hover:text-zinc-700'),
+            )}
+            style={{ paddingLeft: 10 + (h.level - 1) * 12 }}
+            title={h.text || `H${h.level}`}
+            onClick={() => onJump(h)}
+          >
+            {h.text || `H${h.level}`}
+          </button>
+        );
+      })}
     </nav>
   );
 });

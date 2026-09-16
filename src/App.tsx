@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
-  GitCompare, Columns2, History, ChevronRight, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
+  GitCompare, Columns2, History, ChevronRight, ChevronLeft, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
   Table, Code, Braces, Wand2, Printer, ListTree, ImageDown,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
@@ -30,7 +30,7 @@ import { SvgWorkbench } from './components/SvgWorkbench';
 import { resolveImageSrc, ImageForbiddenError } from './lib/imageSrc';
 import { appAlert, registerAppAlert } from './lib/appAlert';
 import { showNotification } from './lib/notifications';
-import { savePastedImage, blobToDataUrl, DATA_URI_MAX_BYTES } from './lib/markdownImagePaste';
+import { savePastedImage, blobToDataUrl, rgbaToPngBlob, collectManagedImages, removedManagedImages, DATA_URI_MAX_BYTES } from './lib/markdownImagePaste';
 import { localizeRemoteImages, type LocalizeIo } from './lib/imageLocalize';
 import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDoc';
 import { clampDiffEntries } from './lib/diffTimeline';
@@ -516,6 +516,11 @@ export default function App() {
 
   /* ---- 分屏同步滚动 ---- */
   const { attachEditorScroller, attachPreviewScroller } = useSplitScroll();
+  /* JSON/YAML 分屏同步滚动：编辑器 ↔ 结构树（同一套比例映射 + 短时锁） */
+  const {
+    attachEditorScroller: attachJsonEditorScroller,
+    attachPreviewScroller: attachJsonTreeScroller,
+  } = useSplitScroll();
 
   /* ---- 应用更新（桌面签名安装 / 安卓版本检查提示；每次启动自动静默检查一次）---- */
   const updater = useUpdater();
@@ -813,11 +818,50 @@ export default function App() {
   /* ---- Markdown 大纲侧栏：标题提取 + 点击分流（预览滚动 / 编辑器跳转） ---- */
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
+  /* 大纲滚动跟随：预览滚到某标题附近时高亮对应条目（预览保活容器上监听滚动） */
+  const [outlineActiveOffset, setOutlineActiveOffset] = useState<number | null>(null);
+  const previewScrollElRef = useRef<HTMLDivElement | null>(null);
+  const headingElsRef = useRef<Array<{ offset: number; top: number }> | null>(null);
+  const headingElsVersionRef = useRef('');
   const mdOutline = useMemo(
     () => (isMarkdown && activeTab ? extractHeadings(activeTab.content) : []),
     [isMarkdown, activeTab?.content, activeTab],
   );
   const outlineJumpSeqRef = useRef(0);
+  /* 预览滚动 → 当前标题（视口顶部阈值上方最近的标题）→ 大纲高亮 */
+  const updateOutlineActive = useCallback(() => {
+    const scroller = previewScrollElRef.current;
+    if (!scroller) return;
+    const version = mdAliveTab?.content ?? '';
+    let els = headingElsRef.current;
+    if (!els || headingElsVersionRef.current !== version) {
+      els = Array.from(
+        scroller.querySelectorAll<HTMLElement>(
+          'h1[data-md-start],h2[data-md-start],h3[data-md-start],h4[data-md-start],h5[data-md-start],h6[data-md-start]',
+        ),
+      )
+        .map(el => ({ offset: Number(el.dataset.mdStart), top: el.offsetTop }))
+        .sort((a, b) => a.top - b.top);
+      headingElsRef.current = els;
+      headingElsVersionRef.current = version;
+    }
+    if (els.length === 0) { setOutlineActiveOffset(null); return; }
+    const top = scroller.scrollTop;
+    let active = els[0].offset;
+    for (const h of els) {
+      if (h.top <= top + 96) active = h.offset;
+      else break;
+    }
+    setOutlineActiveOffset(prev => (prev === active ? prev : active));
+  }, [mdAliveTab?.content]);
+  useEffect(() => {
+    const el = previewScrollElRef.current;
+    if (!el) return;
+    el.addEventListener('scroll', updateOutlineActive, { passive: true });
+    updateOutlineActive();
+    return () => el.removeEventListener('scroll', updateOutlineActive);
+  }, [updateOutlineActive, outlineOpen, previewVisible]);
+  useEffect(() => { headingElsRef.current = null; }, [mdOutline]);
   const handleOutlineJump = useCallback((h: MdHeading) => {
     if (previewVisible) previewRef.current?.scrollToOffset(h.offset);
     if (editorVisible) {
@@ -840,12 +884,15 @@ export default function App() {
         content={mdAliveTab.content}
         isDarkMode={isDarkMode}
         baseDir={mdAliveTab.path ? dirNameOf(mdAliveTab.path) : undefined}
-        onChange={mdAliveTab.readOnly ? undefined : (v) => editor.updateTabContent(mdAliveTab.id, v, { major: true })}
+        onChange={mdAliveTab.readOnly ? undefined : (v) => {
+          scheduleRemovedAssetCleanup(dirNameOf(mdAliveTab.path ?? ''), mdAliveTab.content, v);
+          editor.updateTabContent(mdAliveTab.id, v, { major: true });
+        }}
         canUndo={editor.canUndo}
         canRedo={editor.canRedo}
         onUndo={editor.handleUndo}
         onRedo={editor.handleRedo}
-        onScroller={attachPreviewScroller}
+        onScroller={(el) => { attachPreviewScroller(el); previewScrollElRef.current = el; }}
         findOpen={previewVisible && effectiveView === 'preview' && findState.open ? true : undefined}
         onFindClose={closeFind}
         getPointer={getPointer}
@@ -881,22 +928,24 @@ export default function App() {
         kind={structKind}
         isDarkMode={isDarkMode}
         onFallbackText={() => editor.setJsonView('text')}
+        onScroller={jsonSplitActive ? attachJsonTreeScroller : undefined}
       />
     );
   };
 
-  /* ---- Markdown 粘贴图片落盘（桌面）/ data URI 回退（浏览器）；安卓不启用 ---- */
-  const handleMarkdownImagePaste = useCallback(async (file: File): Promise<string | null> => {
+  /* ---- Markdown 图片落盘（桌面）/ data URI 回退（浏览器）；安卓不启用 ----
+     Ctrl+V 直贴（File）与右键「粘贴图片」（系统剪贴板读图）共用同一条保存链路 */
+  const saveMarkdownImageBlob = useCallback(async (blob: Blob): Promise<string | null> => {
     const tab = editor.activeTab;
     if (!tab) return null;
     if (isTauri) {
-      if (IS_ANDROID_APP) return null; // SAF 无二进制写桥，不拦截
+      if (IS_ANDROID_APP) return null; // SAF 无二进制写桥，不启用
       if (!tab.path) {
         showNotification({ kind: 'info', title: t('md.pasteTitle'), message: t('md.pasteNeedSave'), timeoutMs: 4000 });
         return null;
       }
       try {
-        const rel = await savePastedImage(file, file.type || 'image/png', dirNameOf(tab.path));
+        const rel = await savePastedImage(blob, blob.type || 'image/png', dirNameOf(tab.path));
         showNotification({ kind: 'success', title: t('md.pasteTitle'), message: t('md.pasteSaved', { name: rel }), timeoutMs: 4000 });
         return rel;
       } catch (e: any) {
@@ -905,16 +954,79 @@ export default function App() {
       }
     }
     /* 浏览器模式：无盘可落，转 data URI 插入（≤2MB） */
-    if (file.size > DATA_URI_MAX_BYTES) {
+    if (blob.size > DATA_URI_MAX_BYTES) {
       showNotification({ kind: 'info', title: t('md.pasteTitle'), message: t('md.pasteTooLarge'), timeoutMs: 4000 });
       return null;
     }
     try {
-      return await blobToDataUrl(file);
+      return await blobToDataUrl(blob);
     } catch {
       return null;
     }
   }, [editor.activeTab, t]);
+
+  const handleMarkdownImagePaste = useCallback(
+    (file: File) => saveMarkdownImageBlob(file),
+    [saveMarkdownImageBlob],
+  );
+
+  /* 右键「粘贴图片」：桌面经 clipboard-manager readImage（RGBA → canvas → PNG）；
+     浏览器经 navigator.clipboard.read。无图返回 null（菜单项静默结束） */
+  const handlePasteImageFromClipboard = useCallback(async (): Promise<string | null> => {
+    let blob: Blob | null = null;
+    try {
+      if (isTauri && !IS_ANDROID_APP) {
+        const { readImage } = await import('@tauri-apps/plugin-clipboard-manager');
+        const img = await readImage() as any;
+        const w = typeof img.width === 'function' ? await img.width() : img.width;
+        const h = typeof img.height === 'function' ? await img.height() : img.height;
+        const rgba = typeof img.rgba === 'function' ? await img.rgba() : img.rgba;
+        if (!rgba || !w || !h) return null;
+        blob = await rgbaToPngBlob(new Uint8ClampedArray(rgba), w, h);
+      } else if (!isTauri && navigator.clipboard?.read) {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const type = item.types.find(tp => tp.startsWith('image/'));
+          if (type) { blob = await item.getType(type); break; }
+        }
+      }
+    } catch {
+      return null;
+    }
+    if (!blob) return null;
+    return saveMarkdownImageBlob(blob);
+  }, [saveMarkdownImageBlob]);
+
+  /* ---- 删除文档中的受管理图片后自动清理本地文件（粘贴/本地化生成的 assets 文件） ----
+     防抖 8s：撤销把引用写回则放弃删除；仅桌面；只删本应用生成的文件名 */
+  const assetCleanupTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const scheduleRemovedAssetCleanup = useCallback((docDir: string, oldMd: string, newMd: string) => {
+    if (!isTauri || IS_ANDROID_APP || !docDir) return;
+    const removed = removedManagedImages(oldMd, newMd);
+    if (removed.length === 0) return;
+    for (const rel of removed) {
+      const key = `${docDir}|${rel}`;
+      const timers = assetCleanupTimersRef.current;
+      const prev = timers.get(key);
+      if (prev) clearTimeout(prev);
+      timers.set(key, setTimeout(() => {
+        timers.delete(key);
+        const stillReferenced = editor.tabsRef.current.some(tb =>
+          tb.path && dirNameOf(tb.path) === docDir && collectManagedImages(tb.content).has(rel));
+        if (stillReferenced) return;
+        const dir = docDir.replace(/[\\/]+$/, '');
+        const sep = dir.includes('\\') ? '\\' : '/';
+        void (async () => {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('fs_delete', { path: `${dir}${sep}${rel.replaceAll('/', sep)}`, is_dir: false });
+          } catch (e) {
+            console.warn('清理已删除图片失败:', rel, e);
+          }
+        })();
+      }, 8000));
+    }
+  }, [editor.tabsRef]);
 
   const renderEditor = () => {
     if (!activeTab) return null;
@@ -927,9 +1039,12 @@ export default function App() {
         editable={!activeTab.readOnly}
         editorSettings={settings}
         lowPerf={!!activeTab.large}
-        onChange={(v, meta) => editor.updateTabContent(activeTab.id, v, meta)}
+        onChange={(v, meta) => {
+          if (isMarkdown) scheduleRemovedAssetCleanup(dirNameOf(activeTab.path ?? ''), activeTab.content, v);
+          editor.updateTabContent(activeTab.id, v, meta);
+        }}
         onSave={file.handleSave}
-        onScroller={attachEditorScroller}
+        onScroller={(el) => { attachEditorScroller(el); attachJsonEditorScroller(el); }}
         onCursor={setCursorInfo}
         find={findState.open ? findState : undefined}
         onFindClose={closeFind}
@@ -942,6 +1057,7 @@ export default function App() {
           ? { canUndo: editor.canUndo, canRedo: editor.canRedo, onUndo: editor.handleUndo, onRedo: editor.handleRedo }
           : undefined}
         onImagePaste={isMarkdown && !activeTab.readOnly && !IS_ANDROID_APP ? handleMarkdownImagePaste : undefined}
+        onPasteImage={isMarkdown && !activeTab.readOnly && !IS_ANDROID_APP ? handlePasteImageFromClipboard : undefined}
       />
     );
   };
@@ -1577,39 +1693,48 @@ export default function App() {
             )}
             {/* 行容器恒定：预览槽位恒挂 key（跨视图/跨标签保活不重挂） */}
             <div className="relative flex flex-1 overflow-hidden">
-              {/* Markdown 大纲浮动小弹窗：毛玻璃（与右键菜单同底），可收起为小徽标（手机无此面板） */}
+              {/* Markdown 大纲：贴左缘的浮动小窗（毛玻璃，与右键菜单同底），左侧垂直居中。
+                  收起时是贴窗口左缘的 ">" 把手，展开后面板出现、把手变 "<" 贴面板右缘（手机无此面板） */}
               {isMarkdown && !isPhone && outlineOpen && (
-                <div className="absolute left-3 top-3 z-30" data-testid="md-outline-pop">
-                  <div
-                    className={cn(
-                      'flex flex-col overflow-hidden rounded-xl border shadow-xl backdrop-blur-md transition-all',
-                      outlineCollapsed ? 'w-auto' : 'w-60',
-                      isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
-                    )}
-                    style={{ maxHeight: 'calc(100% - 24px)' }}
-                  >
-                    <button
+                <div className="absolute left-0 top-1/2 z-30 flex -translate-y-1/2 items-center" data-testid="md-outline-pop">
+                  {!outlineCollapsed && (
+                    <div
                       className={cn(
-                        'flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium shrink-0 transition-colors',
-                        isDarkMode ? 'text-zinc-200 hover:bg-zinc-600/50' : 'text-zinc-700 hover:bg-zinc-200/60',
+                        'flex w-60 flex-col overflow-hidden rounded-r-xl border border-l-0 shadow-xl backdrop-blur-md',
+                        isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
                       )}
-                      title={outlineCollapsed ? t('md.outlineExpand') : t('md.outlineCollapse')}
-                      onClick={() => setOutlineCollapsed(c => !c)}
+                      style={{ maxHeight: 'calc(100% - 32px)' }}
                     >
-                      <ListTree size={13} />
-                      {!outlineCollapsed && (
-                        <>
-                          <span>{t('md.outline')}</span>
-                          <ChevronRight size={12} className={cn('ml-auto transition-transform rotate-90', isDarkMode ? 'text-zinc-500' : 'text-zinc-400')} />
-                        </>
-                      )}
-                    </button>
-                    {!outlineCollapsed && (
-                      <div className="overflow-auto overscroll-contain">
-                        <MarkdownOutline headings={mdOutline} isDarkMode={isDarkMode} onJump={handleOutlineJump} />
+                      <div className={cn(
+                        'flex shrink-0 items-center gap-1.5 px-3 pb-1 pt-2.5 text-xs font-semibold',
+                        isDarkMode ? 'text-zinc-300' : 'text-zinc-600',
+                      )}>
+                        <ListTree size={13} />
+                        {t('md.outline')}
                       </div>
+                      <div className="overflow-auto overscroll-contain pb-1.5">
+                        <MarkdownOutline
+                          headings={mdOutline}
+                          isDarkMode={isDarkMode}
+                          activeOffset={outlineActiveOffset}
+                          onJump={handleOutlineJump}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <button
+                    className={cn(
+                      'flex h-11 w-5 items-center justify-center border border-l-0 shadow-md backdrop-blur-md transition-colors',
+                      outlineCollapsed ? 'rounded-r-lg' : 'rounded-r-md',
+                      isDarkMode
+                        ? 'border-zinc-700/70 bg-zinc-800/70 text-zinc-400 hover:text-zinc-200'
+                        : 'border-zinc-200/80 bg-white/70 text-zinc-500 hover:text-zinc-700',
                     )}
-                  </div>
+                    title={outlineCollapsed ? t('md.outlineExpand') : t('md.outlineCollapse')}
+                    onClick={() => setOutlineCollapsed(c => !c)}
+                  >
+                    {outlineCollapsed ? <ChevronRight size={13} /> : <ChevronLeft size={13} />}
+                  </button>
                 </div>
               )}
               {/* 预览保活槽位：不可见时仅 display:none，不卸载 */}
