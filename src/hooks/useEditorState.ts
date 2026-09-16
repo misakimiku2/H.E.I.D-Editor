@@ -10,7 +10,7 @@ import {
   ensureHistory, recordStep, undoStep, redoStep, canUndoHistory, canRedoHistory,
   type TabHistory,
 } from '../lib/tabHistory';
-import type { FileTab, MdViewMode, CsvTabState } from '../lib/tabModel';
+import type { FileTab, MdViewMode, CsvTabState, JsonViewMode } from '../lib/tabModel';
 
 /** 内容变化来源：edit=软件内编辑（同步记内部 diff 时间线）；external=磁盘外部修改；revert=时间线撤销回写 */
 export type ContentChangeSource = 'edit' | 'external' | 'revert';
@@ -130,7 +130,7 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
   }, [activeTab]);
 
   /* 切换当前 json/yaml 标签页的结构树视图状态 */
-  const setJsonView = useCallback((mode: 'tree' | 'text') => {
+  const setJsonView = useCallback((mode: JsonViewMode) => {
     if (!activeTab) return;
     setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, jsonView: mode } : t));
   }, [activeTab]);

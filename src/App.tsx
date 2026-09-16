@@ -15,6 +15,7 @@ import { JsonTreeViewer } from './components/JsonTreeViewer';
 import { LargeFileViewer } from './components/LargeFileViewer';
 import { detectDelimiter, delimiterLabel, parseCsv, CSV_GRID_MAX_CHARS, CSV_GRID_MAX_ROWS, type CsvDelimiter } from './lib/csv';
 import { kindFromPath, formatStructured, indentFromSettings, TREE_MAX_CHARS, type StructKind } from './lib/jsonTree';
+import type { JsonViewMode } from './lib/tabModel';
 import { MarkdownPreview, type MarkdownPreviewHandle } from './components/MarkdownPreview';
 import { MarkdownOutline } from './components/MarkdownOutline';
 import { extractHeadings, type MdHeading } from './lib/markdownOutline';
@@ -735,10 +736,11 @@ export default function App() {
     ? kindFromPath(activeTab.path ?? activeTab.title)
     : null;
   const structEligible = !!structKind && activeContent.length <= TREE_MAX_CHARS;
-  const effectiveJsonView: 'tree' | 'text' = activeTab
+  const effectiveJsonView: JsonViewMode = activeTab
     ? (activeTab.jsonView ?? (structEligible ? 'tree' : 'text'))
     : 'text';
   const jsonTreeActive = structEligible && effectiveJsonView === 'tree';
+  const jsonSplitActive = structEligible && effectiveJsonView === 'split';
   /* 结构树视图下 CodeEditor 未挂载：同网格视图处理（查找落到文本视图、状态栏光标段隐藏） */
   useEffect(() => {
     if (findState.open && jsonTreeActive) editor.setJsonView('text');
@@ -810,6 +812,7 @@ export default function App() {
 
   /* ---- Markdown 大纲侧栏：标题提取 + 点击分流（预览滚动 / 编辑器跳转） ---- */
   const [outlineOpen, setOutlineOpen] = useState(false);
+  const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const mdOutline = useMemo(
     () => (isMarkdown && activeTab ? extractHeadings(activeTab.content) : []),
     [isMarkdown, activeTab?.content, activeTab],
@@ -1221,6 +1224,7 @@ export default function App() {
             >
               {([
                 { mode: 'tree', icon: Braces, title: t('json.tree') },
+                { mode: 'split', icon: Columns2, title: t('json.split') },
                 { mode: 'text', icon: Code, title: t('csv.text') },
               ] as const).map(({ mode: m, icon: Icon, title }) => {
                 const active = effectiveJsonView === m;
@@ -1571,18 +1575,41 @@ export default function App() {
                 </button>
               </div>
             )}
-            {/* 行容器恒定：预览槽位恒挂 key（跨视图/跨标签保活不重挂；大纲列按键控增删不影响它） */}
-            <div className="flex flex-1 overflow-hidden">
-              {/* Markdown 大纲侧栏：markdown 且开启时显示在预览/编辑器左侧（手机无此面板） */}
+            {/* 行容器恒定：预览槽位恒挂 key（跨视图/跨标签保活不重挂） */}
+            <div className="relative flex flex-1 overflow-hidden">
+              {/* Markdown 大纲浮动小弹窗：毛玻璃（与右键菜单同底），可收起为小徽标（手机无此面板） */}
               {isMarkdown && !isPhone && outlineOpen && (
-                <div
-                  key="md-outline-col"
-                  className={cn(
-                    'w-52 shrink-0 border-r overflow-hidden',
-                    isDarkMode ? 'border-zinc-700 bg-zinc-900/40' : 'border-zinc-200 bg-zinc-50',
-                  )}
-                >
-                  <MarkdownOutline headings={mdOutline} isDarkMode={isDarkMode} onJump={handleOutlineJump} />
+                <div className="absolute left-3 top-3 z-30" data-testid="md-outline-pop">
+                  <div
+                    className={cn(
+                      'flex flex-col overflow-hidden rounded-xl border shadow-xl backdrop-blur-md transition-all',
+                      outlineCollapsed ? 'w-auto' : 'w-60',
+                      isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
+                    )}
+                    style={{ maxHeight: 'calc(100% - 24px)' }}
+                  >
+                    <button
+                      className={cn(
+                        'flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium shrink-0 transition-colors',
+                        isDarkMode ? 'text-zinc-200 hover:bg-zinc-600/50' : 'text-zinc-700 hover:bg-zinc-200/60',
+                      )}
+                      title={outlineCollapsed ? t('md.outlineExpand') : t('md.outlineCollapse')}
+                      onClick={() => setOutlineCollapsed(c => !c)}
+                    >
+                      <ListTree size={13} />
+                      {!outlineCollapsed && (
+                        <>
+                          <span>{t('md.outline')}</span>
+                          <ChevronRight size={12} className={cn('ml-auto transition-transform rotate-90', isDarkMode ? 'text-zinc-500' : 'text-zinc-400')} />
+                        </>
+                      )}
+                    </button>
+                    {!outlineCollapsed && (
+                      <div className="overflow-auto overscroll-contain">
+                        <MarkdownOutline headings={mdOutline} isDarkMode={isDarkMode} onJump={handleOutlineJump} />
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
               {/* 预览保活槽位：不可见时仅 display:none，不卸载 */}
@@ -1618,6 +1645,17 @@ export default function App() {
                   <div className="flex-1 min-w-0 overflow-hidden">
                     {renderJsonTree()}
                   </div>
+                ) : jsonSplitActive ? (
+                  /* JSON/YAML 分屏：左结构树 + 右源码（树浏览与编辑同屏） */
+                  <>
+                    <div className="flex-1 min-w-0 overflow-hidden">
+                      {renderJsonTree()}
+                    </div>
+                    <div className={cn("w-px shrink-0", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+                    <div className="flex-1 min-w-0 overflow-hidden">
+                      {renderEditor()}
+                    </div>
+                  </>
                 ) : isSvgTab ? (
                   <SvgWorkbench content={activeTab.content} isDarkMode={isDarkMode} stacked={isPhone}>
                     {renderEditor()}

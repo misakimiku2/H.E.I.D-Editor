@@ -13,8 +13,8 @@ export type MdViewMode = SessionMdView;
 /** csv 标签页的视图模式：网格（缺省，`csvView` 未设即 grid）/ 原文本 */
 export type CsvViewMode = 'grid' | 'text';
 
-/** json / yaml 标签页的视图模式：结构树 / 原文本（可解析且未超限时默认 tree） */
-export type JsonViewMode = 'tree' | 'text';
+/** json / yaml 标签页的视图模式：结构树 / 分屏（左树右源码）/ 原文本（可解析且未超限时默认 tree） */
+export type JsonViewMode = 'tree' | 'split' | 'text';
 
 /** csv 页签的会话内 UI 状态（可选字段：缺省时按各自默认值生效） */
 export interface CsvTabState {

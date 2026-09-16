@@ -469,6 +469,7 @@ const zh = {
 
   'json.viewAria': 'JSON / YAML 视图',
   'json.tree': '结构树',
+  'json.split': '分屏',
   'json.format': '格式化（缩进规范化）',
   'json.formatError': '格式化失败：{msg}',
   'json.parseError': '无法解析文档',
@@ -482,6 +483,8 @@ const zh = {
   'json.copied': '已复制',
 
   'md.outline': '大纲',
+  'md.outlineCollapse': '收起大纲',
+  'md.outlineExpand': '展开大纲',
   'md.pasteTitle': '粘贴图片',
   'md.localizeTitle': '图片本地化',
   'md.outlineAria': 'Markdown 大纲',
@@ -1076,6 +1079,7 @@ const en: Record<MessageKey, string> = {
 
   'json.viewAria': 'JSON / YAML view',
   'json.tree': 'Tree',
+  'json.split': 'Split',
   'json.format': 'Format (normalize indentation)',
   'json.formatError': 'Format failed: {msg}',
   'json.parseError': 'Could not parse the document',
@@ -1089,6 +1093,8 @@ const en: Record<MessageKey, string> = {
   'json.copied': 'Copied',
 
   'md.outline': 'Outline',
+  'md.outlineCollapse': 'Collapse outline',
+  'md.outlineExpand': 'Expand outline',
   'md.pasteTitle': 'Paste image',
   'md.localizeTitle': 'Localize images',
   'md.outlineAria': 'Markdown outline',

@@ -19,7 +19,7 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
   if (headings.length === 0) {
     return (
       <div className={cn(
-        'h-full flex flex-col items-center justify-center gap-2 text-xs px-4 text-center',
+        'flex flex-col items-center justify-center gap-2 text-xs px-4 py-6 text-center',
         isDarkMode ? 'text-zinc-600' : 'text-zinc-400',
       )}>
         <ListTree size={20} />
@@ -33,7 +33,7 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
     return isDarkMode ? 'text-zinc-400' : 'text-zinc-500';
   };
   return (
-    <nav aria-label={t('md.outlineAria')} data-testid="md-outline" className="h-full overflow-auto py-2">
+    <nav aria-label={t('md.outlineAria')} data-testid="md-outline" className="py-1 pb-2">
       {headings.map((h, i) => (
         <button
           key={`${h.offset}-${i}`}
