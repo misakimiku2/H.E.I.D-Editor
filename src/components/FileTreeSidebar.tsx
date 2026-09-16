@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ChevronDown, ChevronRight, FileText, Folder, FolderX, FolderOpen,
-  Loader2, PanelLeftClose, RefreshCw, Search, X,
+  ChevronDown, ChevronLeft, ChevronRight, FileText, Folder, FolderX, FolderOpen,
+  Loader2, RefreshCw, Search, X,
   FilePlus, FolderPlus, FileImage, Scissors, Copy, ClipboardPaste, Pencil, Trash2, Link2, FolderSearch,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -10,10 +10,12 @@ import {
   getDirLister, makeRoot, toggleDir, withChildren, withError,
   joinPath, parentPathOf, findNode, isValidEntryName, uniqueEntryName, relativePathUnderRoot,
   isImagePath, isSvgPath,
+  loadTreeSidebarWidth, saveTreeSidebarWidth, clampTreeSidebarWidth,
+  TREE_SIDEBAR_MIN_WIDTH, TREE_SIDEBAR_MAX_WIDTH,
   type DirLister, type TreeNode,
 } from '../lib/fileTree';
 import {
-  groupByFile, hitRangeInSnippet, searchInDir,
+  hitDisplay, pageGroups, searchInDir, HITS_PER_PAGE,
   type DirSearchOptions, type DirSearchResult, type FileHit,
 } from '../lib/dirSearch';
 import { fsMkdir, fsRename, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
@@ -150,13 +152,50 @@ export function FileTreeSidebar({
   const [searchOpts, setSearchOpts] = useState<DirSearchOptions>({ caseSensitive: false, regexp: false, wholeWord: false });
   const [result, setResult] = useState<DirSearchResult | null>(null);
   const [searchingBusy, setSearchingBusy] = useState(false);
+  const [page, setPage] = useState(0);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const resultsScrollRef = useRef<HTMLDivElement | null>(null);
   const searchSeqRef = useRef(0);
 
   /* 进入搜索态自动聚焦输入框 */
   useEffect(() => {
     if (searching) searchInputRef.current?.focus();
   }, [searching]);
+
+  /* 翻页后结果区回到顶部 */
+  useEffect(() => {
+    resultsScrollRef.current?.scrollTo?.({ top: 0 });
+  }, [page]);
+
+  /* ---- 侧栏宽度（桌面）：右缘拖拽调整，[默认=最小 256, 上限 400]，重启保留 ---- */
+  const [width, setWidth] = useState(loadTreeSidebarWidth);
+  const widthRef = useRef(width);
+  widthRef.current = width;
+  const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  const startResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!e.isPrimary) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    resizeRef.current = { startX: e.clientX, startWidth: widthRef.current };
+  }, []);
+
+  const moveResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const s = resizeRef.current;
+    if (!s) return;
+    const next = clampTreeSidebarWidth(s.startWidth + e.clientX - s.startX);
+    if (next !== widthRef.current) {
+      widthRef.current = next;
+      setWidth(next);
+    }
+  }, []);
+
+  const endResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!resizeRef.current) return;
+    resizeRef.current = null;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    saveTreeSidebarWidth(widthRef.current);
+  }, []);
 
   /* 根目录变化：搜索结果基于旧根，全部失效 */
   useEffect(() => {
@@ -171,7 +210,7 @@ export function FileTreeSidebar({
     setResult(null);
   }, []);
 
-  /** 按需触发：Enter 时一次全量扫描（无索引、无常驻后台） */
+  /** 按需触发：Enter 时一次全量扫描（无索引、无常驻后台）；新结果回到第 1 页 */
   const runSearch = useCallback(async () => {
     const q = query.trim();
     if (!q) { setResult(null); return; }
@@ -179,10 +218,11 @@ export function FileTreeSidebar({
     setSearchingBusy(true);
     try {
       const r = await searchInDir(rootPath, q, searchOpts);
-      if (searchSeqRef.current === seq) setResult(r);
+      if (searchSeqRef.current === seq) { setResult(r); setPage(0); }
     } catch (e) {
       if (searchSeqRef.current === seq) {
         setResult({ matches: [], filesScanned: 0, filesMatched: 0, matchTotal: 0, truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, error: String(e) });
+        setPage(0);
       }
     } finally {
       if (searchSeqRef.current === seq) setSearchingBusy(false);
@@ -451,13 +491,21 @@ export function FileTreeSidebar({
       : (isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200'),
   );
 
+  /* 命中分页：仅当结果可渲染且超过一页时出翻页条 */
+  const paged = result && !result.error ? pageGroups(result.matches, page) : null;
+  const pageBtn = cn(
+    'p-1.5 rounded-md transition-colors disabled:opacity-30',
+    isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500',
+  );
+
   const renderHitRow = (hit: FileHit) => {
-    const { from, to } = hitRangeInSnippet(hit);
+    /* 命中靠后时左移显示窗口，保证高亮落入可见区域（行内容被 CSS 裁剪） */
+    const d = hitDisplay(hit);
     return (
       <button
         key={`${hit.path}:${hit.line}:${hit.col}`}
         onClick={() => onOpenFile(hit.path, { line: hit.line, col: hit.col })}
-        title={`${relativePathUnderRoot(hit.path, rootPath)}:${hit.line}:${hit.col}`}
+        title={`${relativePathUnderRoot(hit.path, rootPath)}:${hit.line}:${hit.col}\n${(d.prefix + hit.text).trim()}`}
         className={cn(
           'heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-6 pl-8 rounded-lg text-[11px] flex items-center gap-1.5 transition-colors text-left',
           isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-300' : 'hover:bg-zinc-200/70 text-zinc-700',
@@ -466,11 +514,19 @@ export function FileTreeSidebar({
         <span className="w-9 shrink-0 text-right opacity-50 tabular-nums">{hit.line}</span>
         <span className="heid-name-clip truncate flex-1 min-w-0 font-mono">
           <span className="heid-name-text inline-block whitespace-nowrap">
-            {hit.text.slice(0, from)}
-            <mark className={isDarkMode ? 'bg-amber-500/40 text-amber-200 rounded-sm' : 'bg-amber-300/70 text-amber-900 rounded-sm'}>
-              {hit.text.slice(from, to)}
+            {d.prefix}
+            {d.text.slice(0, d.from)}
+            {/* 高亮色与编辑器内搜索同源（App 注入主题 token 的 CSS 变量；无变量时回退琥珀色） */}
+            <mark
+              className="rounded-sm"
+              style={{
+                backgroundColor: 'var(--heid-search-match-bg, rgba(251, 191, 36, 0.5))',
+                outline: '1px solid var(--heid-search-match-outline, transparent)',
+              }}
+            >
+              {d.text.slice(d.from, d.to)}
             </mark>
-            {hit.text.slice(to)}
+            {d.text.slice(d.to)}
           </span>
         </span>
       </button>
@@ -499,7 +555,7 @@ export function FileTreeSidebar({
           {t('tree.searchSummary', { files: result.filesMatched, total: result.matchTotal, scanned: result.filesScanned })}
           {result.truncated && ` · ${t('tree.searchCapped', { max: result.matches.length })}`}
         </div>
-        {groupByFile(result.matches).map(g => (
+        {paged?.groups.map(g => (
           <div key={g.path}>
             <button
               onClick={() => onOpenFile(g.path)}
@@ -537,9 +593,24 @@ export function FileTreeSidebar({
           panel,
           overlay
             ? 'heid-fade-in fixed inset-y-0 left-0 z-[80] w-72 max-w-[85vw] border-r shadow-2xl pt-[var(--heid-safe-top,0px)]'
-            : 'relative w-64 shrink-0 border-r',
+            : 'relative shrink-0 border-r',
         )}
+        style={overlay ? undefined : { width }}
       >
+        {/* 右缘拖拽手柄：宽度范围 [256, 400]，释放时持久化（安卓抽屉固定宽不显示） */}
+        {!overlay && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('tree.resizeHint')}
+            title={t('tree.resizeHint')}
+            onPointerDown={startResize}
+            onPointerMove={moveResize}
+            onPointerUp={endResize}
+            onPointerCancel={endResize}
+            className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize touch-none transition-colors hover:bg-blue-500/30"
+          />
+        )}
         {/* 头部：文件夹名 + 搜索 + 刷新 + 关闭文件夹 + 收起 */}
         <div className={cn(
           'h-10 shrink-0 border-b flex items-center gap-1 pl-3 pr-1.5',
@@ -577,15 +648,6 @@ export function FileTreeSidebar({
           >
             <FolderX size={13} />
           </button>
-          {!overlay && (
-            <button
-              onClick={onClose}
-              title={t('common.close')}
-              className={cn('p-1.5 rounded-md transition-colors', isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
-            >
-              <PanelLeftClose size={13} />
-            </button>
-          )}
         </div>
         {/* 搜索态：输入区 + 结果列表（替代树体） */}
         {searching && (
@@ -643,9 +705,34 @@ export function FileTreeSidebar({
         )}
         {/* 树体（空白处右键 = 根目录菜单）；搜索态时让位给结果列表 */}
         {searching ? (
-          <div className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1">
-            {renderSearchBody()}
-          </div>
+          <>
+            {paged && paged.pageTotal > 1 && (
+              <div className={cn('shrink-0 border-b px-2 py-1 flex items-center gap-1', isDarkMode ? 'border-zinc-700' : 'border-zinc-200')}>
+                <button
+                  disabled={page <= 0}
+                  onClick={() => setPage(p => Math.max(0, p - 1))}
+                  title={t('tree.searchPrevPage')}
+                  className={pageBtn}
+                >
+                  <ChevronLeft size={13} />
+                </button>
+                <span className="flex-1 text-center text-[10px] opacity-60 tabular-nums">
+                  {t('tree.searchPage', { cur: page + 1, total: paged.pageTotal })}
+                </span>
+                <button
+                  disabled={page >= paged.pageTotal - 1}
+                  onClick={() => setPage(p => Math.min(paged.pageTotal - 1, p + 1))}
+                  title={t('tree.searchNextPage')}
+                  className={pageBtn}
+                >
+                  <ChevronRight size={13} />
+                </button>
+              </div>
+            )}
+            <div ref={resultsScrollRef} className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1">
+              {renderSearchBody()}
+            </div>
+          </>
         ) : (
           <div className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1" onContextMenu={(e) => openMenu(e, null)}>
             {tree ? (

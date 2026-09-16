@@ -14,6 +14,10 @@
     "allow-open-external",
     "allow-render-page",
     "allow-take-launch-paths",
+    "allow-probe-large-file",
+    "allow-read-line-window",
+    "allow-read-byte-window",
+    "allow-file-size",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
@@ -51,6 +55,7 @@
     "allow-fs-rename",
     "allow-fs-copy",
     "allow-fs-delete",
-    "allow-fs-reveal"
+    "allow-fs-reveal",
+    "allow-search-in-dir"
   ]
 }

@@ -109,12 +109,15 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
     rescan();
   }, [query, caseSensitive, regexp, wholeWord, rescan]);
 
-  /* 打开即聚焦查找输入（跳行模式聚焦行号输入） */
+  /* 打开即聚焦查找输入（跳行模式聚焦行号输入）。
+     首帧浮层尚未测得位置时是 visibility:hidden，hidden 元素 focus() 静默无效，
+     因此等 pos 就绪（浮层可见）后再聚焦 */
   useEffect(() => {
+    if (!pos) return;
     (gotoOpen ? gotoInputRef : findInputRef).current?.focus();
     if (!gotoOpen) findInputRef.current?.select();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [pos]);
 
   /* 文档与选区变化跟随：文档变化重扫，纯选区移动仅更新当前下标。
      订阅经 CodeEditor 的视图更新分发（挂在根配置里）——早先用 StateEffect.appendConfig 追加监听器，
@@ -241,11 +244,12 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
       : (isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200')
   );
 
+  /* 输入框毛玻璃：半透明底 + 背景模糊，聚焦时略微加深保证可读性 */
   const inputCls = cn(
-    'h-7 px-2 rounded-md border text-xs outline-none transition-colors w-full',
+    'h-7 px-2 rounded-md border text-xs outline-none transition-colors w-full backdrop-blur-md',
     isDarkMode
-      ? 'border-zinc-600 bg-zinc-900 text-zinc-200 focus:border-blue-500 placeholder:text-zinc-600'
-      : 'border-zinc-300 bg-white text-zinc-800 focus:border-blue-500 placeholder:text-zinc-400'
+      ? 'border-zinc-600 bg-zinc-900/45 text-zinc-200 focus:border-blue-500 focus:bg-zinc-900/70 placeholder:text-zinc-600'
+      : 'border-zinc-300 bg-white/55 text-zinc-800 focus:border-blue-500 focus:bg-white/85 placeholder:text-zinc-400'
   );
 
   const navBtn = 'w-7 h-7 rounded-md flex items-center justify-center transition-colors shrink-0 ' + (

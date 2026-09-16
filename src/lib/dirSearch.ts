@@ -79,3 +79,87 @@ export function hitRangeInSnippet(hit: FileHit): { from: number; to: number } {
   const from = Math.max(0, hit.col - 1 - hit.offset);
   return { from, to: Math.min(hit.text.length, from + hit.len) };
 }
+
+/** 窗口内命中前保留的显示宽度单位数（CJK 记 2），保证高亮落入窄侧栏可见区 */
+export const HIT_DISPLAY_LEAD_UNITS = 18;
+
+export interface HitDisplayText {
+  /** 窗口/片段之外的行首内容标记（无则空串） */
+  prefix: string;
+  /** 窗口内文本 */
+  text: string;
+  /** 高亮区间（text 内 0-based [from, to)） */
+  from: number;
+  to: number;
+}
+
+/** 字符显示宽度：CJK/全角记 2 个单位，其余（含 ASCII）记 1 */
+function charUnits(cp: number): number {
+  return cp >= 0x2e80 ? 2 : 1;
+}
+
+/**
+ * 命中行的显示窗口：按显示宽度（非字符数）把窗口左移到命中前 lead 个单位处。
+ * 中文占两倍宽度，按字符数留白会把高亮重新推出窄栏可视区；行内容被 CSS 裁剪，
+ * 命中必须落进开头几十个单位内才可见。片段本身带偏移（长行截取）时补 … 前缀。
+ */
+export function hitDisplay(hit: FileHit, lead: number = HIT_DISPLAY_LEAD_UNITS): HitDisplayText {
+  const { from, to } = hitRangeInSnippet(hit);
+  /* 命中前文本的显示宽度 */
+  let unitsBefore = 0;
+  for (let i = 0; i < from;) {
+    const cp = hit.text.codePointAt(i) ?? 0;
+    unitsBefore += charUnits(cp);
+    i += cp > 0xffff ? 2 : 1;
+  }
+  if (unitsBefore <= lead) {
+    return { prefix: hit.offset > 0 ? '…' : '', text: hit.text, from, to };
+  }
+  /* 从命中处往前消费 lead 个显示单位，确定窗口起点（不拆开代理对） */
+  let start = from;
+  let budget = lead;
+  let i = from;
+  while (i > 0) {
+    let j = i - 1;
+    while (j > 0 && (hit.text.codePointAt(j) ?? 0) >= 0xdc00 && (hit.text.codePointAt(j) ?? 0) <= 0xdfff) j--;
+    const w = charUnits(hit.text.codePointAt(j) ?? 0);
+    if (budget - w < 0) break;
+    budget -= w;
+    start = j;
+    i = j;
+  }
+  return { prefix: '…', text: hit.text.slice(start), from: from - start, to: to - start };
+}
+
+/** 每页展示的命中条数 */
+export const HITS_PER_PAGE = 100;
+
+export interface PagedGroups {
+  groups: FileGroup[];
+  /** 总页数（≥1） */
+  pageTotal: number;
+}
+
+/**
+ * 命中分页：把按文件分组的列表按每页 pageSize 条命中切片，允许一个文件跨页续显。
+ * page 越界时钳制到最后一页。
+ */
+export function pageGroups(matches: readonly FileHit[], page: number, pageSize: number = HITS_PER_PAGE): PagedGroups {
+  const all = groupByFile(matches);
+  const pageTotal = Math.max(1, Math.ceil(matches.length / pageSize));
+  const cur = Math.min(Math.max(0, page), pageTotal - 1);
+  const from = cur * pageSize;
+  const to = from + pageSize;
+  const groups: FileGroup[] = [];
+  let consumed = 0;
+  for (const g of all) {
+    const groupStart = consumed;
+    consumed += g.hits.length;
+    if (consumed <= from) continue;
+    const start = Math.max(from - groupStart, 0);
+    const end = Math.min(to - groupStart, g.hits.length);
+    groups.push({ path: g.path, hits: g.hits.slice(start, end) });
+    if (consumed >= to) break;
+  }
+  return { groups, pageTotal };
+}

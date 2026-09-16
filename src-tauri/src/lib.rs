@@ -144,6 +144,8 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(launch::on_second_instance))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        /* 窗口状态记忆：窗口创建时恢复上次的位置/尺寸/最大化，应用退出时自动保存 */
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(launch::LaunchPaths::default())
         .manage(large_file::LargeFileIndex::default());
 

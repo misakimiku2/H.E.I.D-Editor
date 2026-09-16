@@ -259,6 +259,34 @@ export function saveTreeRoot(path: string | null, storage: Storage | null = defa
   } catch { /* 忽略持久化失败 */ }
 }
 
+/* ---------- 侧栏宽度记忆（localStorage）：桌面端拖拽调宽，重启后保留 ---------- */
+
+const TREE_SIDEBAR_WIDTH_KEY = 'heid-tree-sidebar-width';
+
+/** 默认宽度 = 最小宽度（原 w-64 的 256px），拖拽上限 400px */
+export const TREE_SIDEBAR_MIN_WIDTH = 256;
+export const TREE_SIDEBAR_MAX_WIDTH = 400;
+
+/** 收敛到 [256, 400] 并取整 */
+export function clampTreeSidebarWidth(width: number): number {
+  return Math.min(TREE_SIDEBAR_MAX_WIDTH, Math.max(TREE_SIDEBAR_MIN_WIDTH, Math.round(width)));
+}
+
+export function loadTreeSidebarWidth(storage: Storage | null = defaultStorage()): number {
+  try {
+    const raw = storage?.getItem(TREE_SIDEBAR_WIDTH_KEY) ?? null;
+    const parsed = raw !== null ? Number(raw) : NaN;
+    if (Number.isFinite(parsed)) return clampTreeSidebarWidth(parsed);
+  } catch { /* 忽略持久化失败 */ }
+  return TREE_SIDEBAR_MIN_WIDTH;
+}
+
+export function saveTreeSidebarWidth(width: number, storage: Storage | null = defaultStorage()): void {
+  try {
+    storage?.setItem(TREE_SIDEBAR_WIDTH_KEY, String(clampTreeSidebarWidth(width)));
+  } catch { /* 忽略持久化失败 */ }
+}
+
 function defaultStorage(): Storage | null {
   try {
     return typeof localStorage !== 'undefined' ? localStorage : null;

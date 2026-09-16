@@ -12,11 +12,16 @@ fn main() {
             "render_page",
             "render_result",
             "take_launch_paths",
+            "probe_large_file",
+            "read_line_window",
+            "read_byte_window",
+            "file_size",
             "fs_mkdir",
             "fs_rename",
             "fs_copy",
             "fs_delete",
             "fs_reveal",
+            "search_in_dir",
         ])),
     )
     .expect("failed to run tauri-build");

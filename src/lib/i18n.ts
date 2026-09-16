@@ -620,6 +620,10 @@ const zh = {
   'tree.searchSummary': '{files} 个文件 {total} 处 · 扫描 {scanned} 个文件',
   'tree.searchCapped': '仅显示前 {max} 处',
   'tree.searchNoResults': '无匹配',
+  'tree.searchPage': '第 {cur} / {total} 页',
+  'tree.searchPrevPage': '上一页',
+  'tree.searchNextPage': '下一页',
+  'tree.resizeHint': '拖拽调整侧栏宽度',
 } as const;
 
 export type MessageKey = keyof typeof zh;
@@ -1238,6 +1242,10 @@ const en: Record<MessageKey, string> = {
   'tree.searchSummary': '{files} files, {total} matches · {scanned} scanned',
   'tree.searchCapped': 'Showing first {max} matches',
   'tree.searchNoResults': 'No matches',
+  'tree.searchPage': 'Page {cur} of {total}',
+  'tree.searchPrevPage': 'Previous page',
+  'tree.searchNextPage': 'Next page',
+  'tree.resizeHint': 'Drag to resize sidebar',
 };
 
 const DICTS: Record<Lang, Record<MessageKey, string>> = { zh, en };

@@ -1,8 +1,9 @@
 //! 跨文件搜索（桌面）：按需递归扫描用户选定的根目录，逐文件解码后按行匹配。
-//! 无索引、无常驻后台：一次命令调用完成一次全量扫描。
-//! 护栏：黑名单目录（依赖/构建产物/VCS）与隐藏目录跳过、symlink 跳过、
+//! 无索引、无常驻后台：一次命令调用完成一次全量扫描（async 命令 + 阻塞线程池，
+//! 不占主线程）。护栏：黑名单目录（依赖/构建产物/VCS）与隐藏目录跳过、symlink 跳过、
 //! 单文件 >32MB 跳过（与编辑层一致）、二进制（NUL 采样）跳过、
-//! 扫描文件数上限 2 万（filesCapped）、结果收集上限 1000 条（计数仍全量，truncated）。
+//! 扫描文件数上限 2 万（filesCapped）、结果收集上限 5000 条（计数仍全量，truncated；
+//! 前端分页展示）。
 //! 正则按行匹配（^ $ 为行首行尾，与编辑器内全文语义略有差异）；regex crate
 //! 不支持 lookaround，用户正则含 (?= 等时经 error 字段回传编译错误。
 
@@ -17,8 +18,8 @@ use crate::encoding::detect_and_decode;
 pub const SEARCH_FILE_SIZE_CAP: u64 = 32 * 1024 * 1024;
 /// 扫描文件数上限（到达即停，filesCapped 置位）
 pub const SEARCH_FILE_COUNT_CAP: usize = 20_000;
-/// 结果收集上限（matchTotal 仍统计全量）
-pub const SEARCH_RESULT_CAP: usize = 1_000;
+/// 结果收集上限（matchTotal 仍统计全量；前端分页展示）
+pub const SEARCH_RESULT_CAP: usize = 5_000;
 /// 行片段长度上限（字符）
 const SNIPPET_CHARS: usize = 200;
 
@@ -295,21 +296,27 @@ pub fn walk_dir(
 
 #[tauri::command]
 #[cfg(desktop)]
-pub fn search_in_dir(
+pub async fn search_in_dir(
     root: String,
     query: String,
     case_sensitive: bool,
     regexp: bool,
     whole_word: bool,
 ) -> DirSearchResult {
+    /* 同步命令跑在主线程，两万文件的全量扫描会把整窗拖到未响应；
+       改 async 并挪进阻塞线程池，扫描期间 UI 与输入保持响应 */
     let params = SearchParams { query, case_sensitive, regexp, whole_word };
-    walk_dir(
-        Path::new(&root),
-        &params,
-        SEARCH_FILE_COUNT_CAP,
-        SEARCH_RESULT_CAP,
-        SEARCH_FILE_SIZE_CAP,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        walk_dir(
+            Path::new(&root),
+            &params,
+            SEARCH_FILE_COUNT_CAP,
+            SEARCH_RESULT_CAP,
+            SEARCH_FILE_SIZE_CAP,
+        )
+    })
+    .await
+    .unwrap_or_else(|e| DirSearchResult { error: Some(e.to_string()), ..Default::default() })
 }
 
 #[cfg(test)]

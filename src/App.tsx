@@ -52,6 +52,7 @@ import { SettingsDialog } from './components/SettingsDialog';
 import { UrlImportModal } from './components/UrlImportModal';
 import { FileTreeSidebar } from './components/FileTreeSidebar';
 import { getDirLister, isSvgPath, loadTreeRoot, saveTreeRoot } from './lib/fileTree';
+import { resolveCodeTheme } from './lib/editorThemes';
 import type { UrlImportResult } from './lib/urlImport';
 import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
@@ -116,6 +117,14 @@ export default function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  /* ---- 搜索高亮色与编辑器同源：经 CSS 变量供 CodeMirror 之外的区域使用（文件夹树搜索） ---- */
+  useEffect(() => {
+    const palette = resolveCodeTheme(isDarkMode ? settings.codeThemeDark : settings.codeThemeLight, isDarkMode).palette;
+    const root = document.documentElement;
+    root.style.setProperty('--heid-search-match-bg', palette.searchMatchBg);
+    root.style.setProperty('--heid-search-match-outline', palette.searchMatchOutline);
+  }, [isDarkMode, settings.codeThemeDark, settings.codeThemeLight]);
 
   /* ---- 界面语言：settings.language 解析为具体语言；rt/setRuntimeLang 供模块级文案使用 ---- */
   const lang: Lang = settings.language === 'system'
@@ -1126,19 +1135,6 @@ export default function App() {
           <span className="text-sm font-semibold tracking-tight" data-tauri-drag-region={!IS_ANDROID_APP}>H.I.D.E</span>
         </div>
 
-        <button
-          onClick={handleToggleTree}
-          title={t('tree.toggle')}
-          className={cn(
-            "w-7 h-6 rounded-md flex items-center justify-center transition-colors shrink-0",
-            treeOpen
-              ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
-              : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
-          )}
-        >
-          <PanelLeft size={14} />
-        </button>
-
         {/* 标签页 */}
         <div
           data-tauri-drag-region={!IS_ANDROID_APP}
@@ -1236,6 +1232,20 @@ export default function App() {
           title={t('menu.menuLabel')}
         >
           <Menu size={15} />
+        </button>
+
+        {/* 文件夹树开关：紧邻菜单按钮（原在标题栏标签页前，移此聚拢视图类入口） */}
+        <button
+          onClick={handleToggleTree}
+          title={t('tree.toggle')}
+          className={cn(
+            "ml-1 p-1.5 rounded-md flex items-center justify-center transition-colors shrink-0",
+            treeOpen
+              ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
+              : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
+          )}
+        >
+          <PanelLeft size={15} />
         </button>
 
         <div className="flex-1" />

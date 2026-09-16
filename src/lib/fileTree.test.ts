@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  findNode, isImagePath, isSvgPath, isUnderRoot, isValidEntryName, joinPath, makeRoot, parentPathOf,
-  relativePathUnderRoot, sortEntries, toggleDir, uniqueEntryName,
+  clampTreeSidebarWidth, findNode, isImagePath, isSvgPath, isUnderRoot, isValidEntryName, joinPath,
+  loadTreeSidebarWidth, makeRoot, parentPathOf, relativePathUnderRoot, saveTreeSidebarWidth,
+  sortEntries, toggleDir, uniqueEntryName,
   withChildren, withError,
+  TREE_SIDEBAR_MAX_WIDTH, TREE_SIDEBAR_MIN_WIDTH,
   type DirEntry, type TreeNode,
 } from './fileTree';
 
@@ -170,5 +172,50 @@ describe('isSvgPath', () => {
     expect(isSvgPath('content://x/doc/pic%2Esvg')).toBe(true);
     expect(isSvgPath('a.png')).toBe(false);
     expect(isImagePath('a.svg')).toBe(false);
+  });
+});
+
+describe('侧栏宽度持久化', () => {
+  const fakeStorage = (map: Record<string, string> = {}): Storage => ({
+    getItem: (k: string) => (k in map ? map[k] : null),
+    setItem: (k: string, v: string) => { map[k] = v; },
+    removeItem: (k: string) => { delete map[k]; },
+    clear: () => { for (const k of Object.keys(map)) delete map[k]; },
+    key: () => null,
+    length: 0,
+  } as Storage);
+
+  it('无记录、空值与非法值回退默认（= 最小宽度 256）', () => {
+    expect(loadTreeSidebarWidth(fakeStorage())).toBe(TREE_SIDEBAR_MIN_WIDTH);
+    expect(loadTreeSidebarWidth(fakeStorage({ 'heid-tree-sidebar-width': '' }))).toBe(TREE_SIDEBAR_MIN_WIDTH);
+    expect(loadTreeSidebarWidth(fakeStorage({ 'heid-tree-sidebar-width': 'abc' }))).toBe(TREE_SIDEBAR_MIN_WIDTH);
+  });
+
+  it('合法值原样返回', () => {
+    expect(loadTreeSidebarWidth(fakeStorage({ 'heid-tree-sidebar-width': '320' }))).toBe(320);
+  });
+
+  it('越界与浮点收敛到 [256, 400] 整数', () => {
+    expect(loadTreeSidebarWidth(fakeStorage({ 'heid-tree-sidebar-width': '999' }))).toBe(TREE_SIDEBAR_MAX_WIDTH);
+    expect(loadTreeSidebarWidth(fakeStorage({ 'heid-tree-sidebar-width': '100' }))).toBe(TREE_SIDEBAR_MIN_WIDTH);
+    expect(loadTreeSidebarWidth(fakeStorage({ 'heid-tree-sidebar-width': '300.6' }))).toBe(301);
+  });
+
+  it('clamp：边界值保持，区间外收敛', () => {
+    expect(clampTreeSidebarWidth(TREE_SIDEBAR_MIN_WIDTH)).toBe(256);
+    expect(clampTreeSidebarWidth(TREE_SIDEBAR_MAX_WIDTH)).toBe(400);
+    expect(clampTreeSidebarWidth(0)).toBe(256);
+    expect(clampTreeSidebarWidth(10000)).toBe(400);
+  });
+
+  it('保存写入收敛后的整数值', () => {
+    const map: Record<string, string> = {};
+    saveTreeSidebarWidth(400.4, fakeStorage(map));
+    expect(map['heid-tree-sidebar-width']).toBe('400');
+  });
+
+  it('存储不可用（null）时读写均不抛错', () => {
+    expect(loadTreeSidebarWidth(null)).toBe(TREE_SIDEBAR_MIN_WIDTH);
+    expect(() => saveTreeSidebarWidth(360, null)).not.toThrow();
   });
 });
