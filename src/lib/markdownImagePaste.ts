@@ -26,9 +26,11 @@ export function pasteImageStem(now = new Date()): string {
   return `paste-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
 }
 
-/** 文档目录 → assets 子目录（'/' 拼接，读取端对反斜杠同样接受） */
+/** 文档目录 → assets 子目录：分隔符跟随 docDir（Windows 拼反斜杠，fs 插件读写才认原生路径） */
 export function assetsDirOf(docDir: string): string {
-  return `${docDir.replace(/[\\/]+$/, '')}/assets`;
+  const dir = docDir.replace(/[\\/]+$/, '');
+  const sep = dir.includes('\\') ? '\\' : '/';
+  return `${dir}${sep}assets`;
 }
 
 /** 浏览器模式回退：Blob → data: URI（超 2MB 拒绝，防止文档被巨型 base64 撑爆） */
@@ -67,17 +69,19 @@ export async function savePastedImage(blob: Blob, mime: string, docDir: string, 
   const ext = extFromMime(mime);
   const stem = pasteImageStem(now);
   const bytes = new Uint8Array(await blob.arrayBuffer());
-  /* 同秒连贴多图：候选名 paste-x → paste-x-2 → paste-x-3…（createNew 保证不覆盖既有文件） */
+  /* 同秒连贴多图：候选名 paste-x → paste-x-2 → paste-x-3…（createNew 保证不覆盖既有文件）。
+     写盘路径用原生分隔符（dir 已按 docDir 风格拼好）；插入 markdown 的相对路径恒为 assets/…（/ 分隔） */
+  const sep = dir.includes('\\') ? '\\' : '/';
   const candidates = [stem, ...Array.from({ length: 30 }, (_, i) => `${stem}-${i + 2}`)];
   for (const name of candidates) {
     try {
-      await writeFile(`${dir}/${name}.${ext}`, bytes, { createNew: true });
+      await writeFile(`${dir}${sep}${name}.${ext}`, bytes, { createNew: true });
       return `assets/${name}.${ext}`;
     } catch {
       /* 已存在则试下一个序号 */
     }
   }
   /* 32 个候选全撞（异常场景）：放弃防覆盖，直接写入首个候选名 */
-  await writeFile(`${dir}/${stem}.${ext}`, bytes);
+  await writeFile(`${dir}${sep}${stem}.${ext}`, bytes);
   return `assets/${stem}.${ext}`;
 }

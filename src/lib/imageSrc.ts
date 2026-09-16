@@ -17,20 +17,48 @@ const MIME_MAP: Record<string, string> = {
 export class ImageForbiddenError extends Error {}
 
 /** 图片 URL 协议前缀（这些不参与本地路径拼接） */
-const REMOTE_RE = /^(https?:|data:|blob:|content:)/;
+const REMOTE_RE = /^(https?:|data:|blob:|content:)/i;
 /** Windows 盘符 / UNC / Unix 绝对路径 */
 const ABSOLUTE_PATH_RE = /^([a-zA-Z]:[\\/]|\\\\|\/)/;
 
 /**
+ * 归一 markdown 图片 src 为可读取的本地路径或原样 URL：
+ * - http(s)/data/blob/content 原样返回（直接给 <img>）；
+ * - `file:///` 前缀剥离并百分号解码（插入弹窗写入的是 encodeURI 后的 URL）；
+ * - 其余（`C:\...` 绝对 / `assets/...` 相对）原样返回，交给 joinRelativeSrc 拼基准目录。
+ * 旧文档的 `|||LOCAL-FILE:` alt 标记在 MarkdownImage 里优先于此函数。
+ */
+export function normalizeLocalSrc(src: string): string {
+  if (!src) return '';
+  if (REMOTE_RE.test(src)) return src;
+  let p = src.trim();
+  if (/^file:\/\//i.test(p)) {
+    p = p.replace(/^file:\/+/i, '');
+    try { p = decodeURIComponent(p); } catch { /* 含孤立 % 时保留原样 */ }
+  } else if (/%[0-9a-f]{2}/i.test(p) && !/\\/.test(p)) {
+    /* 插入弹窗 encodeURI 过的路径（含 %20 等且不是 Windows 反斜杠原路径）：解码还原 */
+    try { p = decodeURIComponent(p); } catch { /* 保留原样 */ }
+  }
+  /* Windows 盘符路径统一反斜杠（fs 插件对混合分隔符的读取会失败） */
+  if (/^[a-zA-Z]:\//.test(p)) p = p.replace(/\//g, '\\');
+  return p;
+}
+
+/**
  * Markdown 相对图片地址（`assets/x.png`）与文档目录拼接为可读的绝对路径。
  * 协议地址与绝对路径原样返回；无 baseDir（未保存文档）返回原值（后续按现状报错）。
- * 拼接统一 '/'，读取端（plugin-fs / convertFileSrc）两者均可接受。
+ * 分隔符跟随 baseDir（Windows 目录拼 `\`，Unix 拼 `/`）——fs 插件对混合分隔符
+ * 路径的读取会失败，必须产出与文件选择器一致的原生路径。
  */
 export function joinRelativeSrc(src: string, baseDir?: string): string {
-  if (!src || REMOTE_RE.test(src) || ABSOLUTE_PATH_RE.test(src)) return src;
-  if (!baseDir) return src;
+  const raw = normalizeLocalSrc(src);
+  if (!raw || REMOTE_RE.test(raw) || ABSOLUTE_PATH_RE.test(raw)) return raw;
+  if (!baseDir) return raw;
   const dir = baseDir.replace(/[\\/]+$/, '');
-  return dir ? `${dir}/${src}` : src;
+  if (!dir) return raw;
+  const sep = dir.includes('\\') ? '\\' : '/';
+  const rel = raw.replace(/^(?:\.{1,2}[\\/])+/, '').replace(/\//g, sep);
+  return `${dir}${sep}${rel}`;
 }
 
 /** 解析为可直接给 <img> 使用的 URL；失败抛错（权限不足抛 ImageForbiddenError） */

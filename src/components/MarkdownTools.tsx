@@ -45,7 +45,7 @@ const stripBlockPrefix = (line: string): string =>
   line.replace(/^(\s*)(#{1,6}\s+|>\s?|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+[.)]\s+)/, '$1');
 
 /* 在源码片段里定位选中文本；渲染文本与源码空白不一致时按空白归一匹配 */
-function findInSlice(slice: string, text: string): { index: number; length: number } | null {
+export function findInSlice(slice: string, text: string): { index: number; length: number } | null {
   if (!text) return null;
   const direct = slice.indexOf(text);
   if (direct >= 0) return { index: direct, length: text.length };

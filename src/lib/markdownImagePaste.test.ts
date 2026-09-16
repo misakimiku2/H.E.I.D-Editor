@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { assetsDirOf, extFromMime, imageFileFromClipboard, pasteImageStem } from './markdownImagePaste';
-import { joinRelativeSrc } from './imageSrc';
+import { joinRelativeSrc, normalizeLocalSrc } from './imageSrc';
 
 describe('extFromMime', () => {
   it('常见图片 MIME 映射', () => {
@@ -28,8 +28,8 @@ describe('pasteImageStem', () => {
 });
 
 describe('assetsDirOf', () => {
-  it('文档目录 → assets 子目录（容忍尾分隔符）', () => {
-    expect(assetsDirOf('C:\\docs\\note')).toBe('C:\\docs\\note/assets');
+  it('文档目录 → assets 子目录（分隔符跟随 docDir，容忍尾分隔符）', () => {
+    expect(assetsDirOf('C:\\docs\\note')).toBe('C:\\docs\\note\\assets');
     expect(assetsDirOf('/home/u/docs/')).toBe('/home/u/docs/assets');
   });
 });
@@ -54,9 +54,14 @@ describe('imageFileFromClipboard', () => {
 });
 
 describe('joinRelativeSrc（相对图片读取基准）', () => {
-  it('相对路径与文档目录拼接（容忍尾分隔符，统一 / 连接）', () => {
-    expect(joinRelativeSrc('assets/a.png', 'C:\\docs')).toBe('C:\\docs/assets/a.png');
+  it('相对路径与文档目录拼接，分隔符跟随 baseDir（Windows 拼反斜杠，fs 插件才认）', () => {
+    expect(joinRelativeSrc('assets/a.png', 'C:\\docs')).toBe('C:\\docs\\assets\\a.png');
     expect(joinRelativeSrc('assets/a.png', '/home/u/docs/')).toBe('/home/u/docs/assets/a.png');
+  });
+
+  it('./ 前缀剥除与 file:/// 解码', () => {
+    expect(joinRelativeSrc('./assets/a.png', 'C:\\docs\\md')).toBe('C:\\docs\\md\\assets\\a.png');
+    expect(joinRelativeSrc('file:///C:/docs/a%20b.png', 'C:\\docs')).toBe('C:\\docs\\a b.png');
   });
 
   it('协议与绝对路径不参与拼接', () => {
@@ -68,5 +73,20 @@ describe('joinRelativeSrc（相对图片读取基准）', () => {
 
   it('无 baseDir 原样返回（未保存文档：后续按读取失败报错）', () => {
     expect(joinRelativeSrc('assets/a.png')).toBe('assets/a.png');
+  });
+});
+
+describe('normalizeLocalSrc（图片 src 归一）', () => {
+  it('file:/// 与百分号编码解码为本地路径（盘符统一反斜杠）', () => {
+    expect(normalizeLocalSrc('file:///C:/docs/a%20b.png')).toBe('C:\\docs\\a b.png');
+    expect(normalizeLocalSrc('/home/u/a%20b.png')).toBe('/home/u/a b.png');
+    expect(normalizeLocalSrc('C:\\raw\\path.png')).toBe('C:\\raw\\path.png');
+  });
+
+  it('协议地址原样、空串返回空', () => {
+    expect(normalizeLocalSrc('https://x/a.png')).toBe('https://x/a.png');
+    expect(normalizeLocalSrc('data:image/png;base64,xx')).toBe('data:image/png;base64,xx');
+    expect(normalizeLocalSrc('')).toBe('');
+    expect(normalizeLocalSrc('assets/%E5%9B%BE.png')).toBe('assets/图.png');
   });
 });

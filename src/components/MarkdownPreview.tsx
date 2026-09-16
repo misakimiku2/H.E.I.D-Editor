@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, createContext, useContext } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { ImageViewer } from './ImageViewer';
-import { resolveImageSrc, joinRelativeSrc, ImageForbiddenError } from '../lib/imageSrc';
+import { resolveImageSrc, joinRelativeSrc, normalizeLocalSrc, ImageForbiddenError } from '../lib/imageSrc';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import remarkEmoji from 'remark-emoji';
@@ -13,7 +13,7 @@ import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers,
 import { renderMermaidSvg } from '../lib/mermaid';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP } from '../lib/platform';
-import { FormatMenu, INLINE_WRAPS, transformSlice, footnoteEdit, type MdOp, type MenuState } from './MarkdownTools';
+import { FormatMenu, INLINE_WRAPS, transformSlice, footnoteEdit, findInSlice, type MdOp, type MenuState } from './MarkdownTools';
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { MermaidEditModal } from './MermaidEditModal';
 import { PreviewFindBar } from './PreviewFindBar';
@@ -87,7 +87,11 @@ const MarkdownImage = React.memo<{
       }
     }
 
-    const target = filePath || (src && !src.startsWith('https://local-image.placeholder') ? joinRelativeSrc(src, baseDir) : '');
+    /* 解析优先级：旧文档 alt 里的 |||LOCAL-FILE: 绝对路径 > src 归一（file:/// 解码 /
+       绝对路径原样 / 相对路径），相对路径再与文档目录拼接。本地图片语法不改写源码，
+       data-md 偏移因此始终与 content 一致（右键格式化的定位依赖这一点） */
+    const normalized = src === 'https://local-image.placeholder' ? '' : normalizeLocalSrc(src);
+    const target = filePath || joinRelativeSrc(normalized, baseDir);
     if (!target) return;
     (async () => {
       try {
@@ -680,7 +684,10 @@ interface MarkdownPreviewProps {
 }
 
 interface PreviewMenuState extends MenuState {
-  blocks: Array<{ start: number; end: number }>;
+  /** 与选区相交的最内层块：源码区间 + 对应 DOM（应用时按块取选中文本） */
+  blocks: Array<{ start: number; end: number; el: HTMLElement }>;
+  /** 菜单打开时刻的选区快照（应用行内操作时按块求交集文本） */
+  range: Range | null;
 }
 
 interface TableRange {
@@ -1050,40 +1057,15 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     });
   }, [withScrollRestore]);
 
-  /* 将本地图片路径改写为可由 MarkdownImage 读取的形式（按块处理） */
+  /* 页签文档的渲染块：md 块与当前选中页签面板各自携带其全文起始偏移（base）。
+     注意不得在此改写 md 字符串（如本地图片 URL 重写）——data-md 偏移基于这里的
+     字符串计算，长度一变就与 content 原文错位，右键格式化会把标记插到错误位置 */
   const processedBlocks = useMemo(() => {
-    const rewrite = (base: string) =>
-      base.replace(
-        /!\[([^\]]*)\]\(([^)]+)\)/g,
-        (match, alt, url) => {
-          if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
-            return match;
-          }
-          let fixedUrl = url;
-          if ((fixedUrl.startsWith('"') && fixedUrl.endsWith('"')) || (fixedUrl.startsWith("'") && fixedUrl.endsWith("'"))) {
-            fixedUrl = fixedUrl.slice(1, -1);
-          }
-          if (fixedUrl.includes('\\')) {
-            fixedUrl = fixedUrl.replace(/\\/g, '/');
-          }
-          if (!fixedUrl.startsWith('file://') && /^[A-Za-z]:/.test(fixedUrl)) {
-            fixedUrl = 'file:///' + fixedUrl;
-          } else if (!fixedUrl.startsWith('/') && !fixedUrl.startsWith('./') && !fixedUrl.startsWith('file://')) {
-            fixedUrl = 'file:///' + fixedUrl;
-          }
-          const rawPath = fixedUrl.replace(/^file:\/+/, '');
-          /* 插入端写入的是百分号编码后的 URL，这里还原为真实路径再交给 fs 读取 */
-          let filePath = rawPath;
-          try { filePath = decodeURIComponent(rawPath); } catch { /* 含孤立 % 时保留原样 */ }
-          const encodedAlt = `${alt}|||LOCAL-FILE:${filePath}`;
-          return `![${encodedAlt}](https://local-image.placeholder)`;
-        }
-      );
     if (!langBlocks) return null;
     return langBlocks.map((b, i) => {
-      if (b.type === 'md') return { md: rewrite(b.md), base: b.start };
+      if (b.type === 'md') return { md: b.md, base: b.start };
       const sel = Math.min(tabSelections[i] ?? 0, b.sections.length - 1);
-      return { md: rewrite(b.sections[sel].md), base: b.sections[sel].start };
+      return { md: b.sections[sel].md, base: b.sections[sel].start };
     });
   }, [langBlocks, tabSelections]);
 
@@ -1156,6 +1138,24 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
        恒为 null，仅靠它们内容变化后不会重新测量（加行/列、输入后尺寸不更新） */
   }, [content, processedBlocks, langBlocks, tabSelections, isDarkMode]);
 
+  /* 选区快照与某块 DOM 的交集文本：跨块选区按块拆分后映射回源码用 */
+  const selectedTextWithin = (el: HTMLElement, range: Range | null): string => {
+    if (!range) return '';
+    try {
+      const blockRange = document.createRange();
+      blockRange.selectNodeContents(el);
+      if (range.compareBoundaryPoints(Range.START_TO_START, blockRange) > 0) {
+        blockRange.setStart(range.startContainer, range.startOffset);
+      }
+      if (range.compareBoundaryPoints(Range.END_TO_END, blockRange) < 0) {
+        blockRange.setEnd(range.endContainer, range.endOffset);
+      }
+      return blockRange.toString();
+    } catch {
+      return '';
+    }
+  };
+
   /* ---- 右键：有选区弹格式菜单；无选区弹插入菜单（表格/图片） ---- */
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -1172,13 +1172,13 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         const hits = tagged.filter(el => range.intersectsNode(el));
         const innermost = hits.filter(el => !hits.some(o => o !== el && el.contains(o)));
         const blocks = innermost
-          .map(el => ({ start: Number(el.dataset.mdStart), end: Number(el.dataset.mdEnd) }))
+          .map(el => ({ start: Number(el.dataset.mdStart), end: Number(el.dataset.mdEnd), el }))
           .filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start)
           .sort((a, b) => a.start - b.start);
         if (blocks.length > 0) {
           e.preventDefault();
           setTableAction(null);
-          setMenu({ x: e.clientX, y: e.clientY, text, blocks });
+          setMenu({ x: e.clientX, y: e.clientY, text, blocks, range: range.cloneRange() });
           return;
         }
       }
@@ -1220,15 +1220,20 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         next = content.slice(0, fe.markerAt) + fe.marker
           + content.slice(fe.markerAt, fe.defAt) + fe.def + content.slice(fe.defAt);
       } else {
-        const targets = (op.kind === 'link' || op.kind === 'image' || op.kind === 'mermaid' || !!INLINE_WRAPS[op.kind])
-          ? menu.blocks.slice(0, 1)
-          : menu.blocks;
-        const sorted = [...targets].sort((x, y) => y.start - x.start);
-        for (let d = 0; d < sorted.length; d++) {
-          const b = sorted[d];
+        const isInline = op.kind === 'link' || op.kind === 'image' || op.kind === 'mermaid' || !!INLINE_WRAPS[op.kind];
+        /* 行内语法（==高亮==/**粗体** 等）不能跨块：跨块选区逐块取「该块包含的选区文本」
+           分别包裹；某块的选区文本在源码里定位不到时跳过该块（宁可不生效也不整块误包）。
+           单块选区保持原语义：定位失败时整块兜底 */
+        const multi = menu.blocks.length > 1;
+        const targets = menu.blocks
+          .map(b => ({ block: b, text: isInline && multi ? selectedTextWithin(b.el, menu.range) : menu.text }))
+          .filter(t => !isInline || !multi
+            || (t.text.trim() !== '' && findInSlice(content.slice(t.block.start, t.block.end), t.text)));
+        const sorted = [...targets].sort((x, y) => y.block.start - x.block.start);
+        for (const { block: b, text } of sorted) {
           const slice = content.slice(b.start, b.end);
           next = next.slice(0, b.start)
-            + transformSlice(op, slice, menu.text, t('md.tableTemplate'), t('md.mermaidTemplate'))
+            + transformSlice(op, slice, text, t('md.tableTemplate'), t('md.mermaidTemplate'))
             + next.slice(b.end);
         }
       }
