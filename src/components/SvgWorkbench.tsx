@@ -6,6 +6,7 @@ import { parseSvg, type SvgParseResult } from '../lib/svgParse';
 import { createRenderCopy } from '../lib/svgSanitize';
 import { applyPatches, applyTranslate, deletePatch, elementPatch } from '../lib/svgWrite';
 import { replaceColor } from '../lib/svgPalette';
+import { loadSvgSplitRatio, saveSvgSplitRatio, splitRatioFromClientX } from '../lib/svgLayout';
 import { SvgCanvas } from './SvgCanvas';
 import { SvgInspector } from './SvgInspector';
 
@@ -44,7 +45,33 @@ export const SvgWorkbench = React.memo<{
     return () => clearTimeout(id);
   }, [content, rendered]);
 
-  /* ---- 预览模式（现状）：<img> blob 渲染 + 缩放平移 ---- */
+  /* ---- 编辑区宽度：右缘分隔条拖拽调整（释放持久化；手机堆叠布局固定不减） ---- */
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [splitRatio, setSplitRatio] = useState(loadSvgSplitRatio);
+  const splitRatioRef = useRef(splitRatio);
+  splitRatioRef.current = splitRatio;
+  const splitDragRef = useRef<{ left: number; width: number } | null>(null);
+
+  const startSplitResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || stacked) return;
+    const root = rootRef.current;
+    if (!root) return;
+    const rect = root.getBoundingClientRect();
+    splitDragRef.current = { left: rect.left, width: rect.width };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 合成事件无有效 pointerId */ }
+  };
+  const moveSplitResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    const s = splitDragRef.current;
+    if (!s) return;
+    setSplitRatio(splitRatioFromClientX(e.clientX, s.left, s.width));
+  };
+  const endSplitResize = () => {
+    if (!splitDragRef.current) return;
+    splitDragRef.current = null;
+    saveSvgSplitRatio(splitRatioRef.current);
+  };
+
+  /* ---- 预览模式：<img> blob 渲染 + 缩放，平移 = 中键拖动 ---- */
   const [url, setUrl] = useState('');
   const [invalid, setInvalid] = useState(false);
   useEffect(() => {
@@ -100,7 +127,8 @@ export const SvgWorkbench = React.memo<{
   }, [fitScale, svgEdit]);
 
   const startDrag = (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 1) return;
+    e.preventDefault(); /* 拦下浏览器中键自动滚动 */
     dragRef.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y };
     setDragging(true);
   };
@@ -188,11 +216,37 @@ export const SvgWorkbench = React.memo<{
   );
 
   return (
-    <div className={cn('flex min-w-0 flex-1 overflow-hidden', stacked ? 'flex-col' : 'flex-row')}>
-      <div className={cn('min-w-0 overflow-hidden', stacked ? 'h-1/2 shrink-0' : 'w-[55%] shrink-0')}>
+    <div ref={rootRef} className={cn('flex min-w-0 flex-1 overflow-hidden', stacked ? 'flex-col' : 'flex-row')}>
+      <div
+        className={cn('min-w-0 overflow-hidden', stacked ? 'h-1/2 shrink-0' : 'shrink-0')}
+        style={stacked ? undefined : { width: `${splitRatio * 100}%` }}
+      >
         {children}
       </div>
-      <div className={cn('shrink-0', stacked ? 'h-px w-full' : 'h-full w-px', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
+
+      {/* 编辑区|预览区 分隔条：桌面端为拖宽手柄（对齐侧栏模式），手机堆叠为普通分隔线 */}
+      {stacked ? (
+        <div className={cn('h-px w-full shrink-0', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
+      ) : (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t('svg.resizeHint')}
+          title={t('svg.resizeHint')}
+          onPointerDown={startSplitResize}
+          onPointerMove={moveSplitResize}
+          onPointerUp={endSplitResize}
+          onPointerCancel={endSplitResize}
+          className="group relative w-1.5 shrink-0 cursor-col-resize touch-none"
+        >
+          <div
+            className={cn(
+              'absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors group-hover:bg-blue-500/50',
+              isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200',
+            )}
+          />
+        </div>
+      )}
 
       {svgEdit ? (
         <>
@@ -229,8 +283,9 @@ export const SvgWorkbench = React.memo<{
       ) : (
         <div
           ref={paneRef}
+          data-svg-preview
           className="relative flex min-w-0 flex-1 items-center justify-center overflow-hidden p-3 select-none"
-          style={{ ...checker, cursor: dragging ? 'grabbing' : 'grab' }}
+          style={{ ...checker, cursor: dragging ? 'grabbing' : 'default' }}
           onContextMenu={(e) => e.preventDefault()}
           onMouseDown={startDrag}
         >
@@ -247,7 +302,7 @@ export const SvgWorkbench = React.memo<{
                 transformOrigin: 'center center',
                 maxWidth: 'none',
                 imageRendering: eff >= 3 ? 'pixelated' : 'auto',
-                cursor: dragging ? 'grabbing' : 'grab',
+                cursor: dragging ? 'grabbing' : 'default',
                 userSelect: 'none',
               }}
             />
@@ -265,7 +320,7 @@ export const SvgWorkbench = React.memo<{
             <div
               className={cn('absolute bottom-2 right-2 flex items-center gap-1 rounded-lg border p-1 shadow-lg',
                 isDarkMode ? 'border-zinc-600/60 bg-zinc-800/90' : 'border-zinc-200 bg-white/90')}
-              onMouseDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); }}
             >
               <span className={cn('px-1 text-[11px] tabular-nums', isDarkMode ? 'text-zinc-400' : 'text-zinc-500')}>
                 {Math.round(eff * 100)}%

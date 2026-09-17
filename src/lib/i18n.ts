@@ -39,6 +39,8 @@ const zh = {
   'svg.applyReplace': '替换',
   'svg.exportPng': '导出 {k}× PNG',
   'svg.copyPng': '复制为 PNG（2×）',
+  'svg.resizeHint': '拖拽调整编辑区宽度',
+  'svg.panHint': '中键拖动平移画布',
 
   'menu.save': '保存',
   'menu.saveAs': '另存为',
@@ -678,6 +680,8 @@ const en: Record<MessageKey, string> = {
   'svg.applyReplace': 'Replace',
   'svg.exportPng': 'Export {k}× PNG',
   'svg.copyPng': 'Copy as PNG (2×)',
+  'svg.resizeHint': 'Drag to resize editor pane',
+  'svg.panHint': 'Middle-drag to pan the canvas',
 
   'menu.save': 'Save',
   'menu.saveAs': 'Save As',

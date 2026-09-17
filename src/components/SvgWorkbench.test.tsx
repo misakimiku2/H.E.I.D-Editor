@@ -132,6 +132,33 @@ describe('SvgWorkbench 编辑模式', () => {
     expect(h.querySelector('[data-svg-canvas]')).toBeNull();
   });
 
+  it('编辑模式带拖宽手柄；预览模式平移改中键触发', () => {
+    const h = mount({ svgEdit: false });
+    /* 拖宽手柄（分隔条）两模式共用，始终存在 */
+    expect(h.querySelector('[role="separator"]')).not.toBeNull();
+    /* 预览面板：左键不再平移，中键按下进入平移态（grabbing 光标） */
+    const preview = h.querySelector('[data-svg-preview]') as HTMLElement;
+    expect(preview).not.toBeNull();
+    act(() => { fire(preview, 'mousedown', { button: 0 }); });
+    expect(preview.style.cursor).not.toContain('grabbing');
+    act(() => { fire(preview, 'mousedown', { button: 1 }); });
+    expect(preview.style.cursor).toContain('grabbing');
+  });
+
+  it('画布中键=平移、左键空白=取消选中', () => {
+    const h = mount();
+    const pane = h.querySelector('[data-svg-canvas]') as HTMLElement;
+    const rect = h.querySelector('rect[data-hed-idx="1"]')!;
+    /* 左键选中后再左键空白 → 回到未选中（属性面板显示空态文案） */
+    act(() => { fire(rect, 'pointerdown'); });
+    expect(Array.from(h.querySelectorAll('span')).some(s => s.textContent === '<rect>')).toBe(true);
+    act(() => { fire(pane, 'pointerdown', { button: 0 }); });
+    expect(Array.from(h.querySelectorAll('span')).some(s => s.textContent === '<rect>')).toBe(false);
+    /* 中键在元素上按下 = 平移（grabbing 光标），不改变选中 */
+    act(() => { fire(rect, 'pointerdown', { button: 1 }); });
+    expect(pane.style.cursor).toContain('grabbing');
+  });
+
   it('畸形 XML：画布显示无效占位，面板可切换但不崩', () => {
     const h = mount({ content: '<svg><rect></svg>' });
     expect(h.textContent).toContain('svg.invalid');

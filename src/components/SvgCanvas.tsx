@@ -1,8 +1,8 @@
 /**
  * SVG 编辑画布：sanitize 后的渲染副本内联挂载，hover 高亮、点选、拖拽移动。
  * 安全是 sanitize 层的事（svgSanitize.ts），这里只管交互：
- * - 拖空白（或根 svg）= 平移画布，滚轮以光标为锚缩放，双击适应/原始尺寸（沿用预览交互）；
- * - 拖元素 = 移动：拖动过程只改渲染副本（增量并进前导 translate），松手才提交一次文本补丁；
+ * - 中键拖动 = 平移画布（任意位置，含元素上方），滚轮以光标为锚缩放，双击适应/原始尺寸；
+ * - 左键拖元素 = 移动（拖动过程只改渲染副本，松手才提交一次文本补丁），左键点空白 = 取消选中；
  * - 选中框/悬停轮廓用屏幕坐标覆盖层（getBoundingClientRect），随缩放平移重算；
  * - 键盘：Delete 删除选中，方向键按 SVG 用户单位微调（Shift ×10）。
  */
@@ -106,18 +106,25 @@ export const SvgCanvas = React.memo<{
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    /* 中键：任意位置平移画布（阻止浏览器中键自动滚动） */
+    if (e.button === 1) {
+      e.preventDefault();
+      gestureRef.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, ox: offset.x, oy: offset.y };
+      setPanning(true);
+      try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 合成事件无有效 pointerId */ }
+      return;
+    }
     if (e.button !== 0) return;
     const idx = hitIdx(e.target);
     if (idx !== null && idx > 0) {
-      /* 元素：选中并准备拖拽（未过位移阈值前不算移动） */
+      /* 左键元素：选中并准备拖拽（未过位移阈值前不算移动） */
       onSelect(idx);
       gestureRef.current = { kind: 'drag', idx, sx: e.clientX, sy: e.clientY, moved: false };
       setDragIdx(idx);
-      (e.currentTarget as HTMLElement)?.setPointerCapture?.(e.pointerId);
+      try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 合成事件无有效 pointerId */ }
     } else {
-      /* 空白 / 根 svg：平移画布 */
-      gestureRef.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, ox: offset.x, oy: offset.y };
-      setPanning(true);
+      /* 左键空白：取消选中（平移已让给中键） */
+      onSelect(null);
     }
   };
 
@@ -238,8 +245,9 @@ export const SvgCanvas = React.memo<{
       ref={paneRef}
       tabIndex={0}
       data-svg-canvas
+      title={t('svg.panHint')}
       className={cn('relative flex min-w-0 flex-1 items-center justify-center overflow-hidden p-3 select-none outline-none')}
-      style={{ ...checker, cursor: panning ? 'grabbing' : 'grab', touchAction: 'none' }}
+      style={{ ...checker, cursor: panning ? 'grabbing' : 'default', touchAction: 'none' }}
       onContextMenu={(e) => e.preventDefault()}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -286,7 +294,7 @@ export const SvgCanvas = React.memo<{
         <div
           className={cn('absolute bottom-2 right-2 flex items-center gap-1 rounded-lg border p-1 shadow-lg',
             isDarkMode ? 'border-zinc-600/60 bg-zinc-800/90' : 'border-zinc-200 bg-white/90')}
-          onPointerDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); }}
         >
           <span className={cn('px-1 text-[11px] tabular-nums', isDarkMode ? 'text-zinc-400' : 'text-zinc-500')}>
             {Math.round(eff * 100)}%
