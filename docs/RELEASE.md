@@ -40,6 +40,7 @@ git push origin v1.0.1
   并上传。`latest.json` 作为 Release 资产，恰为 `tauri.conf.json` 中 updater
   endpoints 指向的 `releases/latest/download/latest.json` —— 桌面端应用内更新由此闭环。
 - **安卓**：构建 arm64 debug 签名 APK 附到同一 Release（侧载场景，不要求签名密钥）。
+  **2026-09-18 起暂缓**（`android-release` 任务 `if: false`，先专注桌面端；恢复时移除该行）。
 
 日常 CI（`.github/workflows/ci.yml`，push/PR 触发）运行 vitest + tsc + 前端构建、
 Windows NSIS 构建（**关闭** `createUpdaterArtifacts`，无需 secrets）、安卓 arm64 debug APK 构建。

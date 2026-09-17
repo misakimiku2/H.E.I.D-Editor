@@ -64,6 +64,8 @@ jobs:
           prerelease: false
 
   android-release:
+    # 安卓侧载 APK 暂缓发布（2026-09-18 起，先专注桌面端）：恢复发布时删除下面这行 if 即可
+    if: false
     name: 安卓发布（侧载 APK）
     permissions:
       contents: write
