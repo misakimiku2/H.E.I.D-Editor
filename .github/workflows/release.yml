@@ -46,7 +46,20 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'H.I.D.E ${{ github.ref_name }}'
-          releaseBody: 'See the assets to download and install this version.'
+          # releaseBody 会随 latest.json 的 notes 字段下发，成为应用内「更新说明」文档与通知卡片摘要；
+          # 每次发版前更新为当版摘要（完整版见仓库 docs/RELEASE-NOTES-v*.md）。
+          releaseBody: |
+            ## v1.3.0 更新说明
+
+            **结构化内容与新格式**：JSON / YAML 结构树与分屏视图（同步滚动）；Markdown 大纲导航浮窗、粘贴图片自动落盘、图片本地化、导出 HTML 代码高亮；CSV 只读态排序与筛选；打印 / 导出 PDF（`Ctrl+P`）。
+
+            **标签拖拽与多窗口**（桌面）：标签栏内拖拽重排，拖出脱离成新窗口，跨窗口拖入合并，重启按窗口还原会话。
+
+            **SVG 可视化编辑**：画布点选 / 拖拽移动 / 方向键微调，属性 / 图层 / 调色板检查面板，一键全局换色，PNG 导出；修改手术式写回源码（注释与缩进逐字保留）。
+
+            **更多改进**：文件树自动刷新（外部变更实时反映）；跨文件搜索提速与 CJK 命中窗口修正；会话恢复并行读盘；更新检查改每次启动必检，更新说明支持应用内回看历史版本。
+
+            完整说明见 [docs/RELEASE-NOTES-v1.3.md](https://github.com/misakimiku2/H.E.I.D-Editor/blob/main/docs/RELEASE-NOTES-v1.3.md)。
           releaseDraft: false
           prerelease: false
 
