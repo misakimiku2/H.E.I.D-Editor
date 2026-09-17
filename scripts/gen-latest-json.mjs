@@ -9,8 +9,12 @@
  *   --url        安装包下载地址（releases/download/v<version>/<exe 名>）
  *   --out        输出文件路径（默认 stdout）
  *
- * 结构对齐 tauri-action 历史产物：windows-x86_64 与 windows-x86_64-nsis 双键，
- * signature 为 .sig 文件内容的 base64 编码。
+ * 结构对齐 tauri-plugin-updater 的验签管线（verify_signature：对 signature 字段
+ * base64 解码一次后交给 minisign Signature::decode 解析多行文本）。
+ * tauri v2 CLI 产出的 .sig 文件内容本身就是一层 base64 包装，因此 signature
+ * 字段 = .sig 文件原文（不再额外编码，否则插件解码一次后拿到的仍是密文，
+ * 会报「Invalid encoding in minisign data」）。双键 windows-x86_64(-nsis)
+ * 对齐 tauri-action 历史产物。
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
@@ -31,7 +35,7 @@ if (!version || !sigPath || !url) {
   process.exit(1);
 }
 
-const signature = readFileSync(sigPath).toString('base64');
+const signature = readFileSync(sigPath, 'utf8').trim();
 const notes = notesPath ? readFileSync(notesPath, 'utf8') : '';
 
 const asset = { signature, url };
