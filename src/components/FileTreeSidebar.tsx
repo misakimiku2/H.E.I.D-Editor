@@ -7,7 +7,8 @@ import {
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import {
-  getDirLister, makeRoot, toggleDir, withChildren, withError,
+  getDirLister, makeRoot, toggleDir, withChildren, withError, withRefreshedChildren,
+  loadedDirPaths,
   joinPath, parentPathOf, findNode, isValidEntryName, uniqueEntryName, relativePathUnderRoot,
   isImagePath, isSvgPath,
   loadTreeSidebarWidth, saveTreeSidebarWidth, clampTreeSidebarWidth,
@@ -245,13 +246,30 @@ export function FileTreeSidebar({
     }
   }, []);
 
-  /** 重载单个目录（管理操作后同步该层视图；失败静默，下次展开会重读） */
-  const reloadDir = useCallback(async (dirPath: string) => {
-    if (!lister) return;
-    try {
-      const entries = await lister.list(dirPath);
-      setTree(prev => (prev ? withChildren(prev, dirPath, entries) : prev));
-    } catch { /* 忽略：下次展开时重读 */ }
+  const treeRef = useRef<TreeNode | null>(null);
+  treeRef.current = tree;
+  const refreshSeqRef = useRef(0);
+
+  /**
+   * 重载所有已加载目录并同批合并（父先子后）：手动刷新按钮、外部变更 watcher、
+   * 树内管理操作后共用。展开态由 withRefreshedChildren 保留；并发时旧批次
+   * （seq 落后）丢弃不回写，避免慢 I/O 的旧结果覆盖新状态。
+   */
+  const refreshTree = useCallback(async () => {
+    if (!lister || !treeRef.current) return;
+    const dirs = loadedDirPaths(treeRef.current);
+    const seq = ++refreshSeqRef.current;
+    const results = await Promise.allSettled(dirs.map(p => lister.list(p)));
+    if (seq !== refreshSeqRef.current) return;
+    setTree(prev => {
+      if (!prev) return prev;
+      let next = prev;
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') next = withRefreshedChildren(next, dirs[i], r.value);
+        else next = withError(next, dirs[i], r.reason instanceof Error ? r.reason.message : String(r.reason));
+      });
+      return next;
+    });
   }, []);
 
   /* 抽屉首次打开时恢复根目录列表（启动本身不产生 I/O） */
@@ -268,11 +286,23 @@ export function FileTreeSidebar({
   }, [rootPath]);
 
   const handleRefresh = useCallback(() => {
-    if (!rootPath) return;
-    const root = makeRoot(rootPath);
-    setTree(root);
-    void ensureChildren(root);
-  }, [rootPath, ensureChildren]);
+    void refreshTree();
+  }, [refreshTree]);
+
+  /* 目录变更自动刷新（桌面）：抽屉打开期间递归监视根目录，外部增删改经插件去抖
+     （400ms）后重载已加载层，展开态不丢。监视失败静默退化为手动刷新；安卓 SAF 无此能力 */
+  useEffect(() => {
+    if (!open || !rootPath || !lister?.watch) return;
+    let disposed = false;
+    let unwatch: (() => void) | null = null;
+    lister.watch(rootPath, () => { if (!disposed) void refreshTree(); })
+      .then(u => { if (disposed) u(); else unwatch = u; })
+      .catch(() => { /* 监视不可用：保持手动刷新 */ });
+    return () => {
+      disposed = true;
+      unwatch?.();
+    };
+  }, [open, rootPath, refreshTree]);
 
   const handleDirClick = useCallback((node: TreeNode) => {
     setTree(prev => (prev ? toggleDir(prev, node.path) : prev));
@@ -313,10 +343,10 @@ export function FileTreeSidebar({
     try {
       if (target.isDir) await fsMkdir(newPath);
       else await writeLocalPath(newPath, '', 'utf-8', false);
-      await reloadDir(target.parentPath);
+      await refreshTree();
       if (!target.isDir) onOpenFile(newPath);
     } catch (e) { opFailed(e); }
-  }, [creating, onOpenFile, opFailed, reloadDir, t]);
+  }, [creating, onOpenFile, opFailed, refreshTree, t]);
 
   const commitRename = useCallback(async (name: string) => {
     const target = renaming;
@@ -326,20 +356,20 @@ export function FileTreeSidebar({
     try {
       const newPath = joinPath(parentPathOf(target.path), name);
       await fsRename(target.path, newPath);
-      await reloadDir(parentPathOf(target.path));
+      await refreshTree();
       onTabsRenamed(target.path, newPath, target.isDir);
     } catch (e) { opFailed(e); }
-  }, [renaming, onTabsRenamed, opFailed, reloadDir, t]);
+  }, [renaming, onTabsRenamed, opFailed, refreshTree, t]);
 
   const handleDelete = useCallback(async (node: TreeNode) => {
     const ok = await askDangerConfirm(t('tree.deleteConfirm', { name: node.name }), t('tree.delete'));
     if (!ok) return;
     try {
       await fsDelete(node.path, node.isDir);
-      await reloadDir(parentPathOf(node.path));
+      await refreshTree();
       onFileDeleted(node.path);
     } catch (e) { opFailed(e); }
-  }, [askDangerConfirm, onFileDeleted, opFailed, reloadDir, t]);
+  }, [askDangerConfirm, onFileDeleted, opFailed, refreshTree, t]);
 
   const handlePaste = useCallback(async (targetDir: string) => {
     const c = clip;
@@ -362,9 +392,9 @@ export function FileTreeSidebar({
         }
       }
       if (c.cut) setClip(null);
-      await reloadDir(targetDir);
+      await refreshTree();
     } catch (e) { opFailed(e); }
-  }, [clip, opFailed, reloadDir, t]);
+  }, [clip, opFailed, refreshTree, t]);
 
   /* ---- 右键菜单 ---- */
 
@@ -390,10 +420,10 @@ export function FileTreeSidebar({
     ];
     /* 目录/根才有「刷新」语义（对文件无意义） */
     if (!node || isDir) {
-      items.push({ separatorBefore: true, icon: <RefreshCw size={13} />, label: t('tree.refresh'), onSelect: () => void reloadDir(selfDir) });
+      items.push({ separatorBefore: true, icon: <RefreshCw size={13} />, label: t('tree.refresh'), onSelect: () => void refreshTree() });
     }
     setMenu({ x: e.clientX, y: e.clientY, items });
-  }, [canManage, clip, renaming, rootPath, startCreate, handleDelete, handlePaste, opFailed, reloadDir, t]);
+  }, [canManage, clip, renaming, rootPath, startCreate, handleDelete, handlePaste, opFailed, refreshTree, t]);
 
   const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
     const active = tabs.some(tb => tb.id === activeTabId && tb.path === node.path);

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   clampTreeSidebarWidth, findNode, isImagePath, isSvgPath, isUnderRoot, isValidEntryName, joinPath,
-  loadTreeSidebarWidth, makeRoot, parentPathOf, relativePathUnderRoot, saveTreeSidebarWidth,
-  sortEntries, toggleDir, uniqueEntryName,
-  withChildren, withError,
+  loadTreeSidebarWidth, loadedDirPaths, makeRoot, parentPathOf, relativePathUnderRoot,
+  saveTreeSidebarWidth, sortEntries, toggleDir, uniqueEntryName,
+  withChildren, withError, withRefreshedChildren,
   TREE_SIDEBAR_MAX_WIDTH, TREE_SIDEBAR_MIN_WIDTH,
   type DirEntry, type TreeNode,
 } from './fileTree';
@@ -70,6 +70,77 @@ describe('树状态（懒加载）', () => {
     root = withError(root, '/r/sub', '权限不足');
     expect(root.children![0].error).toBe('权限不足');
     expect(root.error).toBeNull();
+  });
+});
+
+describe('loadedDirPaths', () => {
+  it('收集已加载目录（含根），父先子后；未加载层与文件不入列', () => {
+    let root = makeRoot('/r');
+    root = withChildren(root, '/r', [e('src', true), e('a.md', false)]);
+    root = withChildren(root, '/r/src', [e('nested', true), e('b.txt', false)]);
+    expect(loadedDirPaths(root)).toEqual(['/r', '/r/src']);
+  });
+
+  it('全部懒加载时只有根', () => {
+    let root = makeRoot('/r');
+    root = withChildren(root, '/r', [e('src', true)]);
+    expect(loadedDirPaths(root)).toEqual(['/r']);
+  });
+});
+
+describe('withRefreshedChildren', () => {
+  it('整体替换子节点：新条目按序懒加载出现，消失的条目移除', () => {
+    let root = makeRoot('/r');
+    root = withChildren(root, '/r', [e('old.txt', false), e('gone', true)]);
+    root = withRefreshedChildren(root, '/r', [e('new.txt', false), e('sub', true)]);
+    expect(root.children!.map(c => c.name)).toEqual(['sub', 'new.txt']);
+    expect(root.children![0].children).toBeNull();
+    expect(root.children![0].expanded).toBe(false);
+  });
+
+  it('已加载且展开的同名子目录保留展开态，children 置回 null（由调用方同批合并新列表）', () => {
+    let root = makeRoot('/r');
+    root = withChildren(root, '/r', [e('sub', true)]);
+    root = withChildren(root, '/r/sub', [e('deep.txt', false)]);
+    root = toggleDir(root, '/r/sub');
+    root = withRefreshedChildren(root, '/r', [e('sub', true), e('x.txt', false)]);
+    expect(root.children![0].expanded).toBe(true);
+    expect(root.children![0].children).toBeNull();
+  });
+
+  it('已加载但收起的子目录保持收起', () => {
+    let root = makeRoot('/r');
+    root = withChildren(root, '/r', [e('sub', true)]);
+    root = withChildren(root, '/r/sub', [e('deep.txt', false)]);
+    root = withRefreshedChildren(root, '/r', [e('sub', true)]);
+    expect(root.children![0].expanded).toBe(false);
+    expect(root.children![0].children).toBeNull();
+  });
+
+  it('展开中（children 为 null 且无错误）的子目录不保留展开态，避免孤儿加载圈', () => {
+    let root = makeRoot('/r');
+    root = withChildren(root, '/r', [e('sub', true)]);
+    root = toggleDir(root, '/r/sub');
+    root = withRefreshedChildren(root, '/r', [e('sub', true)]);
+    expect(root.children![0].expanded).toBe(false);
+  });
+
+  it('带错误的子目录保留错误与展开态（展示错误行可重试）', () => {
+    let root = makeRoot('/r');
+    root = withChildren(root, '/r', [e('sub', true)]);
+    root = withError(root, '/r/sub', '权限不足');
+    root = toggleDir(root, '/r/sub');
+    root = withRefreshedChildren(root, '/r', [e('sub', true)]);
+    expect(root.children![0].error).toBe('权限不足');
+    expect(root.children![0].expanded).toBe(true);
+  });
+
+  it('刷新成功后目标节点自身 error 清空', () => {
+    let root = makeRoot('/r');
+    root = withError(root, '/r', '读取失败');
+    root = withRefreshedChildren(root, '/r', [e('a.txt', false)]);
+    expect(root.error).toBeNull();
+    expect(root.children).toHaveLength(1);
   });
 });
 

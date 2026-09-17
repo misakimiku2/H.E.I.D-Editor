@@ -145,6 +145,38 @@ export function withError(node: TreeNode, dirPath: string, message: string): Tre
   return updateNode(node, dirPath, n => ({ ...n, error: message, children: n.children ?? null }));
 }
 
+/** 收集已加载过 children 的目录路径（含根），父先子后：刷新按此序重列后同批合并 */
+export function loadedDirPaths(node: TreeNode): string[] {
+  const out: string[] = [];
+  const walk = (n: TreeNode): void => {
+    if (!n.isDir || n.children === null) return;
+    out.push(n.path);
+    n.children.forEach(walk);
+  };
+  walk(node);
+  return out;
+}
+
+/**
+ * 刷新合并：dirPath 的子节点整体换成新列表，与 withChildren 的差异是保留同名子目录的
+ * 展开态/错误态——已加载的子目录 children 置回 null，由调用方在同一批次里合并其新列表
+ * （批次内父先子后，合并时路径必然存在），单独调用不会留下展开却永不加载的孤儿节点。
+ */
+export function withRefreshedChildren(node: TreeNode, dirPath: string, entries: DirEntry[]): TreeNode {
+  return updateNode(node, dirPath, n => {
+    const prevDirs = new Map(n.children?.filter(c => c.isDir).map(c => [c.name, c]) ?? []);
+    const children = sortEntries(entries).map(e => {
+      const fresh: TreeNode = { path: e.path, name: e.name, isDir: e.isDir, expanded: false, children: null, error: null };
+      const old = e.isDir ? prevDirs.get(e.name) : undefined;
+      if (!old) return fresh;
+      if (old.children !== null) return { ...fresh, expanded: old.expanded };
+      if (old.error !== null) return { ...fresh, expanded: old.expanded, error: old.error };
+      return fresh;
+    });
+    return { ...n, children, error: null };
+  });
+}
+
 /** 展开/收起；收起保留已加载 children（再次展开不重复 I/O） */
 export function toggleDir(node: TreeNode, dirPath: string): TreeNode {
   return updateNode(node, dirPath, n => ({ ...n, expanded: !n.expanded }));
@@ -165,6 +197,9 @@ export interface DirLister {
   list(dirPath: string): Promise<DirEntry[]>;
   /** 根目录显示名（tree URI 取尾段并去掉 storage 前缀） */
   displayName(rootPath: string): string;
+  /** 递归监视根目录变更，事件去抖后回调；返回停止监视函数。
+      平台不支持（安卓 SAF）时不实现，侧栏退化为仅手动刷新 */
+  watch?(rootPath: string, onChange: () => void): Promise<() => void>;
 }
 
 const SAF_SEP = '\u0000';
@@ -226,6 +261,10 @@ export const tauriDirLister: DirLister = {
       isDir: it.isDirectory,
       path: joinPath(dirPath, it.name),
     }));
+  },
+  async watch(rootPath, onChange) {
+    const { watch } = await import('@tauri-apps/plugin-fs');
+    return watch(rootPath, () => onChange(), { recursive: true, delayMs: 400 });
   },
   displayName(rootPath) {
     return pathTail(rootPath);
