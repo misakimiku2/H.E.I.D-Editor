@@ -141,7 +141,7 @@ npm run tauri:build         # 编译 Rust 并打包（首次约 4-10 分钟）
 产物位置：
 
 - **独立可执行文件**：`src-tauri/target/release/nexus-editor.exe`
-- **安装程序**：`src-tauri/target/release/bundle/nsis/H.I.D.E_1.3.0_x64-setup.exe`
+- **安装程序**：`src-tauri/target/release/bundle/nsis/H.I.D.E_1.3.1_x64-setup.exe`
 
 ### 注册为系统编辑器
 
