@@ -26,19 +26,28 @@
 ## 发布操作
 
 ```bash
-# 1. 更新三处版本号并提交：
-#    package.json / src-tauri/tauri.conf.json / src-tauri/Cargo.toml
-# 2. 打标签推送：
+# 1. 准备当版发行说明文档 docs/RELEASE-NOTES-v{主.次}.md
+#    （既是 Release 页面正文，也经 latest.json 的 notes 成为应用内更新说明）
+# 2. 更新四处版本号并提交：
+#    package.json / src-tauri/tauri.conf.json / src-tauri/Cargo.toml / src/lib/update.ts
+# 3. 打标签推送：
 git tag v1.0.1
 git push origin v1.0.1
 ```
 
+> ⚠️ 标签推送后**不要**在网页端提前打开「Draft a new release」选择该标签——
+> GitHub 选定标签那一刻就会创建草稿 Release，会让 CI 的发布步骤找不到/建不了
+> Release（v1.3.0 发布时踩过）。发布页在 CI 完成后自动出现。
+
 推送 `v*` 标签触发 `.github/workflows/release.yml`：
 
-- **桌面（windows-latest）**：tauri-action 构建 NSIS 安装包与更新产物
-  （`*-setup.exe`、`*.nsis.zip` + `.nsis.zip.sig`、`latest.json`），自动创建 GitHub Release
-  并上传。`latest.json` 作为 Release 资产，恰为 `tauri.conf.json` 中 updater
+- **桌面（windows-latest）**：`npx tauri build` 带签名构建 NSIS 安装包
+  （`*-setup.exe` + `.exe.sig`）→ `scripts/gen-latest-json.mjs` 生成 `latest.json`
+  （notes 取自当版发行说明文档）→ `softprops/action-gh-release` 创建 Release 并上传。
+  `latest.json` 作为 Release 资产，恰为 `tauri.conf.json` 中 updater
   endpoints 指向的 `releases/latest/download/latest.json` —— 桌面端应用内更新由此闭环。
+  （2026-09-18 起弃用 tauri-action：v1.3.0 发布时其在资产上传阶段稳定报
+  「Error creating asset temp dir」，草稿 Release 存在时创建 Release 也会失败。）
 - **安卓**：构建 arm64 debug 签名 APK 附到同一 Release（侧载场景，不要求签名密钥）。
   **2026-09-18 起暂缓**（`android-release` 任务 `if: false`，先专注桌面端；恢复时移除该行）。
 
