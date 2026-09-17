@@ -20,6 +20,8 @@ export interface TabTransferPayload {
   transferId: string;
   /** 本次拖拽会话 id(忽略过期悬停/回执) */
   dragId: string;
+  /** 被拖标签是否为源窗口唯一标签:Rust 据此决定 detached 后是否隐藏源窗口 */
+  wasOnlyTab: boolean;
   tab: TransferableTab;
 }
 

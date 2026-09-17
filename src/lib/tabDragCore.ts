@@ -56,3 +56,53 @@ export function applyMove<T>(arr: T[], from: number, to: number): T[] | null {
   next.splice(t, 0, item);
   return next;
 }
+
+/* ---- 自家拖拽的收尾防护与让位几何(源标签保持原位半透明,不折叠) ---- */
+
+/** dragend 历时下限(ms):真拖拽(OLE 起步 + 移动 + 松手)远超此值 */
+export const DRAGEND_MIN_MS = 200;
+
+/**
+ * dragend 是否异常早到:Chromium 在拖拽源被同步折叠/隐藏等情形下会立即中止
+ * 拖拽循环,dragend 在鼠标未松时触发;此时不能按「松手」收尾(会误脱离成窗),
+ * 应按取消处理。
+ */
+export function isPrematureDragEnd(startedAtMs: number, endedAtMs: number): boolean {
+  return endedAtMs - startedAtMs < DRAGEND_MIN_MS;
+}
+
+/** 落点空隙是否可见:dropIndex(非拖标签坐标)回到原位时无空隙 */
+export function ownGapVisible(dropIndex: number, startIndex: number): boolean {
+  return dropIndex !== startIndex;
+}
+
+/** 让位位移:显示空隙时,序号(非拖标签坐标) >= dropIndex 的标签右移一个占位宽 */
+export function ownShiftFor(collapsedIdx: number, dropIndex: number, startIndex: number, gapW: number): number {
+  return dropIndex !== startIndex && collapsedIdx >= dropIndex ? gapW : 0;
+}
+
+/**
+ * 被拖标签自身的滑动位移(Chrome 式重排视觉):按 dragstart 时刻的各标签宽度,
+ * 计算落点槽位(p,非拖标签坐标)相对原位(startIndex)的水平偏移。
+ * p 回到原位时为 0;配合 CSS transition 即为标签平滑滑入落点的效果。
+ */
+export function ownSlideOffsetX(widths: number[], startIndex: number, dropIndex: number, gap: number): number {
+  let originalLeft = 0;
+  for (let i = 0; i < startIndex; i++) originalLeft += widths[i] + gap;
+  let slotLeft = 0;
+  let taken = 0;
+  for (let i = 0; i < widths.length && taken < dropIndex; i++) {
+    if (i === startIndex) continue;
+    slotLeft += widths[i] + gap;
+    taken += 1;
+  }
+  return slotLeft - originalLeft;
+}
+
+/**
+ * dropIndex(非拖标签坐标,gapIndexFromRects 的返回值)→ applyMove 所需的
+ * 「含被拖标签」插入点坐标。右移时差一:插到非拖标签第 i 个之前 = 含拖坐标 i+1。
+ */
+export function ownDropIndexOf(dropIndex: number, startIndex: number): number {
+  return dropIndex > startIndex ? dropIndex + 1 : dropIndex;
+}

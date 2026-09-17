@@ -271,7 +271,7 @@ export default function App() {
       appAlert(t('tabs.transferFailed'));
     }, 5000);
     pendingTransfersRef.current.set(transferId, entry);
-    const payload: TabTransferPayload = { kind: 'tab', from: windowLabel, transferId, dragId, tab: serializeTab(tab) };
+    const payload: TabTransferPayload = { kind: 'tab', from: windowLabel, transferId, dragId, wasOnlyTab: entry.wasOnlyTab, tab: serializeTab(tab) };
     const sent = (await createDocumentWindow(windowLabel, payload)) !== null;
     if (!sent) {
       window.clearTimeout(entry.timer);
@@ -290,7 +290,8 @@ export default function App() {
       tabId, wasOnlyTab: editor.tabsRef.current.length === 1, timer: 0,
     });
     void beginTabDrag({
-      kind: 'tab', from: windowLabel, transferId, dragId: makeDragId(), tab: serializeTab(tab),
+      kind: 'tab', from: windowLabel, transferId, dragId: makeDragId(),
+      wasOnlyTab: editor.tabsRef.current.length === 1, tab: serializeTab(tab),
     });
   }, [editor.tabsRef, windowLabel]);
 
@@ -312,16 +313,33 @@ export default function App() {
         appAlert(t('tabs.transferFailed'));
         return;
       }
-      /* detached:新窗口装载后回 ack;5s 未回执提示失败、标签保留 */
+      /* detached:新窗口装载后回 ack;5s 未回执提示失败、重新显示源窗口、标签保留 */
       const entry = transferId ? pendingTransfersRef.current.get(transferId) : undefined;
       if (entry) {
         entry.timer = window.setTimeout(() => {
           if (transferId) pendingTransfersRef.current.delete(transferId);
+          void (async () => {
+            try {
+              const { getCurrentWindow } = await import('@tauri-apps/api/window');
+              const win = getCurrentWindow();
+              await win.show();
+              await win.setFocus();
+            } catch { /* 窗口已不存在 */ }
+          })();
           appAlert(t('tabs.transferFailed'));
         }, 5000);
       }
     })();
   }, [t]);
+
+  /* 拖拽异常中止(dragend 早到,按钮未松):清掉暂存载荷与回执登记,
+     不重排、不脱离——标签留在原窗口 */
+  const handleNativeDragCancel = useCallback((_tabId: string) => {
+    const transferId = nativeTransferIdRef.current;
+    nativeTransferIdRef.current = null;
+    if (transferId) pendingTransfersRef.current.delete(transferId);
+    void cancelTabDrag();
+  }, []);
 
   /* 其它窗口把标签放到本窗口标签条:消费暂存载荷并收下(ack 回执给源窗口) */
   const handleAdoptForeignDrop = useCallback((insertIndex: number) => {
@@ -343,7 +361,16 @@ export default function App() {
         if (!entry) return;
         window.clearTimeout(entry.timer);
         pendingTransfersRef.current.delete(p.transferId);
-        if (!p.ok) return;
+        if (!p.ok) {
+          /* 采纳失败:源窗口若已因脱离隐藏,重新显示(标签仍在) */
+          void (async () => {
+            try {
+              const { getCurrentWindow } = await import('@tauri-apps/api/window');
+              await getCurrentWindow().show();
+            } catch { /* 窗口已不存在 */ }
+          })();
+          return;
+        }
         if (entry.wasOnlyTab) {
           /* 内容已迁移，窗口已无未保存状态：清会话登记后自毁（destroy 不走关闭确认） */
           releaseWindowSession(safeLocalStorage(), windowLabel, false);
@@ -1361,6 +1388,7 @@ export default function App() {
           onMoveTab={handleMoveTab}
           onNativeDragStart={handleNativeDragStart}
           onNativeDragEnd={handleNativeDragEnd}
+          onNativeDragCancel={handleNativeDragCancel}
           onAdoptForeignDrop={handleAdoptForeignDrop}
         />
 

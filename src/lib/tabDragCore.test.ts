@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { insertionIndex, applyMove, gapIndexFromRects, DRAG_THRESHOLD_PX } from './tabDragCore';
+import {
+  insertionIndex, applyMove, gapIndexFromRects, DRAG_THRESHOLD_PX,
+  isPrematureDragEnd, DRAGEND_MIN_MS, ownShiftFor, ownDropIndexOf, ownSlideOffsetX,
+} from './tabDragCore';
 
 /* 标签条矩形桩:等宽 100px,从 0 起 */
 const rects = (n: number) => Array.from({ length: n }, (_, i) => ({ left: i * 100, right: i * 100 + 100 }));
@@ -86,5 +89,72 @@ describe('gapIndexFromRects(三分位占位判定)', () => {
 
   it('空列表返回 prev(负值收敛为 0 由调用方保证)', () => {
     expect(gapIndexFromRects([], 5, 0)).toBe(0);
+  });
+});
+
+describe('isPrematureDragEnd(dragend 异常早到防护)', () => {
+  it('时长达到下限 → 正常 dragend,照常收尾', () => {
+    expect(isPrematureDragEnd(1000, 1000 + DRAGEND_MIN_MS)).toBe(false);
+    expect(isPrematureDragEnd(1000, 1000 + 5000)).toBe(false);
+  });
+
+  it('时长低于下限 → 异常:Chromium 中止拖拽在按钮未松时触发,按取消处理', () => {
+    expect(isPrematureDragEnd(1000, 1000 + DRAGEND_MIN_MS - 1)).toBe(true);
+    expect(isPrematureDragEnd(1000, 1000)).toBe(true);
+  });
+});
+
+describe('ownShiftFor(其余标签让位位移)', () => {
+  it('dropIndex 回到原位 → 不让位', () => {
+    expect(ownShiftFor(0, 1, 1, 80)).toBe(0);
+    expect(ownShiftFor(2, 1, 1, 80)).toBe(0);
+  });
+
+  it('dropIndex 离开原位 → 序号 >= dropIndex 的非拖标签右移一个占位宽', () => {
+    /* p=2(追加到末尾):无标签让位,空隙在最右 */
+    expect(ownShiftFor(0, 2, 0, 80)).toBe(0);
+    expect(ownShiftFor(1, 2, 0, 80)).toBe(0);
+    expect(ownShiftFor(2, 2, 0, 80)).toBe(80);
+    /* p=1(B/C 之间):C 让位,B 不动 */
+    expect(ownShiftFor(0, 1, 0, 80)).toBe(0);
+    expect(ownShiftFor(1, 1, 0, 80)).toBe(80);
+  });
+});
+
+describe('ownSlideOffsetX(被拖标签滑动位移,Chrome 式重排)', () => {
+  const w3 = [100, 100, 100];
+  const GAP = 2;
+
+  it('落点在原位 → 位移 0(不滑动)', () => {
+    expect(ownSlideOffsetX(w3, 0, 0, GAP)).toBe(0);
+    expect(ownSlideOffsetX(w3, 1, 1, GAP)).toBe(0);
+  });
+
+  it('右移:滑到目标槽位(正位移)', () => {
+    expect(ownSlideOffsetX(w3, 0, 1, GAP)).toBe(102);  // A 滑到 B 之前
+    expect(ownSlideOffsetX(w3, 0, 2, GAP)).toBe(204);  // A 滑到末尾
+    expect(ownSlideOffsetX(w3, 1, 2, GAP)).toBe(102);  // B 滑到末尾
+  });
+
+  it('左移:滑到目标槽位(负位移)', () => {
+    expect(ownSlideOffsetX(w3, 2, 1, GAP)).toBe(-102); // C 滑到 B 之前
+    expect(ownSlideOffsetX(w3, 2, 0, GAP)).toBe(-204); // C 滑到最前
+    expect(ownSlideOffsetX(w3, 1, 0, GAP)).toBe(-102); // B 滑到最前
+  });
+});
+
+describe('ownDropIndexOf(非拖坐标 → applyMove 含拖坐标)', () => {
+  it('右移插入点 +1,左移/原位不变(修复右移落点少一位)', () => {
+    expect(ownDropIndexOf(2, 0)).toBe(3);   // A 拖过 C 右缘 → 追加到末尾
+    expect(ownDropIndexOf(1, 0)).toBe(2);   // A 拖到 B/C 之间 → [B,A,C]
+    expect(ownDropIndexOf(0, 2)).toBe(0);   // C 拖到最前
+    expect(ownDropIndexOf(1, 1)).toBe(1);   // 原位
+  });
+
+  it('与 applyMove 配合:落点与占位符视觉一致', () => {
+    const tabs = ['A', 'B', 'C'];
+    expect(applyMove(tabs, 0, ownDropIndexOf(1, 0))).toEqual(['B', 'A', 'C']);
+    expect(applyMove(tabs, 0, ownDropIndexOf(2, 0))).toEqual(['B', 'C', 'A']);
+    expect(applyMove(tabs, 2, ownDropIndexOf(0, 2))).toEqual(['C', 'A', 'B']);
   });
 });

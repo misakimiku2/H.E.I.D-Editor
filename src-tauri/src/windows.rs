@@ -190,6 +190,12 @@ pub fn consume_pending_drag(window: WebviewWindow) -> Option<Value> {
     slot.take()
 }
 
+/// 是否应在脱离成功后隐藏源窗口:仅当被拖标签是源窗口唯一标签
+/// (该窗口随后会随 ack 自毁);多标签源窗口继续可见,只移除被拖标签。
+fn should_hide_source(payload: &Value) -> bool {
+    payload.get("wasOnlyTab").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 /// 源窗口 dragend 且标签未落在自己标签条上时收尾:
 /// 载荷未被其它窗口消费 → 脱离成窗到光标位置;已被消费 → 目标的 ack 负责源侧收尾。
 /// 必须为 async 命令(建窗,同 create_document_window)。
@@ -210,9 +216,15 @@ pub async fn finish_tab_drag(
         return Ok(serde_json::json!({ "action": "consumed" }));
     };
 
+    let hide_source = should_hide_source(&payload);
     let cursor = app.cursor_position().map_err(|e| e.to_string())?;
     let (label, _ww) = build_and_place(&app, &window, payload, Some((cursor, grab_dx, grab_dy)))?;
     let _ = &label;
+    /* 唯一标签脱离:立即隐藏源窗口,视觉上标签即时"搬家";
+       ack 到达后前端自毁,超时/失败由前端重新 show 并提示 */
+    if hide_source {
+        let _ = window.hide();
+    }
     Ok(serde_json::json!({ "action": "detached" }))
 }
 
@@ -266,5 +278,13 @@ mod tests {
         *state.0.lock().unwrap() = Some(serde_json::json!({ "kind": "tab" }));
         assert!(state.0.lock().unwrap().take().is_some());
         assert!(state.0.lock().unwrap().take().is_none());
+    }
+
+    #[test]
+    fn hide_source_only_when_detached_tab_was_only_one() {
+        assert!(should_hide_source(&serde_json::json!({ "wasOnlyTab": true })));
+        assert!(!should_hide_source(&serde_json::json!({ "wasOnlyTab": false })));
+        /* 旧格式载荷缺字段:保守不隐藏(多标签窗口被隐藏=看起来全关) */
+        assert!(!should_hide_source(&serde_json::json!({ "kind": "tab" })));
     }
 }
