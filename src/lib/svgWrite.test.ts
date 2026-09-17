@@ -74,21 +74,21 @@ describe('deletePatch', () => {
   it('元素独占一行：整行吞掉（含缩进与换行），不留空白行', () => {
     const src = '<svg>\n  <rect/>\n  <circle/>\n</svg>';
     const res = parseSvg(src)!;
-    const patch = deletePatch(src, res.elements[1]);
+    const patch = deletePatch(src, res.elements[1])!;
     expect(applyPatches(src, [patch])).toBe('<svg>\n  <circle/>\n</svg>');
   });
 
   it('行内还有其他内容：只删元素自身区间', () => {
     const src = '<svg><rect/><circle/></svg>';
     const res = parseSvg(src)!;
-    const patch = deletePatch(src, res.elements[1]);
+    const patch = deletePatch(src, res.elements[1])!;
     expect(applyPatches(src, [patch])).toBe('<svg><circle/></svg>');
   });
 
   it('删除最后一行元素：连前导换行一起收掉，不留尾空白行', () => {
     const src = '<svg>\n  <rect/>\n  <circle/>\n</svg>';
     const res = parseSvg(src)!;
-    const patch = deletePatch(src, res.elements[2]);
+    const patch = deletePatch(src, res.elements[2])!;
     expect(applyPatches(src, [patch])).toBe('<svg>\n  <rect/>\n</svg>');
   });
 
