@@ -43,11 +43,13 @@ git push origin v1.0.1
 
 - **桌面（windows-latest）**：`npx tauri build` 带签名构建 NSIS 安装包
   （`*-setup.exe` + `.exe.sig`）→ `scripts/gen-latest-json.mjs` 生成 `latest.json`
-  （notes 取自当版发行说明文档）→ `softprops/action-gh-release` 创建 Release 并上传。
+  （notes 取自当版发行说明文档）→ `gh release create/upload` 发布。
   `latest.json` 作为 Release 资产，恰为 `tauri.conf.json` 中 updater
   endpoints 指向的 `releases/latest/download/latest.json` —— 桌面端应用内更新由此闭环。
-  （2026-09-18 起弃用 tauri-action：v1.3.0 发布时其在资产上传阶段稳定报
-  「Error creating asset temp dir」，草稿 Release 存在时创建 Release 也会失败。）
+  （2026-09-18 起弃用 tauri-action 与 softprops/action-gh-release 的资产上传：
+  两者先后在 windows-latest 上稳定报「Error creating asset temp dir」，
+  softprops 在 ubuntu 上正常——疑似其新版上传实现在 Windows 上的缺陷，
+  改用 runner 预装的 gh CLI 规避。）
 - **安卓**：构建 arm64 debug 签名 APK 附到同一 Release（侧载场景，不要求签名密钥）。
   **2026-09-18 起暂缓**（`android-release` 任务 `if: false`，先专注桌面端；恢复时移除该行）。
 

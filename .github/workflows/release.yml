@@ -2,7 +2,7 @@ name: Release
 
 # 正式发布：推送 v* 标签触发。
 # 桌面：tauri build 签名构建 NSIS 安装包 → scripts/gen-latest-json.mjs 生成 latest.json
-#       （notes 取自 docs/RELEASE-NOTES-v{x.y}.md）→ softprops/action-gh-release 发布。
+#       （notes 取自 docs/RELEASE-NOTES-v{x.y}.md）→ gh release create/upload 发布。
 #       latest.json 作为 Release 资产，恰为 updater endpoints 指向的地址。
 # 安卓：侧载场景构建 debug 签名 APK 附到同一 Release（无签名密钥要求）；2026-09-18 起暂缓。
 #
@@ -63,15 +63,26 @@ jobs:
             --url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/H.I.D.E_${VERSION}_x64-setup.exe" \
             --out "src-tauri/target/release/bundle/nsis/latest.json"
 
+      # 2026-09-18 弃用 tauri-action 与 softprops/action-gh-release 做资产上传：
+      # 两者先后在 windows-latest 上稳定报「Error creating asset temp dir」
+      # （softprops 在 ubuntu 上正常，桌面任务三连挂）。上传改用 runner 预装的 gh CLI。
       - name: 发布 Release（安装包 + 签名 + latest.json）
-        uses: softprops/action-gh-release@v2
-        with:
-          name: 'H.I.D.E ${{ github.ref_name }}'
-          body_path: docs/RELEASE-NOTES-v${{ env.MINOR }}.md
-          files: |
-            src-tauri/target/release/bundle/nsis/H.I.D.E_*_x64-setup.exe
-            src-tauri/target/release/bundle/nsis/H.I.D.E_*_x64-setup.exe.sig
-            src-tauri/target/release/bundle/nsis/latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --title "H.I.D.E $TAG" \
+                 --notes-file "docs/RELEASE-NOTES-v${MINOR}.md"
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe" \
+            "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe.sig" \
+            "src-tauri/target/release/bundle/nsis/latest.json"
+          # 保险：标签推送后约 20s 曾两次出现同标签草稿 Release（来源不明，疑似网页端/
+          # GitHub App），资产会传进草稿里对外不可见——上传后强制置为已发布
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
   android-release:
     # 安卓侧载 APK 暂缓发布（2026-09-18 起，先专注桌面端）：恢复发布时删除下面这行 if 即可
