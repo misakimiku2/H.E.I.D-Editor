@@ -2,7 +2,8 @@
  * 渲染副本安全化：内联 <svg> 可交互渲染打破了 <img> blob「脚本不执行」的天然隔离，
  * 由本层等价承接——脚本不解析执行、无内联事件、无 javascript: URL、无外部网络请求。
  * 只处理内存中的克隆（渲染用），权威树与源码文本永不触碰。
- * 同时给每个存活元素盖 data-hed-idx（= 权威树先序下标），画布命中后凭它回到权威元素。
+ * 同时给每个存活元素盖 data-hed-idx（= 权威树先序下标），画布命中后凭它回到权威元素；
+ * stamp: false 用于 PNG 导出（纯净化输出，不留编辑器痕迹）。
  */
 import type { SvgParseResult } from './svgParse';
 
@@ -11,15 +12,14 @@ export const HED_IDX_ATTR = 'data-hed-idx';
 /** xlink:href 的命名空间（解析带 xlink 前缀文档时 DOM 拆成命名空间属性） */
 const XLINK_NS = 'http://www.w3.org/1999/xlink';
 
-const isExternalUrl = (v: string) => /^(https?:|\/\/|file:|ftp:)/i.test(v.trim()) && !v.trim().startsWith('data:');
-
-export function createRenderCopy(res: SvgParseResult): Element {
+export function createRenderCopy(res: SvgParseResult, opts: { stamp?: boolean } = {}): Element {
+  const stamp = opts.stamp ?? true;
   const clone = res.dom.documentElement.cloneNode(true) as Element;
 
   /* 第一遍：先序盖权威树下标（此刻克隆与权威树结构逐位一致） */
   let idx = 0;
   const walk = (el: Element) => {
-    el.setAttribute(HED_IDX_ATTR, String(idx));
+    if (stamp) el.setAttribute(HED_IDX_ATTR, String(idx));
     idx += 1;
     for (const child of Array.from(el.children)) walk(child);
   };

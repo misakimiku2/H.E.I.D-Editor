@@ -96,6 +96,7 @@ export function deserializeTab(raw: TransferableTab, forceNewId = false): FileTa
     csvHeaderOn: typeof r.csvHeaderOn === 'boolean' ? r.csvHeaderOn : undefined,
     csvColWidths: Array.isArray(r.csvColWidths) ? r.csvColWidths.filter((n): n is number => typeof n === 'number') : undefined,
     jsonView: (r.jsonView === 'tree' || r.jsonView === 'split' || r.jsonView === 'text') ? r.jsonView : undefined,
+    svgEdit: r.svgEdit === true ? true : undefined,
   };
 }
 

@@ -137,6 +137,12 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
     setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, jsonView: mode } : t));
   }, [activeTab]);
 
+  /* 切换当前 svg 标签页的可视化编辑模式 */
+  const setSvgEdit = useCallback((on: boolean) => {
+    if (!activeTab) return;
+    setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, svgEdit: on } : t));
+  }, [activeTab]);
+
   /* 当前被标签页引用的真实文件路径（去重）——两条时间线的存活域（关最后一个标签页即丢弃）。
      大文件分块预览标签除外：watcher 基准读取会整读文件，正是要避免的路径 */
   const referencedPaths = useMemo(
@@ -167,6 +173,7 @@ export function useEditorState({ maxDiffEntries, onInternalEdit, initialTabs }: 
     setMdView,
     setCsvState,
     setJsonView,
+    setSvgEdit,
     referencedPaths,
     deleteTab,
   };

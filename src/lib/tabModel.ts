@@ -53,6 +53,8 @@ export interface FileTab extends CsvTabState {
   largePreview?: boolean;
   /** json / yaml 结构树视图状态（未设时按可解析性与性能闸门取默认） */
   jsonView?: JsonViewMode;
+  /** svg 标签页的可视化编辑模式（缺省 false = 纯预览工作台） */
+  svgEdit?: boolean;
   /** 待跳转位置（跨文件搜索结果点击打开）：编辑器挂载后执行一次并清除。
       seq 区分同一标签的连续请求，避免相同位置的二连跳被 React 视为无变化 */
   jumpRequest?: { line: number; col: number; seq: number };

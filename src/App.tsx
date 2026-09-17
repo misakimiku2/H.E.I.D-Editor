@@ -1972,7 +1972,15 @@ export default function App() {
                     </div>
                   </>
                 ) : isSvgTab ? (
-                  <SvgWorkbench content={activeTab.content} isDarkMode={isDarkMode} stacked={isPhone}>
+                  <SvgWorkbench
+                    content={activeTab.content}
+                    isDarkMode={isDarkMode}
+                    stacked={isPhone}
+                    svgEdit={!!activeTab.svgEdit}
+                    onToggleEdit={() => editor.setSvgEdit(!activeTab.svgEdit)}
+                    onContentChange={(v) => editor.updateTabContent(activeTab.id, v)}
+                    exportBase={activeTab.title}
+                  >
                     {renderEditor()}
                   </SvgWorkbench>
                 ) : (
