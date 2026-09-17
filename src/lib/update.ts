@@ -13,7 +13,7 @@ export const LATEST_JSON_URL =
   'https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest/download/latest.json';
 
 /** 版本号兜底（浏览器模式无 getVersion API；与 package.json / tauri.conf.json 同步维护） */
-export const FALLBACK_APP_VERSION = '1.3.0';
+export const FALLBACK_APP_VERSION = '1.3.1';
 
 export interface LatestReleaseInfo {
   version: string;
@@ -174,6 +174,26 @@ export function consumeStartupReleaseNotes(
   next[index] = { ...found, shown: true };
   saveReleaseNotesList(next, storage);
   return found;
+}
+
+/**
+ * 自愈补种：当前版本在文档列表中缺失、而 latest.json 的 version 恰为当前版本时，
+ * 把其说明补种为未展示条目（下次开机展示 + 「关于 → 更新文档」入口出现）。
+ *
+ * 背景：发行说明的「写入」随 v1.3.0 上线，v1.2 及更早客户端点更新时不落盘，
+ * 直升 v1.3 的用户没有任何条目（自动展示与入口都不存在）。补种在启动时静默进行；
+ * latest.json 指向更新版本（有新版可用）或条目已存在时不动作，交给常规流程。
+ * 返回是否发生了补种。
+ */
+export function maybeSeedCurrentVersionNotes(
+  currentVersion: string,
+  info: LatestReleaseInfo,
+  storage: Storage | null = defaultStorage(),
+): boolean {
+  if (info.version !== currentVersion) return false;
+  if (loadReleaseNotesList(storage).some(n => n.version === currentVersion)) return false;
+  saveReleaseNotes({ version: currentVersion, notes: info.notes }, storage);
+  return true;
 }
 
 /**

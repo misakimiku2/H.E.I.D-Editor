@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   compareVersions, consumeStartupReleaseNotes, getIgnoredVersion, isNewerVersion,
-  loadReleaseNotesList, MAX_RELEASE_NOTES, parseLatestJson, saveReleaseNotes, setIgnoredVersion,
-  shouldNotifyUpdate, summarizeNotes,
+  loadReleaseNotesList, maybeSeedCurrentVersionNotes, MAX_RELEASE_NOTES, parseLatestJson,
+  saveReleaseNotes, setIgnoredVersion, shouldNotifyUpdate, summarizeNotes,
 } from './update';
 
 function fakeStorage(): { store: Map<string, string>; getItem(k: string): string | null; setItem(k: string, v: string): void } {
@@ -164,6 +164,52 @@ describe('发行说明历史持久化', () => {
     expect(loadReleaseNotesList(asStorage(s))).toEqual([
       { version: '1.3.0', notes: 'ok', shown: false },
     ]);
+  });
+});
+
+describe('自愈补种（maybeSeedCurrentVersionNotes）', () => {
+  it('latest.json 版本与当前一致且列表缺失 → 补种为未展示条目并置顶', () => {
+    const s = fakeStorage();
+    saveReleaseNotes({ version: '1.2.0', notes: '# 旧版' }, asStorage(s));
+    const seeded = maybeSeedCurrentVersionNotes(
+      '1.3.0', { version: '1.3.0', notes: '# v1.3.0 说明' }, asStorage(s),
+    );
+    expect(seeded).toBe(true);
+    expect(loadReleaseNotesList(asStorage(s))).toEqual([
+      { version: '1.3.0', notes: '# v1.3.0 说明', shown: false },
+      { version: '1.2.0', notes: '# 旧版', shown: false },
+    ]);
+  });
+
+  it('latest.json 指向更新版本（有新版可用）→ 不补种', () => {
+    const s = fakeStorage();
+    const seeded = maybeSeedCurrentVersionNotes(
+      '1.3.0', { version: '1.3.1', notes: '新版说明' }, asStorage(s),
+    );
+    expect(seeded).toBe(false);
+    expect(loadReleaseNotesList(asStorage(s))).toEqual([]);
+  });
+
+  it('列表已有当前版本条目 → 不补种且不重置既有条目的 shown / notes', () => {
+    const s = fakeStorage();
+    saveReleaseNotes({ version: '1.3.0', notes: '原有说明' }, asStorage(s));
+    const first = consumeStartupReleaseNotes('1.3.0', asStorage(s));
+    expect(first).not.toBe(null);
+    const seeded = maybeSeedCurrentVersionNotes(
+      '1.3.0', { version: '1.3.0', notes: '自愈说明' }, asStorage(s),
+    );
+    expect(seeded).toBe(false);
+    const list = loadReleaseNotesList(asStorage(s));
+    expect(list[0]).toEqual({ version: '1.3.0', notes: '原有说明', shown: true });
+  });
+
+  it('notes 缺省时以空说明补种（入口可见，文档显示占位文案）', () => {
+    const s = fakeStorage();
+    const seeded = maybeSeedCurrentVersionNotes('1.3.0', { version: '1.3.0' }, asStorage(s));
+    expect(seeded).toBe(true);
+    expect(loadReleaseNotesList(asStorage(s))[0]).toEqual({
+      version: '1.3.0', notes: '', shown: false,
+    });
   });
 });
 

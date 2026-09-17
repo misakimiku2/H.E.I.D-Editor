@@ -91,7 +91,8 @@ import { useSplitScroll } from './hooks/useSplitScroll';
 import { useUpdater } from './hooks/useUpdater';
 import { useUpdateNotifications } from './hooks/useUpdateNotifications';
 import {
-  consumeStartupReleaseNotes, FALLBACK_APP_VERSION, loadReleaseNotesList,
+  consumeStartupReleaseNotes, FALLBACK_APP_VERSION, LATEST_JSON_URL, loadReleaseNotesList,
+  maybeSeedCurrentVersionNotes, parseLatestJson,
   type StoredReleaseNotes,
 } from './lib/update';
 
@@ -799,12 +800,30 @@ export default function App() {
   }, []);
 
   /* 更新重启后：打开「当前版本」的未展示文档（每个版本只自动打开一次；空说明不开，仍可在「关于」重看）。
-     等会话恢复完成（hydrated）再打开，避免恢复流程抢走焦点/把标签挤到恢复标签之前 */
+     等会话恢复完成（hydrated）再打开，避免恢复流程抢走焦点/把标签挤到恢复标签之前。
+     展示落空时自愈一次：发行说明的写入随 v1.3.0 上线，旧版直升上来的客户端列表为空——
+     经 http_get 抓 latest.json，其 version 恰为当前版本时补种（有新版在先则不动作） */
+  const notesSeedAttemptedRef = useRef(false);
   useEffect(() => {
     if (!isTauri || !hydrated) return;
     const pending = consumeStartupReleaseNotes(appVersion);
     setReleaseNotesList(loadReleaseNotesList());
-    if (pending && pending.notes.trim().length > 0) openReleaseNotesTab(pending);
+    if (pending && pending.notes.trim().length > 0) { openReleaseNotesTab(pending); return; }
+    if (notesSeedAttemptedRef.current) return;
+    notesSeedAttemptedRef.current = true;
+    void (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const res = await invoke<{ text: string }>('http_get', { url: LATEST_JSON_URL });
+        const info = parseLatestJson(res.text);
+        if (!info) return;
+        if (maybeSeedCurrentVersionNotes(appVersion, info)) {
+          setReleaseNotesList(loadReleaseNotesList());
+          const seeded = consumeStartupReleaseNotes(appVersion);
+          if (seeded && seeded.notes.trim().length > 0) openReleaseNotesTab(seeded);
+        }
+      } catch { /* 自愈静默失败：浏览器模式无命令、离线、网络异常均不提示 */ }
+    })();
   }, [appVersion, hydrated, openReleaseNotesTab]);
   /* 自动检查发现新版本时，通知编排 hook 已把文档落盘——同步「关于」入口的可用态 */
   useEffect(() => {
