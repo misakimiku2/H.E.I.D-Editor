@@ -78,3 +78,28 @@ export function deletePatch(source: string, el: SvgElementInfo): SourcePatch | n
   }
   return { start: el.start, end: el.end, text: '' };
 }
+
+/* ---- 位移合成：拖拽/方向键移动 = 把增量并进 transform 的前导 translate ---- */
+
+/** 数值格式化：收敛浮点尘埃（两位小数），整数不带小数点，-0 归 0 */
+const fmtNum = (n: number): string => String(Math.round(n * 100) / 100);
+
+/**
+ * 把增量位移合成进 transform 字符串：已有前导 translate 则数值相加（反复拖拽不堆积），
+ * 否则前插一个新的 translate，原有变换原样跟在后面。
+ */
+export function composeTranslate(existing: string | null, dx: number, dy: number): string {
+  const fresh = `translate(${fmtNum(dx)} ${fmtNum(dy)})`;
+  if (!existing || !existing.trim()) return fresh;
+  const m = existing.match(/^\s*translate\s*\(\s*([^,()\s]+)\s*(?:,?\s*([^,()\s]+)\s*)?\)\s*(.*)$/);
+  if (!m) return `${fresh} ${existing.trim()}`;
+  const x = parseFloat(m[1]) + dx;
+  const y = (m[2] !== undefined ? parseFloat(m[2]) : 0) + dy;
+  const rest = m[3].trim();
+  return `translate(${fmtNum(x)} ${fmtNum(y)})${rest ? ` ${rest}` : ''}`;
+}
+
+/** composeTranslate 的 DOM 便捷形式：直接写回元素的 transform 属性 */
+export function applyTranslate(el: Element, dx: number, dy: number): void {
+  el.setAttribute('transform', composeTranslate(el.getAttribute('transform'), dx, dy));
+}
