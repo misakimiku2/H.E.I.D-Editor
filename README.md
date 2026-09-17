@@ -6,7 +6,7 @@
 
 **Highlighting Intelligent Document Editor**
 
-秒开的轻量代码 / 文档编辑器 —— 安装包约 5-6 MB，深浅色主题，30+ 语言语法高亮，Markdown / CSV / SVG / 图片开箱即用
+秒开的轻量代码 / 文档编辑器 —— 安装包约 7 MB，深浅色主题，30+ 语言语法高亮，Markdown / CSV / SVG / 图片开箱即用
 
 [![Release](https://img.shields.io/github/v/release/misakimiku2/H.E.I.D-Editor?logo=github)](https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest)
 [![CI](https://github.com/misakimiku2/H.E.I.D-Editor/actions/workflows/ci.yml/badge.svg)](https://github.com/misakimiku2/H.E.I.D-Editor/actions/workflows/ci.yml)
@@ -225,4 +225,4 @@ npm run tauri:dev    # 桌面窗口 + 热更新
 
 ## 🎯 设计原则
 
-H.I.D.E 的定位是「**秒开、2~3 MB、够用的编辑器**」。明确不做：插件系统、LSP、内嵌终端、Git 集成、账号云同步、AI 面板常驻 —— 需要这些时请用 VS Code；规划详见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+H.I.D.E 的定位是「**秒开、约 7 MB、够用的编辑器**」。明确不做：插件系统、LSP、内嵌终端、Git 集成、账号云同步、AI 面板常驻 —— 需要这些时请用 VS Code；规划详见 [docs/ROADMAP.md](docs/ROADMAP.md)。
