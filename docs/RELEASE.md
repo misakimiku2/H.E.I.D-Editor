@@ -35,9 +35,11 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-> ⚠️ 标签推送后**不要**在网页端提前打开「Draft a new release」选择该标签——
-> GitHub 选定标签那一刻就会创建草稿 Release，会让 CI 的发布步骤找不到/建不了
-> Release（v1.3.0 发布时踩过）。发布页在 CI 完成后自动出现。
+> 💡 排查提示：Release 的 `created_at` 是标签所指向提交的时间（GitHub 惯例），
+> 不是发布对象的创建时刻；若 Release 停在草稿态（draft），`releases/tags/{tag}`
+> 对未鉴权请求会 404、`releases/latest` 也不会指向它——v1.3.1 发布时
+> softprops 创建草稿后上传失败未及发布，即为此现象（已改用 gh CLI 直接创建
+> 已发布 Release，不会再现）。
 
 推送 `v*` 标签触发 `.github/workflows/release.yml`：
 

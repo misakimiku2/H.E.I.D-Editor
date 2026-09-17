@@ -80,8 +80,10 @@ jobs:
             "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe" \
             "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe.sig" \
             "src-tauri/target/release/bundle/nsis/latest.json"
-          # 保险：标签推送后约 20s 曾两次出现同标签草稿 Release（来源不明，疑似网页端/
-          # GitHub App），资产会传进草稿里对外不可见——上传后强制置为已发布
+          # 兜底：草稿形态的 Release 对外不可见（softprops 等以草稿创建、中途失败
+          # 就永远停在草稿态——v1.3.1 即如此）。gh CLI 直接创建已发布 Release，
+          # 此处强制发布仅为防御未来变动。注意 Release 的 created_at 是标签所指
+          # 提交的时间，排查问题时不要误读为草稿创建时刻。
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
   android-release:
