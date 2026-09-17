@@ -128,3 +128,25 @@ export function parseSvg(source: string): SvgParseResult | null {
   }
   return { dom, elements };
 }
+
+/**
+ * svg 根的固有尺寸（画布铺排用，语义对齐 <img> 的 naturalWidth/Height）：
+ * 可解析的 width/height 属性优先（纯数值或 px），否则取 viewBox 宽高，都没有返回 null。
+ */
+export function getIntrinsicSize(root: Element): { width: number; height: number } | null {
+  const dim = (v: string | null): number | null => {
+    if (v === null) return null;
+    const m = v.trim().match(/^(\d+(?:\.\d+)?)(?:px)?$/);
+    return m ? parseFloat(m[1]) : null;
+  };
+  const width = dim(root.getAttribute('width'));
+  const height = dim(root.getAttribute('height'));
+  if (width !== null && height !== null) return { width, height };
+  const vb = (root.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/);
+  if (vb.length === 4) {
+    const vw = parseFloat(vb[2]);
+    const vh = parseFloat(vb[3]);
+    if (Number.isFinite(vw) && Number.isFinite(vh) && vw > 0 && vh > 0) return { width: vw, height: vh };
+  }
+  return null;
+}

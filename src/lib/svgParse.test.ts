@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { parseSvg, type SvgElementInfo } from './svgParse';
+import { getIntrinsicSize, parseSvg, type SvgElementInfo } from './svgParse';
 
 /** 从解析结果取第 i 个（先序）元素区间切片 */
 const slice = (src: string, els: SvgElementInfo[], i: number) => src.slice(els[i].start, els[i].end);
@@ -121,5 +121,27 @@ describe('parseSvg 降级', () => {
 
   it('根元素不是 svg 返回 null', () => {
     expect(parseSvg('<html><body></body></html>')).toBeNull();
+  });
+});
+
+describe('getIntrinsicSize', () => {
+  const rootOf = (src: string) => parseSvg(src)!.dom.documentElement;
+
+  it('width/height 数值属性优先（含 px 后缀）', () => {
+    expect(getIntrinsicSize(rootOf('<svg width="512" height="256"/>'))).toEqual({ width: 512, height: 256 });
+    expect(getIntrinsicSize(rootOf('<svg width="512px" height="256px"/>'))).toEqual({ width: 512, height: 256 });
+  });
+
+  it('无宽高时取 viewBox 尺寸', () => {
+    expect(getIntrinsicSize(rootOf('<svg viewBox="0 0 24 48"/>'))).toEqual({ width: 24, height: 48 });
+  });
+
+  it('百分比/无法解析的宽高回退 viewBox', () => {
+    expect(getIntrinsicSize(rootOf('<svg width="100%" height="100%" viewBox="0 0 10 20"/>'))).toEqual({ width: 10, height: 20 });
+  });
+
+  it('什么都没有返回 null（调用方用 300×150 兜底）', () => {
+    expect(getIntrinsicSize(rootOf('<svg/>'))).toBeNull();
+    expect(getIntrinsicSize(rootOf('<svg width="50"/>'))).toBeNull();
   });
 });
