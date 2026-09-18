@@ -2,6 +2,8 @@
  * 跨文件搜索（桌面）：Rust search_in_dir 命令封装 + 结果分组/高亮区间纯函数。
  * 按需触发、无索引、无常驻后台——一次调用一次全量扫描（黑名单目录与
  * >32MB / 二进制文件在 Rust 侧跳过，计数随结果返回）。
+ * 进度：Rust 限频更新快照，前端按 searchId 轮询 search_in_dir_progress；
+ * 取消：search_in_dir_cancel 置位标志，扫描任务逐文件检查快速排空。
  */
 
 export interface FileHit {
@@ -28,6 +30,8 @@ export interface DirSearchResult {
   skippedBinary: number;
   skippedDirs: number;
   filesCapped: boolean;
+  /** 收到取消请求提前结束（结果不完整，应丢弃） */
+  cancelled: boolean;
   error: string | null;
 }
 
@@ -37,11 +41,23 @@ export interface DirSearchOptions {
   wholeWord: boolean;
 }
 
+/** 进度快照（轮询 search_in_dir_progress 的返回；id 不存在/已结束时为 null） */
+export interface SearchProgress {
+  id: number;
+  /** 已处理文件数（含二进制/超限跳过） */
+  filesDone: number;
+  /** 枚举出的文件总数 */
+  filesTotal: number;
+  /** 实时累计命中数 */
+  matchTotal: number;
+}
+
 /** 触发目录搜索（桌面 Tauri；返回 error 字段而非 reject 正则编译错误） */
 export async function searchInDir(
   root: string,
   query: string,
   opts: DirSearchOptions,
+  searchId: number,
 ): Promise<DirSearchResult> {
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke<DirSearchResult>('search_in_dir', {
@@ -50,7 +66,20 @@ export async function searchInDir(
     caseSensitive: opts.caseSensitive,
     regexp: opts.regexp,
     wholeWord: opts.wholeWord,
+    searchId,
   });
+}
+
+/** 轮询运行中搜索的进度快照（搜索已结束/未注册时返回 null） */
+export async function searchProgress(searchId: number): Promise<SearchProgress | null> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<SearchProgress | null>('search_in_dir_progress', { searchId });
+}
+
+/** 取消运行中的搜索（Rust 侧按 id 置位取消标志，扫描任务快速排空） */
+export async function cancelInDirSearch(searchId: number): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('search_in_dir_cancel', { searchId });
 }
 
 export interface FileGroup {

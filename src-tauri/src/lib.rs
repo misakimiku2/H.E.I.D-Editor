@@ -203,7 +203,11 @@ pub fn run() {
             #[cfg(desktop)]
             large_file::file_size,
             #[cfg(desktop)]
-            search::search_in_dir
+            search::search_in_dir,
+            #[cfg(desktop)]
+            search::search_in_dir_cancel,
+            #[cfg(desktop)]
+            search::search_in_dir_progress
         ])
         .setup(|app| {
             #[cfg(desktop)]

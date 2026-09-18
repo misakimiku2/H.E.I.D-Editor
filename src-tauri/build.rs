@@ -22,6 +22,8 @@ fn main() {
             "fs_delete",
             "fs_reveal",
             "search_in_dir",
+            "search_in_dir_cancel",
+            "search_in_dir_progress",
             "create_document_window",
             "take_window_bootstrap",
             "begin_tab_drag",

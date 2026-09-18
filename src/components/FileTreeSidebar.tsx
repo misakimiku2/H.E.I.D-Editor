@@ -16,8 +16,8 @@ import {
   type DirLister, type TreeNode,
 } from '../lib/fileTree';
 import {
-  hitDisplay, pageGroups, searchInDir, HITS_PER_PAGE,
-  type DirSearchOptions, type DirSearchResult, type FileHit,
+  hitDisplay, pageGroups, searchInDir, searchProgress, cancelInDirSearch, HITS_PER_PAGE,
+  type DirSearchOptions, type DirSearchResult, type FileHit, type SearchProgress,
 } from '../lib/dirSearch';
 import { fsMkdir, fsRename, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
 import { writeLocalPath } from '../lib/fileIO';
@@ -61,6 +61,49 @@ const lister: DirLister | null = getDirLister(
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window,
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window && /Android/i.test(window.navigator.userAgent),
 );
+
+/* ---- 树行虚拟化：扁平可见行 + 视口窗口渲染（大目录数千行时只画可视区附近） ---- */
+const TREE_ROW_H = 28; /* 树行统一 h-7（含命名/错误/加载行） */
+const TREE_OVERSCAN = 12; /* 视口上下额外渲染的行数 */
+const TREE_ALL_ROWS_LIMIT = 300; /* 行数不超过该值直接全量渲染，免滚动窗口计算 */
+
+type TreeRow =
+  | { kind: 'node'; key: string; node: TreeNode; depth: number }
+  | { kind: 'create'; key: string; parentPath: string; isDir: boolean; depth: number }
+  | { kind: 'error'; key: string; node: TreeNode; depth: number }
+  | { kind: 'loading'; key: string; depth: number };
+
+/**
+ * 展开的树扁平化为行序列（行序与旧 renderNode 递归渲染一致：目录行后跟
+ * 命名行/错误行/加载行/子级行；根目录内新建的命名行置顶）。
+ */
+export function flattenTreeRows(
+  root: TreeNode,
+  creating: { parentPath: string; isDir: boolean } | null,
+): TreeRow[] {
+  const rows: TreeRow[] = [];
+  if (creating?.parentPath === root.path) {
+    rows.push({ kind: 'create', key: `create:${root.path}`, parentPath: root.path, isDir: creating.isDir, depth: 0 });
+  }
+  const walk = (node: TreeNode, depth: number) => {
+    rows.push({ kind: 'node', key: node.path, node, depth });
+    if (!node.isDir || !node.expanded) return;
+    if (creating && creating.parentPath === node.path && node.path !== root.path) {
+      rows.push({ kind: 'create', key: `create:${node.path}`, parentPath: node.path, isDir: creating.isDir, depth: depth + 1 });
+    }
+    if (node.error) {
+      rows.push({ kind: 'error', key: `error:${node.path}`, node, depth: depth + 1 });
+      return;
+    }
+    if (node.children === null) {
+      rows.push({ kind: 'loading', key: `loading:${node.path}`, depth: depth + 1 });
+      return;
+    }
+    node.children.forEach(c => walk(c, depth + 1));
+  };
+  walk(root, 0);
+  return rows;
+}
 
 /** 新建/重命名共用的内联命名行：Enter 确认、Esc 取消、失焦确认（确认/取消只生效一次） */
 function NameRow({
@@ -157,6 +200,10 @@ export function FileTreeSidebar({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const resultsScrollRef = useRef<HTMLDivElement | null>(null);
   const searchSeqRef = useRef(0);
+  /* 会话内递增的搜索 id 与在途搜索 id（0 = 无）：进度轮询/取消都以它关联 */
+  const searchIdRef = useRef(0);
+  const inFlightIdRef = useRef(0);
+  const [progress, setProgress] = useState<SearchProgress | null>(null);
 
   /* 进入搜索态自动聚焦输入框 */
   useEffect(() => {
@@ -198,37 +245,97 @@ export function FileTreeSidebar({
     saveTreeSidebarWidth(widthRef.current);
   }, []);
 
-  /* 根目录变化：搜索结果基于旧根，全部失效 */
+  /** 取消在途搜索：使结果失效并通知 Rust 排空扫描任务 */
+  const cancelSearch = useCallback(() => {
+    const searchId = inFlightIdRef.current;
+    if (!searchId) return;
+    searchSeqRef.current++;
+    inFlightIdRef.current = 0;
+    setSearchingBusy(false);
+    setProgress(null);
+    void cancelInDirSearch(searchId).catch(() => { /* 取消失败仅意味着扫描自然跑完 */ });
+  }, []);
+
+  /* 根目录变化：搜索结果基于旧根，全部失效；在途搜索直接取消 */
   useEffect(() => {
     setSearching(false);
     setQuery('');
     setResult(null);
-  }, [rootPath]);
+    setProgress(null);
+    cancelSearch();
+  }, [rootPath, cancelSearch]);
 
   const exitSearch = useCallback(() => {
+    cancelSearch();
     setSearching(false);
     setQuery('');
     setResult(null);
-  }, []);
+    setProgress(null);
+  }, [cancelSearch]);
 
-  /** 按需触发：Enter 时一次全量扫描（无索引、无常驻后台）；新结果回到第 1 页 */
+  /** 按需触发：Enter 时一次全量扫描（无索引、无常驻后台）；新结果回到第 1 页。
+      扫描期间 150ms 轮询进度快照（已处理文件数/实时命中数），可随时取消 */
   const runSearch = useCallback(async () => {
     const q = query.trim();
     if (!q) { setResult(null); return; }
     const seq = ++searchSeqRef.current;
+    const searchId = ++searchIdRef.current;
+    inFlightIdRef.current = searchId;
     setSearchingBusy(true);
+    setProgress(null);
+    /* 进度轮询：仅在搜索在途期间运行，随取消/完成/失效自动停止 */
+    void (async () => {
+      while (inFlightIdRef.current === searchId) {
+        await new Promise(r => setTimeout(r, 150));
+        if (inFlightIdRef.current !== searchId) break;
+        try {
+          const p = await searchProgress(searchId);
+          if (p && inFlightIdRef.current === searchId) setProgress(p);
+        } catch { /* 单次轮询失败忽略，下个周期重试 */ }
+      }
+    })();
     try {
-      const r = await searchInDir(rootPath, q, searchOpts);
-      if (searchSeqRef.current === seq) { setResult(r); setPage(0); }
+      const r = await searchInDir(rootPath, q, searchOpts, searchId);
+      if (searchSeqRef.current === seq) { setResult(r.cancelled ? null : r); setPage(0); }
     } catch (e) {
       if (searchSeqRef.current === seq) {
-        setResult({ matches: [], filesScanned: 0, filesMatched: 0, matchTotal: 0, truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, error: String(e) });
+        setResult({ matches: [], filesScanned: 0, filesMatched: 0, matchTotal: 0, truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: false, error: String(e) });
         setPage(0);
       }
     } finally {
-      if (searchSeqRef.current === seq) setSearchingBusy(false);
+      if (searchSeqRef.current === seq) {
+        setSearchingBusy(false);
+        setProgress(null);
+      }
+      if (inFlightIdRef.current === searchId) inFlightIdRef.current = 0;
     }
   }, [query, rootPath, searchOpts]);
+
+  /* ---- 树体视口窗口：跟踪滚动与可视高度，大目录只渲染可视区附近的行 ---- */
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(0);
+  const treeScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const onTreeScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrollTop(e.currentTarget.scrollTop);
+  }, []);
+
+  /* 视口高度跟踪（jsdom / 未打开时为 0 → 回退全量渲染）；搜索态与关闭态树体不在 DOM */
+  useEffect(() => {
+    const el = treeScrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const update = () => setViewportH(el.clientHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open, searching]);
+
+  /* 根目录切换：树体滚动位置与窗口态归零 */
+  useEffect(() => {
+    treeScrollRef.current?.scrollTo?.({ top: 0 });
+    setScrollTop(0);
+  }, [rootPath]);
 
   const dirtyMap = useMemo(() => {
     const m = new Map<string, boolean>();
@@ -289,17 +396,28 @@ export function FileTreeSidebar({
     void refreshTree();
   }, [refreshTree]);
 
-  /* 目录变更自动刷新（桌面）：抽屉打开期间递归监视根目录，外部增删改经插件去抖
-     （400ms）后重载已加载层，展开态不丢。监视失败静默退化为手动刷新；安卓 SAF 无此能力 */
+  /* 目录变更自动刷新（桌面）：抽屉打开期间递归监视根目录。插件侧为纯 notify
+     监听（其 debounce 路径会主线程同步扫全树，大目录秒级冻结 UI），400ms 去抖
+     在此完成；外部增删改经去抖后重载已加载层，展开态不丢。监视失败静默退化为
+     手动刷新；安卓 SAF 无此能力 */
   useEffect(() => {
     if (!open || !rootPath || !lister?.watch) return;
     let disposed = false;
     let unwatch: (() => void) | null = null;
-    lister.watch(rootPath, () => { if (!disposed) void refreshTree(); })
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    lister.watch(rootPath, () => {
+      if (disposed) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        if (!disposed) void refreshTree();
+      }, 400);
+    })
       .then(u => { if (disposed) u(); else unwatch = u; })
       .catch(() => { /* 监视不可用：保持手动刷新 */ });
     return () => {
       disposed = true;
+      if (timer) clearTimeout(timer);
       unwatch?.();
     };
   }, [open, rootPath, refreshTree]);
@@ -425,7 +543,52 @@ export function FileTreeSidebar({
     setMenu({ x: e.clientX, y: e.clientY, items });
   }, [canManage, clip, renaming, rootPath, startCreate, handleDelete, handlePaste, opFailed, refreshTree, t]);
 
-  const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
+  /* 单行渲染（行序与子行展开由 flattenTreeRows 决定；重命名行原位替换节点行） */
+  const renderRow = (row: TreeRow): React.ReactNode => {
+    if (row.kind === 'create') {
+      return (
+        <NameRow
+          depth={row.depth}
+          isDir={row.isDir}
+          isDarkMode={isDarkMode}
+          placeholder={t('tree.namePlaceholder')}
+          onCommit={(name) => void commitCreate(name)}
+          onCancel={() => setCreating(null)}
+        />
+      );
+    }
+    if (row.kind === 'error') {
+      return (
+        <div style={{ paddingLeft: 20 + row.depth * 12 }} className="mx-1.5 w-[calc(100%-12px)] pr-2 h-7 text-[10px] text-red-500 flex items-center gap-1">
+          <span className="truncate flex-1">{row.node.error}</span>
+          <button onClick={() => handleDirClick({ ...row.node, expanded: false })} className="opacity-70 hover:opacity-100">
+            <RefreshCw size={10} />
+          </button>
+        </div>
+      );
+    }
+    if (row.kind === 'loading') {
+      return (
+        <div style={{ paddingLeft: 20 + row.depth * 12 }} className="mx-1.5 w-[calc(100%-12px)] pr-2 h-7 flex items-center text-zinc-500">
+          <Loader2 size={11} className="animate-spin" />
+        </div>
+      );
+    }
+    const node = row.node;
+    if (renaming?.path === node.path) {
+      return (
+        <NameRow
+          depth={row.depth}
+          isDir={node.isDir}
+          initial={node.name}
+          selectStem
+          isDarkMode={isDarkMode}
+          placeholder={t('tree.namePlaceholder')}
+          onCommit={(name) => void commitRename(name)}
+          onCancel={() => setRenaming(null)}
+        />
+      );
+    }
     const active = tabs.some(tb => tb.id === activeTabId && tb.path === node.path);
     /* 行样式与右键菜单项一致：左右留边距的圆角行，悬停同色调 */
     const rowClass = cn(
@@ -435,84 +598,56 @@ export function FileTreeSidebar({
         : (isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700'),
     );
     return (
-      <div key={node.path}>
-        {renaming?.path === node.path ? (
-          <NameRow
-            depth={depth}
-            isDir={node.isDir}
-            initial={node.name}
-            selectStem
-            isDarkMode={isDarkMode}
-            placeholder={t('tree.namePlaceholder')}
-            onCommit={(name) => void commitRename(name)}
-            onCancel={() => setRenaming(null)}
-          />
+      <button
+        onClick={() => {
+          if (node.isDir) handleDirClick(node);
+          else if (isImagePath(node.path) && onOpenImage) onOpenImage(node.path);
+          else onOpenFile(node.path);
+        }}
+        onContextMenu={(e) => openMenu(e, node)}
+        onMouseEnter={handleRowEnter}
+        style={{ paddingLeft: 8 + row.depth * 12 }}
+        className={rowClass}
+        title={node.path}
+      >
+        {node.isDir ? (
+          node.expanded ? <ChevronDown size={12} className="shrink-0 opacity-60" /> : <ChevronRight size={12} className="shrink-0 opacity-60" />
         ) : (
-          <button
-            onClick={() => {
-              if (node.isDir) handleDirClick(node);
-              else if (isImagePath(node.path) && onOpenImage) onOpenImage(node.path);
-              else onOpenFile(node.path);
-            }}
-            onContextMenu={(e) => openMenu(e, node)}
-            onMouseEnter={handleRowEnter}
-            style={{ paddingLeft: 8 + depth * 12 }}
-            className={rowClass}
-            title={node.path}
-          >
-            {node.isDir ? (
-              node.expanded ? <ChevronDown size={12} className="shrink-0 opacity-60" /> : <ChevronRight size={12} className="shrink-0 opacity-60" />
-            ) : (
-              <span className="w-3 shrink-0" />
-            )}
-            {node.isDir ? (
-              <Folder size={13} className="shrink-0 opacity-70" />
-            ) : isImagePath(node.path) || isSvgPath(node.path) ? (
-              <FileImage size={13} className="shrink-0 opacity-70" />
-            ) : (
-              <FileText size={13} className="shrink-0 opacity-60" />
-            )}
-            <span className="heid-name-clip truncate flex-1 min-w-0">
-              <span className="heid-name-text inline-block whitespace-nowrap">{node.name}</span>
-            </span>
-            {dirtyMap.get(node.path) && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />}
-          </button>
+          <span className="w-3 shrink-0" />
         )}
-        {node.isDir && node.expanded && (
-          <>
-            {creating?.parentPath === node.path && (
-              <NameRow
-                depth={depth + 1}
-                isDir={creating.isDir}
-                isDarkMode={isDarkMode}
-                placeholder={t('tree.namePlaceholder')}
-                onCommit={(name) => void commitCreate(name)}
-                onCancel={() => setCreating(null)}
-              />
-            )}
-            {node.error ? (
-              <div style={{ paddingLeft: 20 + depth * 12 }} className="mx-1.5 w-[calc(100%-12px)] pr-2 py-0.5 text-[10px] text-red-500 flex items-center gap-1">
-                <span className="truncate flex-1">{node.error}</span>
-                <button onClick={() => handleDirClick({ ...node, expanded: false })} className="opacity-70 hover:opacity-100">
-                  <RefreshCw size={10} />
-                </button>
-              </div>
-            ) : node.children === null ? (
-              <div style={{ paddingLeft: 20 + depth * 12 }} className="mx-1.5 py-1 text-zinc-500">
-                <Loader2 size={11} className="animate-spin" />
-              </div>
-            ) : (
-              node.children.map(c => renderNode(c, depth + 1))
-            )}
-          </>
+        {node.isDir ? (
+          <Folder size={13} className="shrink-0 opacity-70" />
+        ) : isImagePath(node.path) || isSvgPath(node.path) ? (
+          <FileImage size={13} className="shrink-0 opacity-70" />
+        ) : (
+          <FileText size={13} className="shrink-0 opacity-60" />
         )}
-      </div>
+        <span className="heid-name-clip truncate flex-1 min-w-0">
+          <span className="heid-name-text inline-block whitespace-nowrap">{node.name}</span>
+        </span>
+        {dirtyMap.get(node.path) && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />}
+      </button>
     );
   };
+
+  /* 树扁平行（展开区全部入列；空根目录走占位文案不进列表） */
+  const emptyRoot = !!tree && tree.children !== null && tree.children.length === 0 && !creating;
+  const treeRows = useMemo(
+    () => (tree && !emptyRoot ? flattenTreeRows(tree, creating) : []),
+    [tree, creating, emptyRoot],
+  );
 
   if (!open) return null;
 
   /* ---- 搜索态渲染 ---- */
+
+  /* 窗口切片：视口未知（jsdom/隐藏）或行数少时全量渲染 */
+  const renderAll = viewportH <= 0 || treeRows.length <= TREE_ALL_ROWS_LIMIT;
+  const firstIndex = renderAll ? 0 : Math.max(0, Math.floor(scrollTop / TREE_ROW_H) - TREE_OVERSCAN);
+  const lastIndex = renderAll
+    ? treeRows.length
+    : Math.min(treeRows.length, Math.ceil((scrollTop + viewportH) / TREE_ROW_H) + TREE_OVERSCAN);
+  const visibleRows = renderAll ? treeRows : treeRows.slice(firstIndex, lastIndex);
 
   const searchOptBtn = (active: boolean) => cn(
     'h-6 px-2 rounded-md text-[10px] font-semibold font-mono transition-colors',
@@ -568,7 +703,21 @@ export function FileTreeSidebar({
       return (
         <div className="px-3 py-6 text-center text-[11px] opacity-60 flex flex-col items-center gap-2">
           <Loader2 size={13} className="animate-spin" />
-          {t('tree.searchScanning')}
+          <div className="tabular-nums">
+            {progress && progress.filesTotal > 0
+              ? t('tree.searchProgress', { done: progress.filesDone, total: progress.filesTotal, hits: progress.matchTotal })
+              : t('tree.searchScanning')}
+          </div>
+          <button
+            onClick={cancelSearch}
+            className={cn(
+              'h-6 px-2 rounded-md text-[10px] flex items-center gap-1 transition-colors',
+              isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500',
+            )}
+          >
+            <X size={11} />
+            {t('common.cancel')}
+          </button>
         </div>
       );
     }
@@ -583,7 +732,7 @@ export function FileTreeSidebar({
       <>
         <div className="px-3 pt-1.5 pb-1 text-[10px] opacity-50 shrink-0">
           {t('tree.searchSummary', { files: result.filesMatched, total: result.matchTotal, scanned: result.filesScanned })}
-          {result.truncated && ` · ${t('tree.searchCapped', { max: result.matches.length })}`}
+          {result.truncated && ` · ${t('tree.searchCapped', { shown: result.matches.length, total: result.matchTotal })}`}
         </div>
         {paged?.groups.map(g => (
           <div key={g.path}>
@@ -733,7 +882,8 @@ export function FileTreeSidebar({
             </div>
           </div>
         )}
-        {/* 树体（空白处右键 = 根目录菜单）；搜索态时让位给结果列表 */}
+        {/* 树体（空白处右键 = 根目录菜单）；搜索态时让位给结果列表。
+            虚拟化：总高 = 行数 × 行高的撑高层内绝对定位，只渲染窗口切片 */}
         {searching ? (
           <>
             {paged && paged.pageTotal > 1 && (
@@ -764,26 +914,28 @@ export function FileTreeSidebar({
             </div>
           </>
         ) : (
-          <div className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1" onContextMenu={(e) => openMenu(e, null)}>
+          <div
+            ref={treeScrollRef}
+            className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1"
+            onScroll={onTreeScroll}
+            onContextMenu={(e) => openMenu(e, null)}
+          >
             {tree ? (
-              <>
-                {/* 根目录内新建：命名行置顶（目录内的在对应目录展开区里） */}
-                {creating?.parentPath === rootPath && (
-                  <NameRow
-                    depth={0}
-                    isDir={creating.isDir}
-                    isDarkMode={isDarkMode}
-                    placeholder={t('tree.namePlaceholder')}
-                    onCommit={(name) => void commitCreate(name)}
-                    onCancel={() => setCreating(null)}
-                  />
-                )}
-                {tree.children !== null && tree.children.length === 0 && !creating ? (
-                  <div className="px-3 py-6 text-center text-[11px] opacity-50">{t('tree.empty')}</div>
-                ) : (
-                  renderNode(tree, 0)
-                )}
-              </>
+              emptyRoot ? (
+                <div className="px-3 py-6 text-center text-[11px] opacity-50">{t('tree.empty')}</div>
+              ) : (
+                <div className="heid-tree-spacer relative" style={{ height: treeRows.length * TREE_ROW_H }}>
+                  {visibleRows.map((row, i) => (
+                    <div
+                      key={row.key}
+                      className="absolute inset-x-0"
+                      style={{ top: (firstIndex + i) * TREE_ROW_H, height: TREE_ROW_H }}
+                    >
+                      {renderRow(row)}
+                    </div>
+                  ))}
+                </div>
+              )
             ) : (
               <div className="px-3 py-6 text-center">
                 <Loader2 size={13} className="animate-spin mx-auto opacity-50" />

@@ -263,8 +263,13 @@ export const tauriDirLister: DirLister = {
     }));
   },
   async watch(rootPath, onChange) {
-    const { watch } = await import('@tauri-apps/plugin-fs');
-    return watch(rootPath, () => onChange(), { recursive: true, delayMs: 400 });
+    /* 必须用 watchImmediate：watch() 的 JS 封装会硬编码注入 delayMs=2000，
+       走 notify-debouncer-full——其 watch() 在主线程同步扫全树建状态缓存
+       （7.7 万文件目录实测冻结 4.7~8.5s，诊断日志已实锤）。watchImmediate
+       强制 delayMs=undefined，走纯 notify 递归监听（亚毫秒建立）；去抖由
+       调用方在 JS 侧完成。 */
+    const { watchImmediate } = await import('@tauri-apps/plugin-fs');
+    return watchImmediate(rootPath, () => onChange(), { recursive: true });
   },
   displayName(rootPath) {
     return pathTail(rootPath);

@@ -64,6 +64,8 @@
     "allow-fs-copy",
     "allow-fs-delete",
     "allow-fs-reveal",
-    "allow-search-in-dir"
+    "allow-search-in-dir",
+    "allow-search-in-dir-cancel",
+    "allow-search-in-dir-progress"
   ]
 }

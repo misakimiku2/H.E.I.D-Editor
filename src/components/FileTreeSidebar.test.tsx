@@ -84,7 +84,7 @@ describe('FileTreeSidebar 跨文件搜索', () => {
             { path: 'C:/proj/docs/b.md', line: 1, col: 2, len: 6, text: '# needle doc', offset: 0 },
           ],
           filesScanned: 12, filesMatched: 2, matchTotal: 3,
-          truncated: false, skippedLarge: 0, skippedBinary: 1, skippedDirs: 2, filesCapped: false,
+          truncated: false, skippedLarge: 0, skippedBinary: 1, skippedDirs: 2, filesCapped: false, cancelled: false,
           error: null,
         });
       }
@@ -107,6 +107,7 @@ describe('FileTreeSidebar 跨文件搜索', () => {
     /* invoke 参数与分组渲染 */
     expect(mockInvoke).toHaveBeenCalledWith('search_in_dir', {
       root: 'C:/proj', query: 'needle', caseSensitive: false, regexp: false, wholeWord: false,
+      searchId: expect.any(Number),
     });
     const text = container!.textContent ?? '';
     expect(text).toContain('src/a.ts');
@@ -125,7 +126,7 @@ describe('FileTreeSidebar 跨文件搜索', () => {
       if (cmd === 'search_in_dir') {
         return Promise.resolve({
           matches: [], filesScanned: 0, filesMatched: 0, matchTotal: 0,
-          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false,
+          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: false,
           error: 'regex parse error: unclosed group',
         });
       }
@@ -149,6 +150,49 @@ describe('FileTreeSidebar 跨文件搜索', () => {
     });
     await act(async () => { await new Promise(r => setTimeout(r, 20)); });
     expect(container!.textContent).toContain('regex parse error');
+  });
+
+  it('搜索中显示取消按钮：取消调用 cancel 命令并退出忙碌态，迟到结果被丢弃', async () => {
+    let resolveSearch: (v: unknown) => void = () => {};
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'search_in_dir') {
+        return new Promise((resolve) => { resolveSearch = resolve; });
+      }
+      if (cmd === 'search_in_dir_cancel') return Promise.resolve(null);
+      return Promise.reject(new Error(`unexpected cmd: ${cmd}`));
+    });
+
+    render(<FileTreeSidebar {...props()} />);
+    act(() => { (container!.querySelector('button[title="tree.searchInFiles"]') as HTMLButtonElement).click(); });
+    const input = container!.querySelector('input') as HTMLInputElement;
+    act(() => { setInputValue(input, 'needle'); });
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await act(async () => { await new Promise(r => setTimeout(r, 10)); });
+    expect((container!.textContent ?? '').includes('tree.searchScanning')).toBe(true);
+
+    /* 取消：调用 cancel 命令，退出忙碌态 */
+    const cancelBtn = Array.from(container!.querySelectorAll('button'))
+      .find(b => b.textContent?.includes('common.cancel')) as HTMLButtonElement;
+    expect(cancelBtn).toBeTruthy();
+    act(() => { cancelBtn.click(); });
+    /* cancelInDirSearch 经动态 import 后才发 invoke：先刷微任务再断言 */
+    await act(async () => { await Promise.resolve(); });
+    expect(mockInvoke).toHaveBeenCalledWith('search_in_dir_cancel', { searchId: expect.any(Number) });
+    expect((container!.textContent ?? '').includes('tree.searchScanning')).toBe(false);
+
+    /* 迟到的搜索结果被 seq 守卫丢弃：不渲染结果也不报错 */
+    await act(async () => {
+      resolveSearch({
+        matches: [{ path: 'C:/proj/src/a.ts', line: 3, col: 5, len: 6, text: 'const needle = 1;', offset: 0 }],
+        filesScanned: 12, filesMatched: 1, matchTotal: 1,
+        truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: true,
+        error: null,
+      });
+      await new Promise(r => setTimeout(r, 20));
+    });
+    expect((container!.textContent ?? '').includes('src/a.ts')).toBe(false);
   });
 });
 
@@ -198,7 +242,7 @@ describe('FileTreeSidebar 长行命中可见性', () => {
         return Promise.resolve({
           matches: [{ path: 'C:/proj/src/long.ts', line: 12, col: 151, len: 6, text, offset: 0 }],
           filesScanned: 1, filesMatched: 1, matchTotal: 1,
-          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false,
+          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: false,
           error: null,
         });
       }
@@ -241,7 +285,7 @@ describe('FileTreeSidebar 结果分页', () => {
             path: 'C:/proj/src/big.ts', line: i + 1, col: 1, len: 6, text: 'needle', offset: 0,
           })),
           filesScanned: 1, filesMatched: 1, matchTotal: total,
-          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false,
+          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: false,
           error: null,
         });
       }
@@ -287,7 +331,7 @@ describe('FileTreeSidebar 结果分页', () => {
         return Promise.resolve({
           matches: [{ path: 'C:/proj/a.ts', line: 1, col: 1, len: 6, text: 'needle', offset: 0 }],
           filesScanned: 1, filesMatched: 1, matchTotal: 1,
-          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false,
+          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: false,
           error: null,
         });
       }
