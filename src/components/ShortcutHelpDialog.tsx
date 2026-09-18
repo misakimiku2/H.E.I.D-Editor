@@ -9,21 +9,39 @@ interface ShortcutHelpDialogProps {
   onClose: () => void;
 }
 
-const SHORTCUTS: Array<{ keys: string; key: MessageKey }> = [
-  { keys: 'Ctrl+N', key: 'menu.newFile' },
-  { keys: 'Ctrl+O', key: 'menu.openFile' },
-  { keys: 'Ctrl+S', key: 'menu.save' },
-  { keys: 'Ctrl+Shift+S', key: 'menu.saveAs' },
-  { keys: 'Ctrl+W', key: 'menu.closeCurrentTab' },
-  { keys: 'Ctrl+Tab', key: 'sc.nextTab' },
-  { keys: 'Ctrl+Shift+Tab', key: 'sc.prevTab' },
-  { keys: 'Ctrl+F', key: 'common.find' },
-  { keys: 'Ctrl+H', key: 'sc.findReplace' },
-  { keys: 'Ctrl+G', key: 'sc.gotoLine' },
-  { keys: 'Ctrl+Z', key: 'menu.undo' },
-  { keys: 'Ctrl+Y', key: 'menu.redo' },
-  { keys: 'Enter / Shift+Enter', key: 'sc.findNav' },
-  { keys: 'Esc', key: 'sc.esc' },
+/** 分组快捷键表：通用（全局）+ CSV 表格（网格编辑器，含本次新增的拖拽 / 多选手势） */
+const SHORTCUT_SECTIONS: Array<{ title: MessageKey; items: Array<{ keys: string; key: MessageKey }> }> = [
+  {
+    title: 'sc.general',
+    items: [
+      { keys: 'Ctrl+N', key: 'menu.newFile' },
+      { keys: 'Ctrl+O', key: 'menu.openFile' },
+      { keys: 'Ctrl+S', key: 'menu.save' },
+      { keys: 'Ctrl+Shift+S', key: 'menu.saveAs' },
+      { keys: 'Ctrl+W', key: 'menu.closeCurrentTab' },
+      { keys: 'Ctrl+Tab', key: 'sc.nextTab' },
+      { keys: 'Ctrl+Shift+Tab', key: 'sc.prevTab' },
+      { keys: 'Ctrl+F', key: 'common.find' },
+      { keys: 'Ctrl+H', key: 'sc.findReplace' },
+      { keys: 'Ctrl+G', key: 'sc.gotoLine' },
+      { keys: 'Ctrl+Z', key: 'menu.undo' },
+      { keys: 'Ctrl+Y', key: 'menu.redo' },
+      { keys: 'Enter / Shift+Enter', key: 'sc.findNav' },
+      { keys: 'Esc', key: 'sc.esc' },
+    ],
+  },
+  {
+    title: 'sc.csvSection',
+    items: [
+      { keys: 'F2 / 双击', key: 'sc.csvEditCell' },
+      { keys: 'Alt+Enter', key: 'sc.csvNewline' },
+      { keys: 'Ctrl+Enter', key: 'sc.csvFillSel' },
+      { keys: 'Delete / Backspace', key: 'sc.csvClear' },
+      { keys: 'Ctrl+点击 / 拖拽', key: 'sc.csvMulti' },
+      { keys: '拖动列标 / 行号', key: 'sc.csvDragReorder' },
+      { keys: '拖动行号底边', key: 'sc.csvRowHeight' },
+    ],
+  },
 ];
 
 /** 快捷键帮助弹窗（桌面列出键盘快捷键；手机端列出等效的界面入口） */
@@ -40,6 +58,10 @@ export function ShortcutHelpDialog({ isDarkMode, onClose }: ShortcutHelpDialogPr
   const itemCls = cn(
     "flex items-center justify-between gap-4 px-4 py-1.5 rounded-md text-xs",
     isDarkMode ? "hover:bg-zinc-700/60" : "hover:bg-zinc-100"
+  );
+  const headCls = cn(
+    "px-4 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide",
+    isDarkMode ? "text-zinc-500" : "text-zinc-400"
   );
 
   return (
@@ -60,19 +82,22 @@ export function ShortcutHelpDialog({ isDarkMode, onClose }: ShortcutHelpDialogPr
           <X size={14} />
         </button>
         <h2 className="px-5 pt-5 pb-3 text-base font-bold">{t('menu.shortcuts')}</h2>
-        <div className="px-2 pb-4 flex flex-col gap-0.5">
-          {SHORTCUTS.map(({ keys, key }) => (
-            <div key={keys} className={itemCls}>
-              <span className={isDarkMode ? "text-zinc-300" : "text-zinc-600"}>{t(key)}</span>
-              <kbd className={cn(
-                "px-2 py-0.5 rounded border text-[10px] font-mono whitespace-nowrap",
-                isDarkMode ? "border-zinc-600 bg-zinc-900 text-zinc-300" : "border-zinc-300 bg-zinc-50 text-zinc-600"
-              )}>
-                {keys.replace(/Ctrl/g, IS_TOUCH_PRIMARY && !IS_ANDROID_APP ? 'Cmd' : 'Ctrl')}
-              </kbd>
-            </div>
-          ))}
-        </div>
+        {SHORTCUT_SECTIONS.map(({ title, items }) => (
+          <div key={title} className="px-2 pb-3 flex flex-col gap-0.5">
+            <div className={headCls}>{t(title)}</div>
+            {items.map(({ keys, key }) => (
+              <div key={keys} className={itemCls}>
+                <span className={isDarkMode ? "text-zinc-300" : "text-zinc-600"}>{t(key)}</span>
+                <kbd className={cn(
+                  "px-2 py-0.5 rounded border text-[10px] font-mono whitespace-nowrap",
+                  isDarkMode ? "border-zinc-600 bg-zinc-900 text-zinc-300" : "border-zinc-300 bg-zinc-50 text-zinc-600"
+                )}>
+                  {keys.replace(/Ctrl/g, IS_TOUCH_PRIMARY && !IS_ANDROID_APP ? 'Cmd' : 'Ctrl')}
+                </kbd>
+              </div>
+            ))}
+          </div>
+        ))}
         {IS_ANDROID_APP && (
           <p className={cn("px-5 pb-4 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
             {t('shortcuts.mobileNote')}

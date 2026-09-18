@@ -8,10 +8,18 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
+/* React 19：声明 act 测试环境，消除 "not configured to support act(...)" 噪音 */
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
 /* jsdom 缺失：网格视口量测需要 ResizeObserver */
 (window as any).ResizeObserver = class {
   observe() {} unobserve() {} disconnect() {}
 };
+/* rAF 兜底（部分 jsdom 配置不启用 pretendToBeVisual） */
+if (typeof window.requestAnimationFrame !== 'function') {
+  (window as any).requestAnimationFrame = (cb: FrameRequestCallback) =>
+    setTimeout(() => cb(performance.now()), 16) as unknown as number;
+}
 
 vi.mock('../lib/i18nContext', () => ({
   useT: () => (key: string) => key,
@@ -60,7 +68,8 @@ const firePaste = (el: Element, text: string) => {
   el.dispatchEvent(ev);
 };
 
-const frame = () => act(async () => { await new Promise(r => setTimeout(r, 20)); });
+/* 60ms：jsdom 的 rAF 是 16ms 定时器，62 个 worker 并行满载时 20ms 可能不够冲刷一帧 */
+const frame = () => act(async () => { await new Promise(r => setTimeout(r, 60)); });
 
 describe('CsvGridEditor 粘贴通道', () => {
   let host: HTMLElement;
@@ -151,11 +160,15 @@ describe('CsvGridEditor 粘贴通道', () => {
 /* ---------- 只读态排序 / 筛选 ---------- */
 
 /* React 19 受控输入：直接赋 value 不触发 onChange，需经原生 setter 派发 */
-const setInputValue = (input: HTMLInputElement, value: string) => {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
-  setter.call(input, value);
-  input.dispatchEvent(new Event('input', { bubbles: true }));
+const setInputValue = (el: HTMLInputElement | HTMLTextAreaElement, value: string) => {
+  const proto = el instanceof window.HTMLTextAreaElement
+    ? window.HTMLTextAreaElement.prototype
+    : window.HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')!.set!;
+  setter.call(el, value);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
 };
+;
 
 describe('CsvGridEditor 排序筛选视图', () => {
   let host: HTMLElement;
@@ -208,7 +221,7 @@ describe('CsvGridEditor 排序筛选视图', () => {
       (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
         .dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     });
-    const edit = host.querySelector('[data-testid="csv-edit-input"]') as HTMLInputElement;
+    const edit = host.querySelector('[data-testid="csv-edit-input"]') as HTMLTextAreaElement;
     act(() => {
       setInputValue(edit, 'ALPHA');
       edit.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
@@ -240,5 +253,486 @@ describe('CsvGridEditor 排序筛选视图', () => {
     });
     await frame();
     expect(host.querySelectorAll('.csv-row').length).toBeGreaterThan(0);
+  });
+});
+
+/* ---------- 单元格编辑与顶部编辑栏 ---------- */
+
+describe('CsvGridEditor 单元格编辑与编辑栏', () => {
+  let host: HTMLElement;
+  let root: Root;
+  let latest: string;
+
+  const renderGrid = (content: string) => {
+    act(() => {
+      root.render(
+        <CsvGridEditor
+          content={content}
+          delimiter=","
+          isDarkMode={false}
+          headerOn={false}
+          onChange={(v) => { latest = v; renderGrid(v); }}
+          onHeaderToggle={() => {}}
+          onWidthsChange={() => {}}
+        />,
+      );
+    });
+  };
+
+  const clickCell = (sel: string) => {
+    const cell = host.querySelector(sel) as HTMLElement;
+    act(() => {
+      cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      cell.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+  };
+
+  const dblclickCell = (sel: string) => {
+    act(() => {
+      (host.querySelector(sel) as HTMLElement)
+        .dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+  };
+
+  const editInput = () => host.querySelector('[data-testid="csv-edit-input"]') as HTMLTextAreaElement | null;
+  const formulaInput = () => host.querySelector('[data-testid="csv-formula-input"]') as HTMLTextAreaElement;
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    latest = '';
+    renderGrid('源矿*1/3s,a\n1,2');
+  });
+
+  it('双击进入编辑：拖选收尾的 rAF 不得抢走编辑框焦点（闪现即关的根因）', async () => {
+    dblclickCell('[data-testid="csv-cell-0-0"]');
+    expect(editInput()).not.toBeNull();
+    expect(document.activeElement).toBe(editInput());
+    await frame();
+    await frame();
+    /* 回归：双击第二下 mouseup 注册的 rAF 晚于 dblclick 执行，
+       旧实现 wrapper.focus() 抢焦点 → blur → 编辑框开启当帧即被关闭 */
+    expect(editInput()).not.toBeNull();
+    expect(document.activeElement).toBe(editInput());
+  });
+
+  it('编辑栏修改：焦点不丢、逐键保留、不提前提交，Enter 才落盘', async () => {
+    clickCell('[data-testid="csv-cell-0-0"]');
+    await frame();
+    act(() => { formulaInput().focus(); });
+    expect(document.activeElement).toBe(formulaInput());
+    /* 模拟两下退格（受控输入经原生 setter 触发 onChange） */
+    act(() => { setInputValue(formulaInput(), '源矿*1/3'); });
+    expect(document.activeElement).toBe(formulaInput());
+    expect(latest).toBe(''); // 第一个键不得触发提交
+    act(() => { setInputValue(formulaInput(), '源矿*'); });
+    expect(document.activeElement).toBe(formulaInput());
+    /* 单元格编辑框镜像同一份编辑值 */
+    expect(editInput()?.value).toBe('源矿*');
+    act(() => {
+      formulaInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await frame();
+    expect(latest).toBe('源矿*,a\n1,2\n');
+    expect(editInput()).toBeNull();
+  });
+
+  it('焦点在编辑栏与单元格编辑框之间移动＝同一编辑，不触发提交', async () => {
+    dblclickCell('[data-testid="csv-cell-0-0"]');
+    await frame();
+    expect(editInput()).not.toBeNull();
+    act(() => { formulaInput().focus(); }); // 转到编辑栏继续编辑
+    await frame();
+    expect(editInput()).not.toBeNull(); // 不因单元格框 blur 而关框
+    act(() => { setInputValue(formulaInput(), '源矿*1/3sX'); });
+    act(() => { editInput()!.focus(); }); // 回到单元格框
+    await frame();
+    expect(editInput()).not.toBeNull();
+    expect(latest).toBe('');
+  });
+
+  it('输入法组词中的 Enter 不提交，松开后的 Enter 正常关闭', async () => {
+    dblclickCell('[data-testid="csv-cell-0-0"]');
+    expect(editInput()).not.toBeNull();
+    act(() => {
+      const composing = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      Object.defineProperty(composing, 'isComposing', { value: true });
+      editInput()!.dispatchEvent(composing);
+    });
+    expect(editInput()).not.toBeNull(); // 仍在编辑
+    act(() => {
+      editInput()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await frame();
+    expect(editInput()).toBeNull(); // 编辑关闭
+    expect(latest).toBe(''); // 值未变，无写回
+  });
+
+  it('Alt+Enter 单元格内换行不提交；Enter 提交含换行内容（CSV 引号转义）', async () => {
+    dblclickCell('[data-testid="csv-cell-0-0"]');
+    const edit = editInput()!;
+    act(() => { setInputValue(edit, 'ab'); edit.setSelectionRange(1, 1); });
+    act(() => {
+      edit.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', altKey: true, bubbles: true, cancelable: true }));
+    });
+    expect(editInput()).not.toBeNull(); // 仍在编辑
+    expect(latest).toBe('');
+    expect(edit.value).toBe('a\nb'); // jsdom 无 execCommand，走手动拼接
+    act(() => {
+      editInput()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await frame();
+    expect(latest).toBe('"a\nb",a\n1,2\n'); // 换行字段按 RFC 4180 加引号
+  });
+
+  it('编辑栏 Escape 取消：不写回内容', async () => {
+    clickCell('[data-testid="csv-cell-0-0"]');
+    await frame();
+    act(() => { formulaInput().focus(); });
+    act(() => { setInputValue(formulaInput(), 'zzz'); });
+    act(() => {
+      formulaInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    });
+    await frame();
+    expect(latest).toBe('');
+    expect(editInput()).toBeNull();
+  });
+});
+
+/* ---------- 列/行拖拽互换 ---------- */
+/* jsdom 无布局：视口矩形为零，坐标按常量推算——列宽 64px（6 单位×8+16）、
+   行高 28px、行号列 48px、列标行 28px。列 c 的命中带 x ∈ [48+64c, 48+64(c+1))，
+   行 r 的命中带 y ∈ [28+28r, 28+28(r+1))。 */
+
+describe('CsvGridEditor 列/行拖拽互换', () => {
+  let host: HTMLElement;
+  let root: Root;
+  let latest: string;
+
+  const renderGrid = (content: string) => {
+    act(() => {
+      root.render(
+        <CsvGridEditor
+          content={content}
+          delimiter=","
+          isDarkMode={false}
+          headerOn={false}
+          onChange={(v) => { latest = v; renderGrid(v); }}
+          onHeaderToggle={() => {}}
+          onWidthsChange={() => {}}
+        />,
+      );
+    });
+  };
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    latest = '';
+    renderGrid('a,b\nc,d');
+  });
+
+  it('列标 A 拖到列标 B 上：两列内容互换，选区跟随到目标列', async () => {
+    /* A 列标中心 (80,14)；B 列命中带 clientX ∈ [112,176)，取 140 */
+    act(() => {
+      (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 140, clientY: 70 }));
+    });
+    await frame();
+    act(() => { window.dispatchEvent(new MouseEvent('mouseup', { clientX: 140, clientY: 70 })); });
+    await frame();
+    expect(latest).toBe('b,a\nd,c\n');
+    /* 选区跟随：整列选中，地址框显示目标列范围（与点击列标一致） */
+    const addr = host.querySelector('[title="csv.formulaAria"]') as HTMLElement;
+    expect(addr.textContent).toBe('B1:B30');
+  });
+
+  it('列标点击不拖动（<4px）：仅选中，不互换', async () => {
+    act(() => {
+      (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 82, clientY: 15 }));
+      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 82, clientY: 15 }));
+    });
+    await frame();
+    expect(latest).toBe('');
+  });
+
+  it('列拖入空白列区：原位留空、内容移动（互换空列）', async () => {
+    act(() => {
+      (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 252, clientY: 70 })); // 列 D（避开网格线热区）
+      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 252, clientY: 70 }));
+    });
+    await frame();
+    expect(latest).toBe(',b,,a\n,d,,c\n');
+  });
+
+  it('行号 1 拖到行号 2 上：两行内容互换', async () => {
+    /* 行号元素：[0]=# 角标，[1]=数据行 0；行 r 命中带 clientY ∈ [28+28r, 28+28(r+1)) */
+    act(() => {
+      (host.querySelectorAll('.csv-rownum')[1] as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 24, clientY: 40 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 140, clientY: 70 })); // 行 1
+      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 140, clientY: 70 }));
+    });
+    await frame();
+    expect(latest).toBe('c,d\na,b\n');
+  });
+
+  it('排序/筛选生效期间拖拽互换禁用（结构操作降级）', async () => {
+    const input = host.querySelector('[data-testid="csv-filter-input"]') as HTMLInputElement;
+    act(() => { setInputValue(input, 'a'); });
+    await frame();
+    act(() => {
+      (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 140, clientY: 70 }));
+      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 140, clientY: 70 }));
+    });
+    await frame();
+    expect(latest).toBe('');
+  });
+
+  it('列拖到网格线上：指示线出现，松手插入式移动（其余列顺移）', async () => {
+    renderGrid('a,b,c\n1,2,3');
+    act(() => {
+      (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 240, clientY: 70 })); // C 列右缘网格线
+    });
+    await frame();
+    /* 悬停网格线热区：插入指示线可见 */
+    expect(host.querySelector('[data-testid="csv-insert-line-col"]')).not.toBeNull();
+    act(() => { window.dispatchEvent(new MouseEvent('mouseup', { clientX: 240, clientY: 70 })); });
+    await frame();
+    expect(host.querySelector('[data-testid="csv-insert-line-col"]')).toBeNull();
+    /* a 移到 c 之后：b,c,a（互换空列会得到 ,b,c,a，可区分） */
+    expect(latest).toBe('b,c,a\n2,3,1\n');
+  });
+
+  it('第 4 行拖到第 2 行：向上拖不丢尾部行（回归）', async () => {
+    renderGrid('r1\nr2\nr3\nr4\nr5\nr6\nr7\nr8');
+    /* 行 4 的行号 = rownum[4]（[0] 是 # 角标）；y=126 → r=3 */
+    act(() => {
+      (host.querySelectorAll('.csv-rownum')[4] as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 24, clientY: 126 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 24, clientY: 70 })); // 行 2
+      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 24, clientY: 70 }));
+    });
+    await frame();
+    expect(latest).toBe('r1\nr4\nr3\nr2\nr5\nr6\nr7\nr8\n');
+  });
+
+  it('行拖到网格线上：指示线出现，松手插入式移动', async () => {
+    renderGrid('r1\nr2\nr3\nr4\nr5');
+    act(() => {
+      (host.querySelectorAll('.csv-rownum')[1] as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 24, clientY: 40 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 24, clientY: 112 })); // 行 3/4 间网格线
+    });
+    await frame();
+    expect(host.querySelector('[data-testid="csv-insert-line-row"]')).not.toBeNull();
+    act(() => { window.dispatchEvent(new MouseEvent('mouseup', { clientX: 24, clientY: 112 })); });
+    await frame();
+    expect(host.querySelector('[data-testid="csv-insert-line-row"]')).toBeNull();
+    expect(latest).toBe('r2\nr3\nr1\nr4\nr5\n');
+  });
+});
+
+/* ---------- Ctrl 多选 / 自适应列宽 / 行高 ---------- */
+
+describe('CsvGridEditor Ctrl 多选与工具', () => {
+  let host: HTMLElement;
+  let root: Root;
+  let latest: string;
+  let widths: number[] | null;
+  let rowHSet: number | null;
+  let rowHs: number[] | null;
+  let wrapSet: boolean | null;
+
+  const renderGrid = (content: string, props: Record<string, unknown> = {}) => {
+    act(() => {
+      root.render(
+        <CsvGridEditor
+          content={content}
+          delimiter=","
+          isDarkMode={false}
+          headerOn={false}
+          onChange={(v) => { latest = v; renderGrid(v, props); }}
+          onHeaderToggle={() => {}}
+          onWidthsChange={() => {}}
+          {...props}
+        />,
+      );
+    });
+  };
+
+  const gridEl = () => host.querySelector('[role="grid"]') as HTMLElement;
+  const cell = (sel: string) => host.querySelector(`[data-testid="csv-cell-${sel}"]`) as HTMLElement;
+
+  const plainClick = (sel: string) => {
+    act(() => {
+      cell(sel).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+      cell(sel).dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+  };
+
+  const ctrlClick = (sel: string) => {
+    act(() => {
+      cell(sel).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, ctrlKey: true }));
+      cell(sel).dispatchEvent(new MouseEvent('mouseup', { bubbles: true, ctrlKey: true }));
+    });
+  };
+
+  const pressDelete = () => {
+    act(() => {
+      gridEl().dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+    });
+  };
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    latest = '';
+    widths = null;
+    rowHSet = null;
+    rowHs = null;
+    wrapSet = null;
+    renderGrid('a,b\nc,d');
+  });
+
+  it('Ctrl+点选追加选区，Delete 清空全部选中格', async () => {
+    plainClick('0-0');
+    ctrlClick('1-1');
+    await frame();
+    pressDelete();
+    await frame();
+    expect(latest).toBe(',b\nc,\n');
+  });
+
+  it('Ctrl+点击已选中的格子：收拢为该格，Delete 只清它', async () => {
+    plainClick('0-0');
+    ctrlClick('1-1');
+    await frame();
+    ctrlClick('1-1'); // 已在选区内 → 收拢为该格
+    await frame();
+    pressDelete();
+    await frame();
+    expect(latest).toBe('a,b\nc,\n');
+  });
+
+  it('普通点击重置多选：Delete 只清最后点击的格', async () => {
+    plainClick('0-0');
+    ctrlClick('1-1');
+    await frame();
+    plainClick('0-1');
+    await frame();
+    pressDelete();
+    await frame();
+    expect(latest).toBe('a,\nc,d\n');
+  });
+
+  it('自适应列宽按钮：始终可点，按内容实测宽度写入', async () => {
+    renderGrid('a,b\nc,d', { manualWidths: [12, 20], onWidthsChange: (w: number[]) => { widths = w; } });
+    const btn = host.querySelector('[data-testid="csv-autofit-widths"]') as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    act(() => { btn.click(); });
+    await frame();
+    expect(widths).toEqual([6, 6]); // 短内容取下限 6
+  });
+
+  it('自适应列宽按钮：长文本列撑开到内容宽，超长封顶 200 单位', async () => {
+    const long = '长'.repeat(300); // 300 个 CJK = 600 显示宽单位 → 封顶 200
+    renderGrid(`${long},b\nc,d`, { onWidthsChange: (w: number[]) => { widths = w; } });
+    const btn = host.querySelector('[data-testid="csv-autofit-widths"]') as HTMLButtonElement;
+    act(() => { btn.click(); });
+    await frame();
+    expect(widths).toEqual([200, 6]);
+  });
+
+  it('行高生效于渲染，右键行号可切换并回传', async () => {
+    renderGrid('a,b\nc,d', { rowH: 40, onRowHChange: (h: number) => { rowHSet = h; } });
+    await frame();
+    const row = host.querySelector('.csv-row') as HTMLElement;
+    expect(row.style.height).toBe('40px');
+    act(() => {
+      (host.querySelectorAll('.csv-rownum')[1] as HTMLElement)
+        .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    /* rowH=40 时「宽松」项带勾选标记 */
+    const relaxed = host.querySelector('button[title="csv.rowHeightRelaxed ✓"]') as HTMLButtonElement;
+    expect(relaxed).not.toBeNull();
+    act(() => { relaxed.click(); });
+    await frame();
+    expect(rowHSet).toBe(40);
+  });
+
+  it('逐行行高渲染：默认行高与手动行高并存', async () => {
+    renderGrid('a,b\nc,d', { manualRowHeights: [0, 64] });
+    await frame();
+    const rows = host.querySelectorAll('.csv-row') as NodeListOf<HTMLElement>;
+    expect(rows[0].style.height).toBe('28px');
+    expect(rows[1].style.height).toBe('64px');
+  });
+
+  it('行高拖拽：行号底缘拖动调该行高度并回传', async () => {
+    renderGrid('a,b\nc,d', { onRowHeightsChange: (hs: number[]) => { rowHs = hs; } });
+    const handle = (host.querySelectorAll('.csv-rownum')[1] as HTMLElement)
+      .querySelector('.cursor-row-resize') as HTMLElement;
+    act(() => {
+      handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientY: 100 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientY: 130 })); // +30px
+      window.dispatchEvent(new MouseEvent('mouseup', { clientY: 130 }));
+    });
+    await frame();
+    expect(rowHs).toEqual([58]); // 默认 28 + 30
+  });
+
+  it('自适应表格大小：列宽按内容、行高按折行、自动开启换行', async () => {
+    renderGrid('"l1\nl2\nl3",b\nc,d', {
+      onWidthsChange: (w: number[]) => { widths = w; },
+      onRowHeightsChange: (hs: number[]) => { rowHs = hs; },
+      onWrapChange: (on: boolean) => { wrapSet = on; },
+    });
+    const btn = host.querySelector('[data-testid="csv-autofit-widths"]') as HTMLButtonElement;
+    act(() => { btn.click(); });
+    await frame();
+    expect(widths).toEqual([6, 6]);
+    expect(rowHs).toEqual([64, 28]); // 3 硬行 → 3×20+4；单行行维持默认 28
+    expect(wrapSet).toBe(true);
+  });
+
+  it('换行开关切换并回传', async () => {
+    renderGrid('a,b', { onWrapChange: (on: boolean) => { wrapSet = on; } });
+    const btn = host.querySelector('[data-testid="csv-wrap-toggle"]') as HTMLButtonElement;
+    act(() => { btn.click(); });
+    await frame();
+    expect(wrapSet).toBe(true);
+  });
+
+  it('换行渲染：多行内容原样显示（不转 ⏎）', async () => {
+    renderGrid('"l1\nl2",b', { wrap: true });
+    await frame();
+    const span = (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement).querySelector('span') as HTMLElement;
+    expect(span.className).toContain('whitespace-pre-wrap');
+    expect(span.textContent).toBe('l1\nl2');
+  });
+
+  it('双击行号底缘恢复该行默认行高', async () => {
+    renderGrid('a,b\nc,d', { manualRowHeights: [48], onRowHeightsChange: (hs: number[]) => { rowHs = hs; } });
+    const handle = (host.querySelectorAll('.csv-rownum')[1] as HTMLElement)
+      .querySelector('.cursor-row-resize') as HTMLElement;
+    act(() => { handle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); });
+    await frame();
+    expect(rowHs).toEqual([0]);
   });
 });

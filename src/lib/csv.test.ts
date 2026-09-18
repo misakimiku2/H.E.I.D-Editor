@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   computeFill, detectDelimiter, estimateColumnWidths, parseCsv, serializeCsv,
+  estimateWrappedLines, moveCol, moveRow, swapCols, swapRows,
 } from './csv';
 
 describe('parseCsv', () => {
@@ -366,5 +367,93 @@ describe('computeRowOrder', () => {
     ];
     const order = computeRowOrder(two, { headerOn: true, filter: '', sort: { col: 0, dir: 'asc' } });
     expect(order).toEqual([0, 2, 1, 3]); // a9 < b10 < c2（数字感知）
+  });
+});
+
+describe('swapCols / swapRows（列标/行号拖拽互换）', () => {
+  it('整列互换：所有行逐行对调', () => {
+    const grid = [['a1', 'b1', 'c1'], ['a2', 'b2', 'c2']];
+    expect(swapCols(grid, 0, 2)).toEqual([['c1', 'b1', 'a1'], ['c2', 'b2', 'a2']]);
+    /* 原网格不变（纯函数） */
+    expect(grid).toEqual([['a1', 'b1', 'c1'], ['a2', 'b2', 'c2']]);
+  });
+
+  it('同列 / 负下标原样返回', () => {
+    const grid = [['a', 'b']];
+    expect(swapCols(grid, 1, 1)).toBe(grid);
+    expect(swapCols(grid, -1, 0)).toBe(grid);
+  });
+
+  it('目标列超出网格宽度：扩齐矩形后互换（拖入空白列区 = 移动）', () => {
+    const grid = [['a', 'b']];
+    expect(swapCols(grid, 0, 3)).toEqual([['', 'b', '', 'a']]);
+  });
+
+  it('整行互换', () => {
+    const grid = [['r1a', 'r1b'], ['r2a', 'r2b'], ['r3a', 'r3b']];
+    expect(swapRows(grid, 0, 2)).toEqual([['r3a', 'r3b'], ['r2a', 'r2b'], ['r1a', 'r1b']]);
+  });
+
+  it('目标行超出网格：空行扩齐后互换（拖入空白行区 = 移动），原位留空', () => {
+    const grid = [['r1'], ['r2']];
+    expect(swapRows(grid, 0, 4)).toEqual([[''], ['r2'], [''], [''], ['r1']]);
+  });
+
+  it('互换后再序列化：拖入空白区的列不会被尾部裁剪，中段空列保留占位对齐', () => {
+    expect(serializeCsv(swapCols(parseCsv('a,b\n1,2'), 0, 3), ',')).toBe(',b,,a\n,2,,1\n');
+  });
+});
+
+describe('swapRows 向上拖回归（曾把尾部行裁掉的数据丢失事故）', () => {
+  it('8 行网格把第 4 行拖到第 2 行：全部 8 行保留，仅两行互换', () => {
+    const g = Array.from({ length: 8 }, (_, i) => [`r${i + 1}`]);
+    const out = swapRows(g, 3, 1);
+    expect(out).toHaveLength(8);
+    expect(out.map(r => r[0])).toEqual(['r1', 'r4', 'r3', 'r2', 'r5', 'r6', 'r7', 'r8']);
+  });
+});
+
+describe('moveCol / moveRow（网格线插入式移动）', () => {
+  it('列插入：a,b,c 把 a 插到 b/c 之间', () => {
+    expect(moveCol([['a', 'b', 'c']], 0, 2)).toEqual([['b', 'a', 'c']]);
+  });
+
+  it('列插到末尾边界（= 列数处）', () => {
+    expect(moveCol([['a', 'b', 'c']], 0, 3)).toEqual([['b', 'c', 'a']]);
+  });
+
+  it('列从后往前插', () => {
+    expect(moveCol([['a', 'b', 'c']], 2, 0)).toEqual([['c', 'a', 'b']]);
+  });
+
+  it('原位边界（to=from 或 from+1）原网格原样返回', () => {
+    const g = [['a', 'b', 'c']];
+    expect(moveCol(g, 1, 1)).toBe(g);
+    expect(moveCol(g, 1, 2)).toBe(g);
+  });
+
+  it('行插入：r1 插到 r3/r4 之间', () => {
+    const g = [['r1'], ['r2'], ['r3'], ['r4']];
+    expect(moveRow(g, 0, 3)).toEqual([['r2'], ['r3'], ['r1'], ['r4']]);
+  });
+
+  it('行向后插到末尾边界', () => {
+    const g = [['r1'], ['r2'], ['r3']];
+    expect(moveRow(g, 0, 3)).toEqual([['r2'], ['r3'], ['r1']]);
+  });
+});
+
+describe('estimateWrappedLines（自适应行高的折行估算）', () => {
+  it('短文本单行', () => {
+    expect(estimateWrappedLines('abc', 6)).toBe(1);
+  });
+
+  it('超宽文本按列宽进位折行（CJK 双宽）', () => {
+    // 30 个 CJK = 60 显示宽；列宽 6 → 可用 4 → ceil(60/4) = 15 行
+    expect(estimateWrappedLines('长'.repeat(30), 6)).toBe(15);
+  });
+
+  it('硬换行逐行累计', () => {
+    expect(estimateWrappedLines('a\nb\nc', 6)).toBe(3);
   });
 });

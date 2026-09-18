@@ -1193,10 +1193,16 @@ export default function App() {
         isDarkMode={isDarkMode}
         headerOn={activeTab.csvHeaderOn ?? true}
         manualWidths={activeTab.csvColWidths}
+        manualRowHeights={activeTab.csvRowHeights}
+        rowH={activeTab.csvRowH}
+        wrap={activeTab.csvWrap}
         readOnly={!!activeTab.readOnly}
         onChange={(v) => editor.updateTabContent(activeTab.id, v)}
         onHeaderToggle={(on) => editor.setCsvState({ csvHeaderOn: on })}
         onWidthsChange={(w) => editor.setCsvState({ csvColWidths: w })}
+        onRowHChange={(h) => editor.setCsvState({ csvRowH: h })}
+        onRowHeightsChange={(hs) => editor.setCsvState({ csvRowHeights: hs })}
+        onWrapChange={(on) => editor.setCsvState({ csvWrap: on })}
         onShape={handleCsvShape}
       />
     );

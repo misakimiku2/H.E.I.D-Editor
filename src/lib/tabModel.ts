@@ -24,6 +24,12 @@ export interface CsvTabState {
   csvHeaderOn?: boolean;
   /** 手动列宽（按列下标；双击列边界恢复自适应后删除该项） */
   csvColWidths?: number[];
+  /** 手动行高（按显示行下标，px；0/缺省=默认行高 csvRowH） */
+  csvRowHeights?: number[];
+  /** 数据行行高（px）；缺省 28 */
+  csvRowH?: number;
+  /** 单元格内容自动换行；缺省 false */
+  csvWrap?: boolean;
 }
 
 export interface FileTab extends CsvTabState {

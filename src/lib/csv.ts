@@ -188,11 +188,11 @@ export interface GridRect { r1: number; c1: number; r2: number; c2: number; }
 
 const blankRow = (w: number) => Array<string>(w).fill('');
 
-/** 把网格补齐为 rows × width 的矩形（不缩不裁，仅扩） */
+/** 把网格补齐为 rows × width 的矩形（只扩不缩：rows 小于现有行数时保留全部行） */
 function ensureSize(grid: string[][], rows: number, width: number): string[][] {
   const w = Math.max(width, ...grid.map(r => r.length), 1);
   const out: string[][] = [];
-  for (let r = 0; r < rows; r++) {
+  for (let r = 0; r < Math.max(rows, grid.length); r++) {
     const row = grid[r] ? grid[r].slice() : [];
     while (row.length < w) row.push('');
     out.push(row);
@@ -247,6 +247,52 @@ export function deleteRows(grid: string[][], from: number, to: number): string[]
 export function deleteCols(grid: string[][], from: number, to: number): string[][] {
   const out = grid.map(r => r.filter((_, c) => c < from || c > to));
   return out.some(r => r.length > 0) ? out : [blankRow(1)];
+}
+
+/** a、b 两列逐行互换（列标拖拽互换的纯函数核心）；目标列超出网格宽度时扩齐矩形 */
+export function swapCols(grid: string[][], a: number, b: number): string[][] {
+  if (a === b || a < 0 || b < 0 || grid.length === 0) return grid;
+  const out = ensureSize(grid, grid.length, Math.max(a, b) + 1);
+  for (const row of out) {
+    const t = row[a];
+    row[a] = row[b];
+    row[b] = t;
+  }
+  return out;
+}
+
+/** a、b 两行互换（行号拖拽互换）；目标行超出网格行数时以空行扩齐（= 把该行拖入空白区）。
+    向上拖时 b < a，扩齐目标必须含全部现有行，否则会把尾部行裁掉（数据丢失事故） */
+export function swapRows(grid: string[][], a: number, b: number): string[][] {
+  if (a === b || a < 0 || b < 0 || grid.length === 0) return grid;
+  const out = ensureSize(grid, Math.max(grid.length, Math.max(a, b) + 1), 1);
+  const t = out[a];
+  out[a] = out[b];
+  out[b] = t;
+  return out;
+}
+
+/** 把 from 列移动插入到边界 to（原列下标口径，0..列数，其余列顺移）。
+    to 为 from 或 from+1 时即原位，原网格原样返回 */
+export function moveCol(grid: string[][], from: number, to: number): string[][] {
+  if (grid.length === 0 || from < 0 || to < 0 || to === from || to === from + 1) return grid;
+  const out = ensureSize(grid, grid.length, Math.max(to, from + 1, ...grid.map(r => r.length)))
+    .map(row => {
+      const copy = row.slice();
+      const [v] = copy.splice(from, 1);
+      copy.splice(to > from ? to - 1 : to, 0, v ?? '');
+      return copy;
+    });
+  return out;
+}
+
+/** 把 from 行移动插入到边界 to（原行下标口径，0..行数，其余行顺移）；边界超出网格时以空行扩齐 */
+export function moveRow(grid: string[][], from: number, to: number): string[][] {
+  if (grid.length === 0 || from < 0 || to < 0 || to === from || to === from + 1) return grid;
+  const out = ensureSize(grid, Math.max(grid.length, to), 1).map(r => r.slice());
+  const [row] = out.splice(from, 1);
+  out.splice(to > from ? to - 1 : to, 0, row);
+  return out;
 }
 
 /** 选区导出为系统剪贴板 TSV（与 Google Sheets/Excel 互通；末行带换行） */
@@ -368,4 +414,16 @@ export function estimateColumnWidths(grid: string[][], min = 6, max = 40): numbe
     }
   }
   return widths;
+}
+
+/** 文本在给定列宽（显示宽单位）下需要的折行数：按硬换行分行，每行按显示宽除以
+    可用宽度进位（近似：CJK 可任意断行；长单词按宽度切分估算）。
+    「自适应表格大小」的行高估算核心 */
+export function estimateWrappedLines(text: string, widthUnits: number): number {
+  const usable = Math.max(1, widthUnits - 2); // 扣除单元格左右 padding
+  let lines = 0;
+  for (const line of text.split('\n')) {
+    lines += Math.max(1, Math.ceil(textDisplayWidth(line) / usable));
+  }
+  return Math.max(1, lines);
 }
