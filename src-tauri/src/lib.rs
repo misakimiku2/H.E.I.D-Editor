@@ -210,6 +210,19 @@ pub fn run() {
             {
                 theme_icon::setup(app.handle())?;
                 launch::collect_argv(app.handle());
+                /* 主窗口以 visible:false 创建,前端会话恢复完成后自行显示(App 启动效果);
+                   看门狗兜底:前端异常未显示时 4s 强制拉起,避免「窗口永不出现」 */
+                use tauri::Manager as _;
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    if let Some(w) = handle.get_webview_window("main") {
+                        if !w.is_visible().unwrap_or(true) {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                });
             }
             Ok(())
         })

@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no, interactive-widget=resizes-content" />
     <title>H.I.D.E</title>
+    <script>
+      /* 主题底色内联:在 CSS/JS 就绪前把根元素底色设为主题色,兜住 webview 初始化与
+         首帧前的闪白(与 App 根容器配色一致:深色 zinc-900/#18181b,浅色 zinc-50/#fafafa) */
+      (function () {
+        var mode = 'system';
+        try { mode = localStorage.getItem('heid-theme-mode') || 'system'; } catch (e) { /* 存储不可用时按系统主题 */ }
+        var dark = mode === 'dark' || (mode !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        var root = document.documentElement.style;
+        root.backgroundColor = dark ? '#18181b' : '#fafafa';
+        root.colorScheme = dark ? 'dark' : 'light';
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

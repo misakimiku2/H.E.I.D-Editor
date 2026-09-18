@@ -220,6 +220,24 @@ export default function App() {
   /* 会话恢复期间不画 welcome.ts 占位编辑器：主区域显示「恢复中」，完成后直接落到上次激活的文档 */
   const restoringSession = !hydrated && hadSession;
 
+  /* 窗口按需显示（Tauri）：主/子窗口均以 visible:false 创建，等会话恢复完成
+     （恢复后的标签已在本帧内容里）再显示，消除「白屏→空界面闪帧→落到上次文档」
+     的三段式启动。仅主窗口 setFocus（子窗口依次显示时不应互相抢焦点）；
+     Rust 侧有看门狗兜底：前端异常未显示时数秒后强制拉起 */
+  const windowShowReadyRef = useRef(false);
+  useEffect(() => {
+    if (!isTauri || !hydrated || windowShowReadyRef.current) return;
+    windowShowReadyRef.current = true;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        await win.show();
+        if (isMain) await win.setFocus();
+      } catch { /* 窗口已不存在（StrictMode 卸载等） */ }
+    })();
+  }, [hydrated, isMain]);
+
   /* 栏内实时重排（dropIndex 为含被拖标签坐标的插入点，位置无变化时跳过提交） */
   const handleMoveTab = useCallback((tabId: string, dropIndex: number) => {
     const list = editor.tabsRef.current;

@@ -59,7 +59,7 @@ fn place_at_cursor(ww: &WebviewWindow, cursor: tauri::PhysicalPosition<f64>, gra
     Some(tauri::LogicalPosition::new(wx, wy))
 }
 
-/// 建窗 + 定位(先隐藏,定位后显示,避免在旧位置闪一帧)。
+/// 建窗 + 定位(保持隐藏,前端就绪后自行显示,避免闪白帧)。
 /// place = Some((光标全局物理坐标, 抓取偏移x, 抓取偏移y)):新窗标签条对准光标释放点;
 /// None:沿用 builder 的继承+级联位置(会话恢复)。
 fn build_and_place(
@@ -89,7 +89,7 @@ fn build_and_place(
         .min_inner_size(720.0, 480.0)
         /* 与主窗口一致:禁用 tauri 拖放拦截,页面级 HTML5 拖拽(标签/合并)才可用 */
         .disable_drag_drop_handler()
-        /* 先隐藏:定位到释放点后再显示 */
+        /* 先隐藏:前端就绪后自行显示,期间定位/图标均已就绪,不闪旧位置白帧 */
         .visible(false);
 
     /* 几何继承源窗口(最大化源给默认尺寸居中),位置按现存窗口数级联偏移,
@@ -130,7 +130,18 @@ fn build_and_place(
             let _ = ww.set_position(pos);
         }
     }
-    let _ = ww.show();
+    /* 不在此处 show:子窗口保持隐藏,等前端就绪(App 启动效果)带首帧内容自行显示,
+       避免「先白帧后内容」;看门狗兜底:前端异常未显示时 5s 强制拉起 */
+    let watchdog = (app.clone(), label.clone());
+    std::thread::spawn(move || {
+        let (app, label) = watchdog;
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if let Some(w) = app.get_webview_window(&label) {
+            if !w.is_visible().unwrap_or(true) {
+                let _ = w.show();
+            }
+        }
+    });
 
     /* 任务栏图标跟随当前主题(主窗口由 theme_icon::setup 常驻监听,新窗口创建时套用一次) */
     let _ = super::theme_icon::apply_current(&ww);
