@@ -1208,7 +1208,12 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   /* ---- 右键：有选区弹格式菜单；无选区弹插入菜单（表格/图片） ---- */
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    if (!onChange) return;
+    /* 只读预览（更新文档等）：不可编辑即无任何右键行为——不弹编辑菜单，
+       也不放行浏览器默认菜单（文档不可更改，右键应当完全不触发） */
+    if (!onChange) {
+      e.preventDefault();
+      return;
+    }
     const sel = window.getSelection();
     const text = sel ? sel.toString().trim() : '';
 
