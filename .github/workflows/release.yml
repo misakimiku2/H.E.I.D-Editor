@@ -2,7 +2,7 @@ name: Release
 
 # 正式发布：推送 v* 标签触发。
 # 桌面：tauri build 签名构建 NSIS 安装包 → scripts/gen-latest-json.mjs 生成 latest.json
-#       （notes 取自 docs/RELEASE-NOTES-v{x.y}.md）→ gh release create/upload 发布。
+#       （notes 取自 docs/RELEASE-NOTES-v{x.y.z}.md，每版单独成文）→ gh release create/upload 发布。
 #       latest.json 作为 Release 资产，恰为 updater endpoints 指向的地址。
 # 安卓：侧载场景构建 debug 签名 APK 附到同一 Release（无签名密钥要求）；2026-09-18 起暂缓。
 #
@@ -59,7 +59,7 @@ jobs:
           node scripts/gen-latest-json.mjs \
             --version "$VERSION" \
             --sig "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe.sig" \
-            --notes "docs/RELEASE-NOTES-v${MINOR}.md" \
+            --notes "docs/RELEASE-NOTES-v${VERSION}.md" \
             --url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/H.I.D.E_${VERSION}_x64-setup.exe" \
             --out "src-tauri/target/release/bundle/nsis/latest.json"
 
@@ -75,7 +75,7 @@ jobs:
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
                  --title "H.I.D.E $TAG" \
-                 --notes-file "docs/RELEASE-NOTES-v${MINOR}.md"
+                 --notes-file "docs/RELEASE-NOTES-v${VERSION}.md"
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe" \
             "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe.sig" \

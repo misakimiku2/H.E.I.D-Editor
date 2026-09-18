@@ -26,7 +26,7 @@
 ## 发布操作
 
 ```bash
-# 1. 准备当版发行说明文档 docs/RELEASE-NOTES-v{主.次}.md
+# 1. 准备当版发行说明文档 docs/RELEASE-NOTES-v{完整版本}.md（每版单独成文）
 #    （既是 Release 页面正文，也经 latest.json 的 notes 成为应用内更新说明）
 # 2. 更新四处版本号并提交：
 #    package.json / src-tauri/tauri.conf.json / src-tauri/Cargo.toml / src/lib/update.ts
