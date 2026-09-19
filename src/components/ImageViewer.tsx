@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
+import { usePinchZoom } from '../hooks/usePinchZoom';
 
 /** 字节数 → 展示文本（B / KB / MB） */
 function formatBytes(n: number): string {
@@ -31,6 +32,30 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
 
   const eff = scale || fitScale;
   useEffect(() => { scaleRef.current = scale; }, [scale]);
+
+  /* 触屏：单指平移 + 双指捏合缩放（锚点=上一事件双指中点，与滚轮锚点数学同源） */
+  const { bind: bindPinch } = usePinchZoom();
+  const pinchBind = bindPinch({
+    onPan: (dx, dy) => setOffset(o => ({ x: o.x + dx, y: o.y + dy })),
+    onPinch: (ratio, mx, my, mdx, mdy) => {
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const from = scaleRef.current || fitScale;
+      const next = Math.min(8, Math.max(0.05, from * ratio));
+      const f = next / from;
+      const ax = mx - mdx;
+      const ay = my - mdy;
+      setOffset(o => ({
+        x: (ax - cx) - (ax - cx - o.x) * f + mdx,
+        y: (ay - cy) - (ay - cy - o.y) * f + mdy,
+      }));
+      setScaleAndRef(next);
+      movedRef.current = true;
+    },
+    onMoved: () => { movedRef.current = true; },
+  });
 
   useEffect(() => {
     let alive = true;
@@ -101,7 +126,7 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
   }, [dragging]);
 
   const btn = cn(
-    'px-2 py-1 rounded-md text-xs transition-colors',
+    'px-2 py-1 rounded-md text-xs transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
     isDarkMode ? 'bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700' : 'bg-white/85 text-zinc-700 hover:bg-zinc-200',
   );
 
@@ -115,6 +140,7 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
       onClick={() => { if (!movedRef.current) onClose(); }}
       onContextMenu={(e) => e.preventDefault()}
       onMouseDown={startDrag}
+      {...pinchBind}
       style={{ cursor: dragging ? 'grabbing' : 'grab' }}
     >
       <img
@@ -148,6 +174,7 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
           isDarkMode ? 'bg-zinc-800 border-zinc-600/60' : 'bg-white border-zinc-200')}
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
       >
         <span className={cn('text-xs px-1 tabular-nums', isDarkMode ? 'text-zinc-400' : 'text-zinc-500')}>
           {Math.round(eff * 100)}%
@@ -166,6 +193,7 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
         )}
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
         >
           {alt && (
             <span className={cn('truncate font-semibold text-sm', isDarkMode ? 'text-zinc-100' : 'text-zinc-800')}>

@@ -92,8 +92,11 @@ export const SvgCanvas = React.memo<{
   const gestureRef = useRef<
     | { kind: 'pan'; sx: number; sy: number; ox: number; oy: number }
     | { kind: 'drag'; idx: number; sx: number; sy: number; moved: boolean }
+    | { kind: 'pinch'; prevDist: number; prevMx: number; prevMy: number }
     | null
   >(null);
+  /* 触屏活跃触点（双指捏合用） */
+  const touchPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const [panning, setPanning] = useState(false);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const lastDeltaRef = useRef({ x: 0, y: 0 });
@@ -106,6 +109,18 @@ export const SvgCanvas = React.memo<{
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    /* 触屏：记录触点；第二指落下即切换为双指捏合（元素拖拽进行中除外，防丢未提交的移动） */
+    if (e.pointerType === 'touch') {
+      touchPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touchPointersRef.current.size === 2 && gestureRef.current?.kind !== 'drag') {
+        const [a, b] = [...touchPointersRef.current.values()];
+        gestureRef.current = { kind: 'pinch', prevDist: Math.hypot(a.x - b.x, a.y - b.y), prevMx: (a.x + b.x) / 2, prevMy: (a.y + b.y) / 2 };
+        setPanning(false);
+        setDragIdx(null);
+        try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
+        return;
+      }
+    }
     /* 中键：任意位置平移画布（阻止浏览器中键自动滚动） */
     if (e.button === 1) {
       e.preventDefault();
@@ -123,14 +138,46 @@ export const SvgCanvas = React.memo<{
       setDragIdx(idx);
       try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 合成事件无有效 pointerId */ }
     } else {
-      /* 左键空白：取消选中（平移已让给中键） */
+      /* 左键空白：取消选中；触屏空白单指平移（替代桌面中键平移） */
       onSelect(null);
+      if (e.pointerType === 'touch') {
+        gestureRef.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, ox: offset.x, oy: offset.y };
+        setPanning(true);
+        try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
+      }
     }
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
+    /* 双指捏合：增量缩放，锚点=上一事件双指中点 + 中点位移并入平移（与滚轮锚点数学同源） */
+    const tp = touchPointersRef.current.get(e.pointerId);
+    if (tp) { tp.x = e.clientX; tp.y = e.clientY; }
+    const g0 = gestureRef.current;
+    if (g0?.kind === 'pinch' && touchPointersRef.current.size >= 2) {
+      const [a, b] = [...touchPointersRef.current.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      const mx = (a.x + b.x) / 2;
+      const my = (a.y + b.y) / 2;
+      const pane = paneRef.current;
+      if (d > 0 && g0.prevDist > 0 && pane) {
+        const rect = pane.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const from = scaleRef.current || fitScale;
+        const next = Math.min(16, Math.max(0.02, from * (d / g0.prevDist)));
+        const f = next / from;
+        setOffset(o => ({
+          x: (g0.prevMx - cx) - (g0.prevMx - cx - o.x) * f + (mx - g0.prevMx),
+          y: (g0.prevMy - cy) - (g0.prevMy - cy - o.y) * f + (my - g0.prevMy),
+        }));
+        setScale(next);
+        scaleRef.current = next;
+      }
+      gestureRef.current = { kind: 'pinch', prevDist: d, prevMx: mx, prevMy: my };
+      return;
+    }
     const g = gestureRef.current;
-    if (!g) return;
+    if (!g || g.kind === 'pinch') return;
     if (g.kind === 'pan') {
       setOffset({ x: g.ox + (e.clientX - g.sx), y: g.oy + (e.clientY - g.sy) });
       return;
@@ -149,7 +196,15 @@ export const SvgCanvas = React.memo<{
   };
 
   const endGesture = (e: React.PointerEvent) => {
+    touchPointersRef.current.delete(e.pointerId);
     const g = gestureRef.current;
+    if (g?.kind === 'pinch') {
+      /* 捏合结束（任一指抬起）：终止手势，剩余指重新起手 */
+      gestureRef.current = null;
+      setPanning(false);
+      setDragIdx(null);
+      return;
+    }
     gestureRef.current = null;
     lastDeltaRef.current = { x: 0, y: 0 };
     setPanning(false);
