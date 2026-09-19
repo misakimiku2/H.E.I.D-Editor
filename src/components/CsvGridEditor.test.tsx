@@ -161,7 +161,7 @@ describe('CsvGridEditor 粘贴通道', () => {
   it('纯文本多行无制表符粘贴到单格：整段进一格，不覆盖下方行（回归）', async () => {
     act(() => {
       (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
     });
     act(() => { firePaste(gridEl(), '其实我在想最开始的镜头是这样的\n先展示地下竞技场的样貌。\n切镜头。'); });
     await frame();
@@ -172,9 +172,9 @@ describe('CsvGridEditor 粘贴通道', () => {
   it('多行文本粘贴到已选多行区块：仍按表格拆行写入（拆行粘贴的出口保留）', async () => {
     act(() => {
       (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
       (host.querySelector('[data-testid="csv-cell-1-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, shiftKey: true }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, shiftKey: true }));
     });
     act(() => { firePaste(gridEl(), 'x\ny'); });
     await frame();
@@ -184,7 +184,7 @@ describe('CsvGridEditor 粘贴通道', () => {
   it('HTML 剪贴板优先按表格解析：多行单元格（br/换行）进一格', async () => {
     act(() => {
       (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
     });
     const html = '<table><tr><td>A<br>B</td><td>z</td></tr><tr><td>c</td><td>d</td></tr></table>';
     act(() => { firePaste(gridEl(), 'A Bz', html); });
@@ -213,7 +213,7 @@ describe('CsvGridEditor 粘贴通道', () => {
     try {
       act(() => {
         (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
-          .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+          .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
       });
       act(() => {
         gridEl().dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }));
@@ -378,8 +378,8 @@ describe('CsvGridEditor 单元格编辑与编辑栏', () => {
   const clickCell = (sel: string) => {
     const cell = host.querySelector(sel) as HTMLElement;
     act(() => {
-      cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      cell.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      cell.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      cell.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
     });
   };
 
@@ -564,11 +564,11 @@ describe('CsvGridEditor 列/行拖拽互换', () => {
     /* A 列标中心 (80,14)；B 列命中带 clientX ∈ [112,176)，取 140 */
     act(() => {
       (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 140, clientY: 70 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 140, clientY: 70 }));
     });
     await frame();
-    act(() => { window.dispatchEvent(new MouseEvent('mouseup', { clientX: 140, clientY: 70 })); });
+    act(() => { window.dispatchEvent(new MouseEvent('pointerup', { clientX: 140, clientY: 70 })); });
     await frame();
     expect(latest).toBe('b,a\nd,c\n');
     /* 选区跟随：整列选中，地址框显示目标列范围（与点击列标一致） */
@@ -579,9 +579,9 @@ describe('CsvGridEditor 列/行拖拽互换', () => {
   it('列标点击不拖动（<4px）：仅选中，不互换', async () => {
     act(() => {
       (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 82, clientY: 15 }));
-      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 82, clientY: 15 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 82, clientY: 15 }));
+      window.dispatchEvent(new MouseEvent('pointerup', { clientX: 82, clientY: 15 }));
     });
     await frame();
     expect(latest).toBe('');
@@ -590,9 +590,9 @@ describe('CsvGridEditor 列/行拖拽互换', () => {
   it('列拖入空白列区：原位留空、内容移动（互换空列）', async () => {
     act(() => {
       (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 252, clientY: 70 })); // 列 D（避开网格线热区）
-      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 252, clientY: 70 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 252, clientY: 70 })); // 列 D（避开网格线热区）
+      window.dispatchEvent(new MouseEvent('pointerup', { clientX: 252, clientY: 70 }));
     });
     await frame();
     expect(latest).toBe(',b,,a\n,d,,c\n');
@@ -602,9 +602,9 @@ describe('CsvGridEditor 列/行拖拽互换', () => {
     /* 行号元素：[0]=# 角标，[1]=数据行 0；行 r 命中带 clientY ∈ [28+28r, 28+28(r+1)) */
     act(() => {
       (host.querySelectorAll('.csv-rownum')[1] as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 24, clientY: 40 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 140, clientY: 70 })); // 行 1
-      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 140, clientY: 70 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 24, clientY: 40 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 140, clientY: 70 })); // 行 1
+      window.dispatchEvent(new MouseEvent('pointerup', { clientX: 140, clientY: 70 }));
     });
     await frame();
     expect(latest).toBe('c,d\na,b\n');
@@ -616,9 +616,9 @@ describe('CsvGridEditor 列/行拖拽互换', () => {
     await frame();
     act(() => {
       (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 140, clientY: 70 }));
-      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 140, clientY: 70 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 140, clientY: 70 }));
+      window.dispatchEvent(new MouseEvent('pointerup', { clientX: 140, clientY: 70 }));
     });
     await frame();
     expect(latest).toBe('');
@@ -628,13 +628,13 @@ describe('CsvGridEditor 列/行拖拽互换', () => {
     renderGrid('a,b,c\n1,2,3');
     act(() => {
       (host.querySelector('[data-testid="csv-colhead-0"]') as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 240, clientY: 70 })); // C 列右缘网格线
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 80, clientY: 14 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 240, clientY: 70 })); // C 列右缘网格线
     });
     await frame();
     /* 悬停网格线热区：插入指示线可见 */
     expect(host.querySelector('[data-testid="csv-insert-line-col"]')).not.toBeNull();
-    act(() => { window.dispatchEvent(new MouseEvent('mouseup', { clientX: 240, clientY: 70 })); });
+    act(() => { window.dispatchEvent(new MouseEvent('pointerup', { clientX: 240, clientY: 70 })); });
     await frame();
     expect(host.querySelector('[data-testid="csv-insert-line-col"]')).toBeNull();
     /* a 移到 c 之后：b,c,a（互换空列会得到 ,b,c,a，可区分） */
@@ -646,9 +646,9 @@ describe('CsvGridEditor 列/行拖拽互换', () => {
     /* 行 4 的行号 = rownum[4]（[0] 是 # 角标）；y=126 → r=3 */
     act(() => {
       (host.querySelectorAll('.csv-rownum')[4] as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 24, clientY: 126 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 24, clientY: 70 })); // 行 2
-      window.dispatchEvent(new MouseEvent('mouseup', { clientX: 24, clientY: 70 }));
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 24, clientY: 126 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 24, clientY: 70 })); // 行 2
+      window.dispatchEvent(new MouseEvent('pointerup', { clientX: 24, clientY: 70 }));
     });
     await frame();
     expect(latest).toBe('r1\nr4\nr3\nr2\nr5\nr6\nr7\nr8\n');
@@ -658,12 +658,12 @@ describe('CsvGridEditor 列/行拖拽互换', () => {
     renderGrid('r1\nr2\nr3\nr4\nr5');
     act(() => {
       (host.querySelectorAll('.csv-rownum')[1] as HTMLElement)
-        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 24, clientY: 40 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 24, clientY: 112 })); // 行 3/4 间网格线
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 24, clientY: 40 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 24, clientY: 112 })); // 行 3/4 间网格线
     });
     await frame();
     expect(host.querySelector('[data-testid="csv-insert-line-row"]')).not.toBeNull();
-    act(() => { window.dispatchEvent(new MouseEvent('mouseup', { clientX: 24, clientY: 112 })); });
+    act(() => { window.dispatchEvent(new MouseEvent('pointerup', { clientX: 24, clientY: 112 })); });
     await frame();
     expect(host.querySelector('[data-testid="csv-insert-line-row"]')).toBeNull();
     expect(latest).toBe('r2\nr3\nr1\nr4\nr5\n');
@@ -703,15 +703,15 @@ describe('CsvGridEditor Ctrl 多选与工具', () => {
 
   const plainClick = (sel: string) => {
     act(() => {
-      cell(sel).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
-      cell(sel).dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      cell(sel).dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+      cell(sel).dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
     });
   };
 
   const ctrlClick = (sel: string) => {
     act(() => {
-      cell(sel).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, ctrlKey: true }));
-      cell(sel).dispatchEvent(new MouseEvent('mouseup', { bubbles: true, ctrlKey: true }));
+      cell(sel).dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, ctrlKey: true }));
+      cell(sel).dispatchEvent(new MouseEvent('pointerup', { bubbles: true, ctrlKey: true }));
     });
   };
 
@@ -813,9 +813,9 @@ describe('CsvGridEditor Ctrl 多选与工具', () => {
     const handle = (host.querySelectorAll('.csv-rownum')[1] as HTMLElement)
       .querySelector('.cursor-row-resize') as HTMLElement;
     act(() => {
-      handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientY: 100 }));
-      window.dispatchEvent(new MouseEvent('mousemove', { clientY: 130 })); // +30px
-      window.dispatchEvent(new MouseEvent('mouseup', { clientY: 130 }));
+      handle.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientY: 100 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientY: 130 })); // +30px
+      window.dispatchEvent(new MouseEvent('pointerup', { clientY: 130 }));
     });
     await frame();
     expect(rowHs).toEqual([58]); // 默认 28 + 30

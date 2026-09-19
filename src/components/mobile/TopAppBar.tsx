@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   FileText, FolderOpen, Folder, Save, SaveAll, Plus, MoreVertical,
   Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2, GitCompare,
-  Eye, Pencil,
+  Eye, Pencil, Code,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useT } from '../../lib/i18nContext';
@@ -37,6 +37,10 @@ interface TopAppBarProps {
   canToggleView?: boolean;
   view?: 'edit' | 'preview';
   onToggleView?: () => void;
+  /** CSV 网格/文本视图切换（仅 CSV 标签提供；手机布局没有桌面工具栏行，
+      缺了它从文本视图（如大文件/查找自动切换）就回不去网格） */
+  csvView?: 'grid' | 'text';
+  onToggleCsvView?: () => void;
 }
 
 /**
@@ -50,6 +54,7 @@ export function TopAppBar({
   onCloseTab, onSettings, onShortcuts, onAbout,
   treeOpen, hasTreeRoot, onToggleTree,
   canToggleView, view, onToggleView,
+  csvView, onToggleCsvView,
 }: TopAppBarProps) {
   const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -148,6 +153,20 @@ export function TopAppBar({
           aria-label={view === 'preview' ? t('mobile.switchToEdit') : t('mobile.switchToPreview')}
         >
           {view === 'preview' ? <Pencil size={19} /> : <Eye size={19} />}
+        </button>
+      )}
+
+      {/* CSV 网格/文本切换：图标指向可切换到的视图 */}
+      {csvView && onToggleCsvView && (
+        <button
+          onClick={onToggleCsvView}
+          className={cn(
+            'w-11 h-11 rounded-md flex items-center justify-center shrink-0 transition-colors',
+            isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500'
+          )}
+          aria-label={csvView === 'text' ? t('csv.grid') : t('csv.text')}
+        >
+          {csvView === 'text' ? <Table size={19} /> : <Code size={19} />}
         </button>
       )}
 

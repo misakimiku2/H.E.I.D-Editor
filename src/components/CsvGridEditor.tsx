@@ -3,9 +3,11 @@ import { Filter, StretchHorizontal, WrapText, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { clipboardReadPermissionState } from '../lib/fileOps';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import { ContextMenu, type ContextMenuItem, type ContextMenuState } from './ContextMenu';
+import { useLongPress } from '../hooks/useLongPress';
 import {
-  blockToHtml, clearCells, computeRowOrder, deleteCols, deleteRows, estimateColumnWidths, estimateWrappedLines, fillInto,
+  blockToHtml, clearCells, computeRowOrder, deleteCols, deleteRows, estimateColumnWidths, estimateWrappedLines, fillDir, fillInto,
   insertColAfter, insertColBefore, insertRowAbove, insertRowBelow, moveCol, moveRow,
   parseClipboardTable, parseCsv, parseHtmlTable, selectionToTsv, serializeCsv, setCells, swapCols, swapRows,
   type CsvDelimiter, type CsvSortState, type GridRect,
@@ -43,6 +45,9 @@ const AUTO_W = -1;
     行高仅 28px，行向热区取小值给互换留出中部空间 */
 const COL_LINE_EDGE = 8;
 const ROW_LINE_EDGE = 5;
+/** 触屏选区延展把手：命中区 36px（视觉 12px 圆点）。不取满 48 是因为把手锚在
+    活动格右下角，命中区再大会吞掉相邻格角部的点击 */
+const SEL_HANDLE_HIT = 36;
 
 export interface CsvGridEditorProps {
   content: string;
@@ -97,6 +102,10 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   onWidthsChange, onRowHChange, onRowHeightsChange, onWrapChange, onShape,
 }) {
   const t = useT();
+  /* 触屏交互层：长按弹右键同款菜单、再点已选格进编辑、选区延展把手；
+     桌面（鼠标为主）路径零变化 */
+  const TOUCH = IS_TOUCH_PRIMARY;
+  const { bind: bindMenu } = useLongPress();
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const proxyRef = useRef<HTMLTextAreaElement | null>(null);
@@ -106,6 +115,10 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   const fillRectRef = useRef<GridRect | null>(null);
   /* 拖拽框选进行中标记（window 级 mousemove 扩展选区） */
   const dragSelectingRef = useRef(false);
+  /* 触屏按下的格子信息：选择与「再点已选格进编辑」推迟到 compat mousedown（仅 tap
+     会合成）执行——pointerdown 就收拢选区的话，长按菜单弹出前选区已被破坏，
+     「框选后长按菜单内做填充」就永远拿不到多格选区 */
+  const tapInfoRef = useRef<{ r: number; c: number; wasActive: boolean } | null>(null);
 
   /* ---- 数据派生 ---- */
   const grid = useMemo(() => parseCsv(content, delimiter), [content, delimiter]);
@@ -254,6 +267,10 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   /* ---- 单元格编辑（单元格内输入框与编辑栏共用同一 editing 状态） ---- */
   const startEdit = useCallback((r: number, c: number, initial?: string) => {
     if (readOnly) return;
+    /* 已在该格编辑中且非键入重启：保留输入。触屏「再点已选格进编辑」之后
+       紧随的合成 dblclick 会再调一次 startEdit，不能把编辑值重置回去 */
+    const ed = editingRef.current;
+    if (initial === undefined && ed && ed.r === r && ed.c === c) return;
     /* src='cell'：布局副作用据此把焦点交给单元格输入框；
        值经 origRow 读原始行，排序/筛选态下双击表头行才不会取错 */
     setEditing({ r, c, value: initial ?? grid[origRow(r)]?.[c] ?? '', src: 'cell' });
@@ -435,14 +452,18 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     return { r, c };
   }, [gridPoint, rowAtY, colLeft, totalCols]);
 
-  const beginFillDrag = useCallback((e: React.MouseEvent) => {
+  /* 拖拽一律走 Pointer 事件系：Android WebView 只为 tap 合成鼠标事件，拖拽无
+     mousemove——pointermove 天然覆盖鼠标与触屏（触屏需 touch-action:none 配合），
+     pointercancel 覆盖「拖拽中被系统接管（如滚动）」的清理 */
+
+  const beginFillDrag = useCallback((e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
     if (readOnly || viewTransformed) return;
     const sourceRect = rect;
     fillRectRef.current = sourceRect;
     setFillDrag(sourceRect);
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const p = cellFromPoint(ev.clientX, ev.clientY);
       const target: GridRect = {
         r1: Math.min(sourceRect.r1, p.r), r2: Math.max(sourceRect.r2, p.r),
@@ -451,9 +472,13 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       fillRectRef.current = target;
       setFillDrag(target);
     };
-    const onUp = (ev: MouseEvent) => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+    const onUp = () => {
+      cleanup();
       const target = fillRectRef.current;
       fillRectRef.current = null;
       setFillDrag(null);
@@ -470,8 +495,15 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       }
       refocusGridSoon();
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const onCancel = () => {
+      cleanup();
+      fillRectRef.current = null;
+      setFillDrag(null);
+      refocusGridSoon();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [readOnly, viewTransformed, rect, grid, cellFromPoint, commitGrid, refocusGridSoon]);
 
   /* ---- 拖拽框选：单元格上按下后按住移动扩展选区（Excel 习惯） ---- */
@@ -484,24 +516,47 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     setAnchor(start);
     setFocus(start);
     dragSelectingRef.current = true;
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       if (!dragSelectingRef.current) return;
       setFocus(cellFromPoint(ev.clientX, ev.clientY));
     };
-    const onUp = () => {
+    const cleanup = () => {
       dragSelectingRef.current = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      refocusGridSoon();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const onUp = () => { cleanup(); refocusGridSoon(); };
+    const onCancel = () => { cleanup(); refocusGridSoon(); };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+  }, [cellFromPoint, refocusGridSoon]);
+
+  /* ---- 触屏选区延展把手：从选区右下角圆点拖出新对角（桌面拖框选的等价物，
+     Sheets 移动端同款交互）；touch-action:none 让兼容鼠标事件流复用 mouse 监听 ---- */
+  const beginSelectionDrag = useCallback((e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const onMove = (ev: PointerEvent) => {
+      setFocus(cellFromPoint(ev.clientX, ev.clientY));
+    };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+    const onUp = () => { cleanup(); refocusGridSoon(); };
+    const onCancel = () => { cleanup(); refocusGridSoon(); };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [cellFromPoint, refocusGridSoon]);
 
   /* ---- Ctrl+点选/拖拽：向附加选区追加（最后一个元素是正在拖的区） ---- */
   const beginExtraDrag = useCallback((start: CellPos) => {
     setExtraRanges(ers => [...ers, { r1: start.r, c1: start.c, r2: start.r, c2: start.c }]);
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const p = cellFromPoint(ev.clientX, ev.clientY);
       const next: GridRect = {
         r1: Math.min(start.r, p.r), c1: Math.min(start.c, p.c),
@@ -513,13 +568,16 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         return sameRect(lastRg, next) ? ers : [...ers.slice(0, -1), next];
       });
     };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      refocusGridSoon();
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const onUp = () => { cleanup(); refocusGridSoon(); };
+    const onCancel = () => { cleanup(); refocusGridSoon(); };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [cellFromPoint, refocusGridSoon]);
 
   /* ---- 列/行拖拽重排：列标/行号按下后拖动，松手按落点二选一 ----
@@ -527,13 +585,13 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
      其余顺移，目标线高亮）。移动阈值 4px 区分「点击选择」（mousedown 已完成）与「拖拽」；
      排序/筛选态禁用（结构操作）。落点记在闭包局部（onMove/onUp 是不同原生事件，
      不依赖渲染刷新）；手调列宽跟随内容走 */
-  const beginColSwapDrag = useCallback((c: number, e: React.MouseEvent) => {
+  const beginColSwapDrag = useCallback((c: number, e: React.PointerEvent) => {
     if (readOnly || viewTransformed) return;
     const startX = e.clientX;
     const startY = e.clientY;
     let active = false;
     let target: { mode: 'swap' | 'insert'; to: number } | null = null;
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       if (!active) {
         if (Math.abs(ev.clientX - startX) < 4 && Math.abs(ev.clientY - startY) < 4) return;
         active = true;
@@ -549,9 +607,13 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       target = { mode, to };
       setSwapDrag(d => (d && d.kind === 'col' && d.mode === mode && d.to === to ? d : { kind: 'col', mode, from: c, to }));
     };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
     const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      cleanup();
       document.body.style.cursor = '';
       setSwapDrag(null);
       const drop = target;
@@ -588,18 +650,25 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       }
       refocusGridSoon();
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const onCancel = () => {
+      cleanup();
+      document.body.style.cursor = '';
+      setSwapDrag(null);
+      refocusGridSoon();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [readOnly, viewTransformed, gridPoint, cellFromPoint, colLeft, dataCols, grid, commitGrid,
     manualWidths, onWidthsChange, totalRows, editingRef, commitEdit, refocusGridSoon]);
 
-  const beginRowSwapDrag = useCallback((r: number, e: React.MouseEvent) => {
+  const beginRowSwapDrag = useCallback((r: number, e: React.PointerEvent) => {
     if (readOnly || viewTransformed) return;
     const startX = e.clientX;
     const startY = e.clientY;
     let active = false;
     let target: { mode: 'swap' | 'insert'; to: number } | null = null;
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       if (!active) {
         if (Math.abs(ev.clientX - startX) < 4 && Math.abs(ev.clientY - startY) < 4) return;
         active = true;
@@ -615,9 +684,13 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       target = { mode, to };
       setSwapDrag(d => (d && d.kind === 'row' && d.mode === mode && d.to === to ? d : { kind: 'row', mode, from: r, to }));
     };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
     const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      cleanup();
       document.body.style.cursor = '';
       setSwapDrag(null);
       const drop = target;
@@ -639,22 +712,33 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       }
       refocusGridSoon();
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const onCancel = () => {
+      cleanup();
+      document.body.style.cursor = '';
+      setSwapDrag(null);
+      refocusGridSoon();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [readOnly, viewTransformed, gridPoint, cellFromPoint, dataRows, dataCols, grid, commitGrid,
     editingRef, commitEdit, refocusGridSoon]);
 
   /* ---- 列宽拖拽（拖动中本地预览，松手提交 onWidthsChange） ---- */
-  const beginColResize = useCallback((c: number, e: React.MouseEvent) => {
+  const beginColResize = useCallback((c: number, e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
     const startX = e.clientX;
     const startUnits = colUnits[c];
-    const calc = (ev: MouseEvent) => Math.max(MIN_COL_UNITS, Math.round(startUnits + (ev.clientX - startX) / PX_PER_UNIT));
-    const onMove = (ev: MouseEvent) => setWidthDrag({ c, units: calc(ev) });
-    const onUp = (ev: MouseEvent) => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+    const calc = (ev: PointerEvent) => Math.max(MIN_COL_UNITS, Math.round(startUnits + (ev.clientX - startX) / PX_PER_UNIT));
+    const onMove = (ev: PointerEvent) => setWidthDrag({ c, units: calc(ev) });
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+    const onUp = (ev: PointerEvent) => {
+      cleanup();
       const units = calc(ev);
       setWidthDrag(null);
       if (units !== startUnits) {
@@ -664,8 +748,14 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       }
       refocusGridSoon();
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const onCancel = () => {
+      cleanup();
+      setWidthDrag(null);
+      refocusGridSoon();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [colUnits, manualWidths, onWidthsChange, refocusGridSoon]);
 
   const resetColWidth = useCallback((c: number) => {
@@ -675,18 +765,22 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   }, [manualWidths, onWidthsChange]);
 
   /* ---- 行高拖拽（行号底部边缘，与列宽拖拽同一套交互）；拖动中本地预览，松手提交 ---- */
-  const beginRowResize = useCallback((r: number, e: React.MouseEvent) => {
+  const beginRowResize = useCallback((r: number, e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
     if (!onRowHeightsChange) return;
     const startY = e.clientY;
     const startH = rowHeightOf(r);
-    const calc = (ev: MouseEvent) =>
+    const calc = (ev: PointerEvent) =>
       Math.max(MIN_ROW_H, Math.min(MAX_ROW_H, Math.round(startH + (ev.clientY - startY))));
-    const onMove = (ev: MouseEvent) => setRowHeightDrag({ r, h: calc(ev) });
-    const onUp = (ev: MouseEvent) => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+    const onMove = (ev: PointerEvent) => setRowHeightDrag({ r, h: calc(ev) });
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+    const onUp = (ev: PointerEvent) => {
+      cleanup();
       const h = calc(ev);
       setRowHeightDrag(null);
       if (h !== startH) {
@@ -697,8 +791,14 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       }
       refocusGridSoon();
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const onCancel = () => {
+      cleanup();
+      setRowHeightDrag(null);
+      refocusGridSoon();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [onRowHeightsChange, rowHeightOf, manualRowHeights, refocusGridSoon]);
 
   const resetRowHeight = useCallback((r: number) => {
@@ -708,6 +808,51 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     next[r] = 0;
     onRowHeightsChange(next);
   }, [onRowHeightsChange, manualRowHeights]);
+
+  /* ---- 触屏步进替代（拖拽重排/列宽行高把手的非拖拽等价物，进长按菜单） ---- */
+  const moveRowOp = useCallback((r: number, delta: number) => {
+    if (readOnly || viewTransformed) return;
+    const to = r + delta;
+    if (to < 0 || to >= dataRows) return;
+    if (editingRef.current) commitEdit('none');
+    commitGrid(moveRow(grid, r, to));
+    setAnchor({ r: to, c: 0 });
+    setFocus({ r: to, c: Math.max(dataCols - 1, 0) });
+  }, [readOnly, viewTransformed, dataRows, dataCols, grid, commitGrid, commitEdit]);
+
+  const moveColOp = useCallback((c: number, delta: number) => {
+    if (readOnly || viewTransformed) return;
+    const to = c + delta;
+    if (to < 0 || to >= dataCols) return;
+    if (editingRef.current) commitEdit('none');
+    const moved = moveCol(grid, c, to);
+    if (moved === grid) return;
+    commitGrid(moved);
+    if (manualWidths) { // 手调列宽跟随内容走（相邻互换）
+      const widths = manualWidths.slice();
+      while (widths.length <= Math.max(c, to)) widths.push(AUTO_W);
+      const w = widths[c];
+      widths[c] = widths[to];
+      widths[to] = w;
+      onWidthsChange(widths);
+    }
+    setAnchor({ r: 0, c: to });
+    setFocus({ r: Math.max(totalRows - 1, 0), c: to });
+  }, [readOnly, viewTransformed, dataCols, grid, commitGrid, commitEdit, manualWidths, onWidthsChange, totalRows]);
+
+  const stepRowHeight = useCallback((r: number, delta: number) => {
+    if (!onRowHeightsChange) return;
+    const next = [...(manualRowHeights ?? [])];
+    while (next.length <= r) next.push(0);
+    next[r] = clamp(rowHeightOf(r) + delta, MIN_ROW_H, MAX_ROW_H);
+    onRowHeightsChange(next);
+  }, [onRowHeightsChange, manualRowHeights, rowHeightOf]);
+
+  const stepColWidth = useCallback((c: number, delta: number) => {
+    const next = [...(manualWidths ?? colUnits)];
+    next[c] = clamp(colUnits[c] + delta, MIN_COL_UNITS, FIT_WIDTH_MAX);
+    onWidthsChange(next);
+  }, [colUnits, manualWidths, onWidthsChange]);
 
   /* ---- 行列操作（右键行号/列标/单元格） ---- */
   const rowOp = useCallback((kind: 'above' | 'below' | 'delete', r: number) => {
@@ -730,19 +875,28 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     { h: 40, key: 'csv.rowHeightRelaxed' },
   ] as const;
 
-  const openRowMenu = useCallback((r: number, e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  /* 菜单统一以 (x, y) 开定位：桌面走 contextmenu 的 clientX/Y，触屏走长按起点。
+     e 可选（长按无事件）；触屏项仅 IS_TOUCH_PRIMARY 注入（拖拽重排/行高列宽把手的
+     非拖拽替代，desktop-to-android 硬性规范），桌面菜单保持原样 */
+  const openRowMenu = useCallback((r: number, x: number, y: number, e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
     setExtraRanges([]); // 菜单操作以整行为主选区
     setAnchor({ r, c: 0 });
     setFocus({ r, c: Math.max(dataCols - 1, 0) });
     const orig = origRow(r); // 行结构操作落在原始行；行高按显示行记忆
     setMenu({
-      x: e.clientX, y: e.clientY,
+      x, y,
       items: [
         { label: t('csv.insertRowAbove'), disabled: readOnly || viewTransformed, onSelect: () => rowOp('above', orig) },
         { label: t('csv.insertRowBelow'), disabled: readOnly || viewTransformed, onSelect: () => rowOp('below', orig) },
         { label: t('csv.deleteRows'), danger: true, disabled: readOnly || viewTransformed, separatorBefore: true, onSelect: () => rowOp('delete', orig) },
+        ...(TOUCH ? [
+          { label: t('csv.moveRowUp'), disabled: readOnly || viewTransformed || r <= 0, onSelect: () => moveRowOp(r, -1) },
+          { label: t('csv.moveRowDown'), disabled: readOnly || viewTransformed || r >= dataRows - 1, onSelect: () => moveRowOp(r, 1) },
+          { label: t('csv.growRow'), separatorBefore: true, disabled: !onRowHeightsChange, onSelect: () => stepRowHeight(r, 12) },
+          { label: t('csv.shrinkRow'), disabled: !onRowHeightsChange, onSelect: () => stepRowHeight(r, -12) },
+        ] : []),
         ...(onRowHChange ? ROW_H_PRESETS.map((p, i) => ({
           label: `${t(p.key)}${rowH === p.h ? ' ✓' : ''}`,
           separatorBefore: i === 0,
@@ -751,16 +905,17 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         { label: t('csv.resetRowHeight'), disabled: !(manualRowHeights && manualRowHeights[r] > 0), onSelect: () => resetRowHeight(r) },
       ],
     });
-  }, [t, rowOp, readOnly, viewTransformed, dataCols, rowH, onRowHChange, origRow, manualRowHeights, resetRowHeight]);
+  }, [t, rowOp, readOnly, viewTransformed, dataCols, dataRows, rowH, onRowHChange, origRow, manualRowHeights, resetRowHeight,
+    TOUCH, moveRowOp, stepRowHeight]);
 
-  const openColMenu = useCallback((c: number, e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const openColMenu = useCallback((c: number, x: number, y: number, e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
     setExtraRanges([]); // 菜单操作以整列为主选区
     setAnchor({ r: 0, c });
     setFocus({ r: Math.max(dataRows - 1, 0), c });
     setMenu({
-      x: e.clientX, y: e.clientY,
+      x, y,
       items: [
         { label: sort?.col === c && sort.dir === 'asc' ? t('csv.sortAsc') + ' ✓' : t('csv.sortAsc'), onSelect: () => setSort({ col: c, dir: 'asc' }) },
         { label: sort?.col === c && sort.dir === 'desc' ? t('csv.sortDesc') + ' ✓' : t('csv.sortDesc'), onSelect: () => setSort({ col: c, dir: 'desc' }) },
@@ -769,9 +924,17 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         { label: t('csv.insertColRight'), disabled: readOnly || viewTransformed, onSelect: () => colOp('right', c) },
         { label: t('csv.resetColWidth'), disabled: !(manualWidths && manualWidths[c] > 0), onSelect: () => resetColWidth(c) },
         { label: t('csv.deleteCols'), danger: true, disabled: readOnly || viewTransformed, onSelect: () => colOp('delete', c) },
+        ...(TOUCH ? [
+          /* 移动限数据列内：虚列（网格外的空列）无重排意义 */
+          { label: t('csv.moveColLeft'), separatorBefore: true, disabled: readOnly || viewTransformed || c <= 0 || c >= dataCols, onSelect: () => moveColOp(c, -1) },
+          { label: t('csv.moveColRight'), disabled: readOnly || viewTransformed || c >= dataCols - 1, onSelect: () => moveColOp(c, 1) },
+          { label: t('csv.widenCol'), separatorBefore: true, onSelect: () => stepColWidth(c, 4) },
+          { label: t('csv.narrowCol'), disabled: colUnits[c] <= MIN_COL_UNITS, onSelect: () => stepColWidth(c, -4) },
+        ] : []),
       ],
     });
-  }, [t, colOp, readOnly, viewTransformed, dataRows, manualWidths, resetColWidth, sort]);
+  }, [t, colOp, readOnly, viewTransformed, dataRows, dataCols, manualWidths, resetColWidth, sort,
+    TOUCH, moveColOp, stepColWidth, colUnits]);
 
   /* 编辑态右键粘贴：把剪贴板文本插到编辑框光标处（保住未提交的编辑），
      而不是提交后按表格拆行覆盖下方；权限未授予时退回代理路径（下一次 Ctrl+V） */
@@ -792,11 +955,11 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     });
   }, []);
 
-  /* 单元格右键：剪贴板 + 清空 + 行列操作；点在选区外先把选区收拢到该格。
+  /* 单元格右键/长按：剪贴板 + 清空 + 全选/填充（触屏） + 行列操作；点在选区外先把选区收拢到该格。
      右键的正是编辑中的那格时先不提交（粘贴要插回编辑框），其余菜单项执行前先落盘 */
-  const openCellMenu = useCallback((r: number, c: number, e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const openCellMenu = useCallback((r: number, c: number, x: number, y: number, e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
     const ed = editingRef.current;
     const editingHere = !!ed && ed.r === r && ed.c === c;
     if (!editingHere && editingRef.current) commitEdit('none');
@@ -810,12 +973,18 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       setFocus({ r, c });
     }
     setMenu({
-      x: e.clientX, y: e.clientY,
+      x, y,
       items: [
         { label: t('csv.menuCut'), disabled: readOnly || viewTransformed, onSelect: withCommit(() => doCut()) },
         { label: t('csv.menuCopy'), onSelect: withCommit(() => doCopy()) },
         { label: t('csv.menuPaste'), disabled: readOnly || viewTransformed, onSelect: editingHere ? () => pasteIntoEdit(editEl) : withCommit(() => doPaste()) },
         { label: t('csv.menuClear'), disabled: readOnly || viewTransformed, separatorBefore: true, onSelect: withCommit(() => clearSelection()) },
+        { label: t('csv.menuSelectAll'), onSelect: () => { setExtraRanges([]); setAnchor({ r: 0, c: 0 }); setFocus({ r: Math.max(totalRows - 1, 0), c: Math.max(dataCols - 1, 0) }); } },
+        ...(TOUCH ? [
+          /* 填充手柄的触屏替代：先拖选区把手圈住源+目标，再从菜单填充（Excel 填充语义，fillDir 纯复制） */
+          { label: t('csv.fillDown'), disabled: readOnly || viewTransformed || rectRef.current.r2 === rectRef.current.r1, separatorBefore: true, onSelect: withCommit(() => commitGrid(fillDir(grid, rectRef.current, 'down'))) },
+          { label: t('csv.fillRight'), disabled: readOnly || viewTransformed || rectRef.current.c2 === rectRef.current.c1, onSelect: withCommit(() => commitGrid(fillDir(grid, rectRef.current, 'right'))) },
+        ] : []),
         { label: t('csv.insertRowAbove'), separatorBefore: true, disabled: readOnly || viewTransformed, onSelect: withCommit(() => rowOp('above', r)) },
         { label: t('csv.insertRowBelow'), disabled: readOnly || viewTransformed, onSelect: withCommit(() => rowOp('below', r)) },
         { label: t('csv.deleteRows'), danger: true, disabled: readOnly || viewTransformed, onSelect: withCommit(() => rowOp('delete', r)) },
@@ -824,7 +993,8 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         { label: t('csv.deleteCols'), danger: true, disabled: readOnly || viewTransformed, onSelect: withCommit(() => colOp('delete', c)) },
       ],
     });
-  }, [t, allRanges, commitEdit, readOnly, viewTransformed, doCut, doCopy, doPaste, clearSelection, rowOp, colOp, pasteIntoEdit]);
+  }, [t, allRanges, commitEdit, readOnly, viewTransformed, doCut, doCopy, doPaste, clearSelection, rowOp, colOp, pasteIntoEdit,
+    TOUCH, grid, commitGrid, totalRows, dataCols]);
 
   /* ---- 键盘 ---- */
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -985,6 +1155,55 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
       <div
         key={c}
         data-testid={`csv-cell-${r}-${c}`}
+        {...bindMenu({
+          onLongPress: (pos) => openCellMenu(r, c, pos.x, pos.y),
+          onContextMenu: (e) => openCellMenu(r, c, e.clientX, e.clientY, e),
+          onPointerDown: (e) => {
+            if (e.button !== 0) return;
+            if (e.pointerType === 'touch') {
+              /* 触屏：按下不动选区（长按菜单依赖现选区），tap 动作延后到
+                 compat mousedown；触屏拖拽会滚动网格（pointercancel），无框选 */
+              tapInfoRef.current = { r, c, wasActive: rect.r1 === rect.r2 && rect.c1 === rect.c2 && focus.r === r && focus.c === c };
+              return;
+            }
+            /* 桌面鼠标：按下即选择并可拖拽框选 */
+            if (editing) commitEdit('none');
+            if (e.ctrlKey || e.metaKey) {
+              /* Ctrl：已选中的格子 → 收拢为该格重新开始；未选中 → 追加选区（可拖成片） */
+              if (allRanges.some(rg => inRect(rg, r, c))) {
+                setExtraRanges([]);
+                setAnchor({ r, c });
+                setFocus({ r, c });
+              } else {
+                beginExtraDrag({ r, c });
+              }
+              return;
+            }
+            if (extraRanges.length) setExtraRanges([]); // 普通点击重新开始选区
+            beginDragSelect({ r, c }, e.shiftKey);
+          },
+          onMouseDown: (e) => {
+            /* 触屏 tap（compat mousedown 仅 tap 合成；长按后的合成 mousedown 已被
+               bind 吞掉不会到达）：点新格选择；再点已选格 = 进入编辑（双击的触屏
+               等价，Sheets 移动端同款）。preventDefault 拦掉默认焦点转移——否则
+               编辑框刚聚焦就被 wrapper 抢走焦点 → blur → 提交关闭（桌面双击在
+               dblclick 里进编辑，位于所有默认动作之后，无此问题） */
+            if (!TOUCH || e.button !== 0) return;
+            const p = tapInfoRef.current;
+            if (!p || p.r !== r || p.c !== c) return;
+            tapInfoRef.current = null;
+            if (p.wasActive && !editingRef.current &&
+                rect.r1 === rect.r2 && rect.c1 === rect.c2 && focus.r === r && focus.c === c) {
+              e.preventDefault();
+              startEdit(r, c);
+              return;
+            }
+            if (extraRanges.length) setExtraRanges([]);
+            setAnchor({ r, c });
+            setFocus({ r, c });
+          },
+        })}
+        onDoubleClick={() => startEdit(r, c)}
         className={cn(
           'csv-cell relative truncate border-b border-r px-2 text-xs shrink-0',
           dark ? 'border-zinc-700/60' : 'border-zinc-200',
@@ -992,25 +1211,6 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           header && 'font-semibold',
         )}
         style={{ width: px(c), lineHeight: `${lineHeight}px` }}
-        onMouseDown={(e) => {
-          if (e.button !== 0) return;
-          if (editing) commitEdit('none');
-          if (e.ctrlKey || e.metaKey) {
-            /* Ctrl：已选中的格子 → 收拢为该格重新开始；未选中 → 追加选区（可拖成片） */
-            if (allRanges.some(rg => inRect(rg, r, c))) {
-              setExtraRanges([]);
-              setAnchor({ r, c });
-              setFocus({ r, c });
-            } else {
-              beginExtraDrag({ r, c });
-            }
-            return;
-          }
-          if (extraRanges.length) setExtraRanges([]); // 普通点击重新开始选区
-          beginDragSelect({ r, c }, e.shiftKey);
-        }}
-        onDoubleClick={() => startEdit(r, c)}
-        onContextMenu={(e) => openCellMenu(r, c, e)}
       >
         <span
           className={cn('block', wrap && 'whitespace-pre-wrap break-words', NUMERIC_CELL_RE.test(v.trim()) && 'text-right tabular-nums')}
@@ -1026,8 +1226,9 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
 
   return (
     <div className="flex flex-col h-full min-w-0 overflow-hidden">
-      {/* 编辑栏：地址框 + 内容输入 + 表头开关 */}
-      <div className={cn('flex items-stretch border-b shrink-0 text-xs', dark ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-zinc-100')}>
+      {/* 编辑栏：地址框 + 内容输入 + 表头开关（触屏：行高与字号加大，按钮热区 ≥44px） */}
+      <div className={cn('flex items-stretch border-b shrink-0 text-xs', TOUCH && 'min-h-[44px]',
+        dark ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-zinc-100')}>
         <div
           className={cn('w-14 flex items-center justify-center border-r shrink-0 tabular-nums',
             dark ? 'border-zinc-700 text-zinc-400' : 'border-zinc-200 text-zinc-500')}
@@ -1041,6 +1242,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           data-testid="csv-formula-input"
           rows={Math.min(5, Math.max(1, (editing ? editing.value : '').split('\n').length))}
           className={cn('flex-1 min-w-0 px-2 py-1.5 bg-transparent outline-none resize-none leading-[20px]',
+            TOUCH && 'text-sm',
             dark ? 'text-zinc-200 placeholder:text-zinc-600' : 'text-zinc-800 placeholder:text-zinc-400')}
           value={editing ? editing.value : displayText(cellValue(focus.r, focus.c))}
           placeholder={t('csv.formulaPlaceholder')}
@@ -1067,7 +1269,8 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         {/* 自适应表格大小：列宽按内容实测、行高按换行模式下的折行数、并自动开启换行 */}
         <button
           data-testid="csv-autofit-widths"
-          className={cn('px-2.5 shrink-0 border-l cursor-pointer transition-colors',
+          className={cn('shrink-0 border-l cursor-pointer transition-colors flex items-center justify-center',
+            TOUCH ? 'w-11' : 'px-2.5',
             dark ? 'border-zinc-700 text-zinc-400 hover:text-blue-200' : 'border-zinc-200 text-zinc-500 hover:text-blue-700')}
           title={t('csv.autoFitTable')}
           onClick={() => {
@@ -1091,7 +1294,8 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         {/* 换行开关：开启后单元格内容按列宽折行（配合自适应行高） */}
         <button
           data-testid="csv-wrap-toggle"
-          className={cn('px-2.5 shrink-0 border-l text-[11px] transition-colors',
+          className={cn('shrink-0 border-l flex items-center justify-center transition-colors',
+            TOUCH ? 'w-11 text-sm' : 'px-2.5 text-[11px]',
             dark ? 'border-zinc-700' : 'border-zinc-200',
             wrap
               ? (dark ? 'bg-zinc-700/60 text-blue-300' : 'bg-blue-100 text-blue-700')
@@ -1111,7 +1315,8 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           <input
             data-testid="csv-filter-input"
             aria-label={t('csv.filterAria')}
-            className={cn('w-24 bg-transparent outline-none text-[11px]',
+            className={cn(TOUCH ? 'w-28 text-sm' : 'w-24 text-[11px]',
+              'bg-transparent outline-none',
               dark ? 'placeholder:text-zinc-600' : 'placeholder:text-zinc-400')}
             value={filter}
             placeholder={t('csv.filterPlaceholder')}
@@ -1124,7 +1329,8 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           {(filter || sort) && (
             <button
               data-testid="csv-view-reset"
-              className={cn('p-0.5 rounded', dark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
+              className={cn(TOUCH ? 'p-2.5' : 'p-0.5', 'rounded flex items-center justify-center',
+                dark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
               title={t('csv.sortClear')}
               onClick={() => { setFilter(''); setSort(null); }}
             >
@@ -1133,7 +1339,8 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           )}
         </div>
         <button
-          className={cn('px-2.5 shrink-0 border-l text-[11px] transition-colors',
+          className={cn('shrink-0 border-l transition-colors flex items-center justify-center',
+            TOUCH ? 'min-w-[44px] px-2 text-sm' : 'px-2.5 text-[11px]',
             headerOn
               ? (dark ? 'border-zinc-700 bg-zinc-700/60 text-blue-300' : 'border-zinc-200 bg-blue-100 text-blue-700')
               : (dark ? 'border-zinc-700 text-zinc-500 hover:text-zinc-300' : 'border-zinc-200 text-zinc-500 hover:text-zinc-700'))}
@@ -1173,6 +1380,17 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
               <div
                 key={c}
                 data-testid={`csv-colhead-${c}`}
+                {...bindMenu({
+                  onLongPress: (pos) => openColMenu(c, pos.x, pos.y),
+                  onContextMenu: (e) => openColMenu(c, e.clientX, e.clientY, e),
+                  onPointerDown: (e) => {
+                    if (e.button === 0 && !(e.target as HTMLElement).classList.contains('cursor-col-resize')) {
+                      setAnchor({ r: 0, c });
+                      setFocus({ r: Math.max(totalRows - 1, 0), c });
+                      beginColSwapDrag(c, e);
+                    }
+                  },
+                })}
                 className={cn('csv-colhead relative shrink-0 border-b border-r flex items-center justify-center text-[11px] font-medium',
                   dark ? 'border-zinc-700' : 'border-zinc-200',
                   swapDrag?.kind === 'col' && swapDrag.mode === 'swap' && swapDrag.to === c && swapDrag.from !== c
@@ -1180,24 +1398,17 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
                     : (dark ? 'bg-zinc-800 text-zinc-400' : 'bg-zinc-100 text-zinc-500'),
                   swapDrag?.kind === 'col' && swapDrag.from === c && 'opacity-40')}
                 title={!readOnly && !viewTransformed ? t('csv.swapColTip') : undefined}
-                style={{ width: px(c), height: HEADER_H }}
-                onMouseDown={(e) => {
-                  if (e.button === 0 && !(e.target as HTMLElement).classList.contains('cursor-col-resize')) {
-                    setAnchor({ r: 0, c });
-                    setFocus({ r: Math.max(totalRows - 1, 0), c });
-                    beginColSwapDrag(c, e);
-                  }
-                }}
-                onContextMenu={(e) => openColMenu(c, e)}
+                style={{ width: px(c), height: HEADER_H, touchAction: 'none' }}
               >
                 {colLabel(c)}
                 {sort?.col === c && (
                   <span className="ml-0.5 text-[8px] leading-none">{sort.dir === 'asc' ? '▲' : '▼'}</span>
                 )}
                 <span
-                  className={cn('absolute right-0 top-0 h-full w-[5px] cursor-col-resize',
+                  className={cn('absolute right-0 top-0 h-full cursor-col-resize',
+                    TOUCH ? 'w-2.5' : 'w-[5px]',
                     dark ? 'hover:bg-blue-500/50' : 'hover:bg-blue-500/40')}
-                  onMouseDown={(e) => beginColResize(c, e)}
+                  onPointerDown={(e) => beginColResize(c, e)}
                   onDoubleClick={(e) => { e.stopPropagation(); resetColWidth(c); }}
                 />
               </div>
@@ -1211,19 +1422,23 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
               style={{ top: HEADER_H, height: rowHeightOf(0) }}
             >
               <div
+                {...bindMenu({
+                  onLongPress: (pos) => openRowMenu(0, pos.x, pos.y),
+                  onContextMenu: (e) => openRowMenu(0, e.clientX, e.clientY, e),
+                  onPointerDown: (e) => {
+                    if (e.button === 0) { setAnchor({ r: 0, c: 0 }); setFocus({ r: 0, c: Math.max(dataCols - 1, 0) }); wrapperRef.current?.focus(); beginRowSwapDrag(0, e); }
+                  },
+                })}
                 className={rowNumClsFor(0)}
-                style={{ width: ROW_NUM_W, height: rowHeightOf(0) }}
+                style={{ width: ROW_NUM_W, height: rowHeightOf(0), touchAction: 'none' }}
                 title={!readOnly && !viewTransformed ? t('csv.swapRowTip') : undefined}
-                onMouseDown={(e) => {
-                  if (e.button === 0) { setAnchor({ r: 0, c: 0 }); setFocus({ r: 0, c: Math.max(dataCols - 1, 0) }); wrapperRef.current?.focus(); beginRowSwapDrag(0, e); }
-                }}
-                onContextMenu={(e) => openRowMenu(0, e)}
               >
                 1
                 <span
-                  className={cn('absolute bottom-0 left-0 right-0 h-[5px] cursor-row-resize',
+                  className={cn('absolute bottom-0 left-0 right-0 cursor-row-resize',
+                    TOUCH ? 'h-2.5' : 'h-[5px]',
                     dark ? 'hover:bg-blue-500/50' : 'hover:bg-blue-500/40')}
-                  onMouseDown={(e) => beginRowResize(0, e)}
+                  onPointerDown={(e) => beginRowResize(0, e)}
                   onDoubleClick={(e) => { e.stopPropagation(); resetRowHeight(0); }}
                 />
               </div>
@@ -1235,21 +1450,25 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           {rowsToRender.map(r => (
             <div key={r} className="csv-row absolute flex" style={{ top: bodyTop + rowTops[r], height: rowHeightOf(r) }}>
               <div
+                {...bindMenu({
+                  onLongPress: (pos) => openRowMenu(r, pos.x, pos.y),
+                  onContextMenu: (e) => openRowMenu(r, e.clientX, e.clientY, e),
+                  onPointerDown: (e) => {
+                    if (e.button === 0) { setAnchor({ r, c: 0 }); setFocus({ r, c: Math.max(dataCols - 1, 0) }); beginRowSwapDrag(r, e); }
+                  },
+                })}
                 className={rowNumClsFor(r)}
-                style={{ width: ROW_NUM_W, height: rowHeightOf(r) }}
-                onMouseDown={(e) => {
-                  if (e.button === 0) { setAnchor({ r, c: 0 }); setFocus({ r, c: Math.max(dataCols - 1, 0) }); beginRowSwapDrag(r, e); }
-                }}
-                onContextMenu={(e) => openRowMenu(r, e)}
+                style={{ width: ROW_NUM_W, height: rowHeightOf(r), touchAction: 'none' }}
                 title={viewTransformed
                   ? t('csv.filteredShape', { shown: viewOrder.length - (headerOn ? 1 : 0), total: dataRows - (headerOn ? 1 : 0) })
                   : (!readOnly ? t('csv.swapRowTip') : undefined)}
               >
                 {origRow(r) + 1}
                 <span
-                  className={cn('absolute bottom-0 left-0 right-0 h-[5px] cursor-row-resize',
+                  className={cn('absolute bottom-0 left-0 right-0 cursor-row-resize',
+                    TOUCH ? 'h-2.5' : 'h-[5px]',
                     dark ? 'hover:bg-blue-500/50' : 'hover:bg-blue-500/40')}
-                  onMouseDown={(e) => beginRowResize(r, e)}
+                  onPointerDown={(e) => beginRowResize(r, e)}
                   onDoubleClick={(e) => { e.stopPropagation(); resetRowHeight(r); }}
                 />
               </div>
@@ -1262,11 +1481,13 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
             <textarea
               ref={editInputRef}
               data-testid="csv-edit-input"
-              className={cn('absolute z-[25] px-2 text-xs outline-none border-2 box-border resize-none leading-[20px]',
+              className={cn('absolute z-[25] px-2 outline-none border-2 box-border resize-none leading-[20px]',
+                TOUCH ? 'text-sm' : 'text-xs',
                 dark ? 'bg-zinc-800 border-blue-400 text-zinc-100' : 'bg-white border-blue-500 text-zinc-900')}
               style={{
                 left: ROW_NUM_W + colLeft[editing.c], top: bodyTop + rowTops[editing.r],
                 width: px(editing.c),
+                minWidth: TOUCH ? 96 : undefined, // 窄列也够拇指输入
                 height: Math.max(rowHeightOf(editing.r), editing.value.split('\n').length * FIT_LINE_H + 6),
               }}
               value={editing.value}
@@ -1276,13 +1497,18 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
                 if (e.relatedTarget === formulaInputRef.current) return; // 转到编辑栏＝同一编辑
                 if (editingRef.current) commitEdit('none', !e.relatedTarget);
               }}
-              onContextMenu={(e) => editing && openCellMenu(editing.r, editing.c, e)}
+              onContextMenu={(e) => {
+                /* 触屏保留系统文本选择/编辑菜单（desktop-to-android 规范），仅桌面走右键菜单 */
+                if (IS_TOUCH_PRIMARY) return;
+                if (editing) openCellMenu(editing.r, editing.c, e.clientX, e.clientY, e);
+              }}
             />
           )}
 
-          {/* 填充手柄：主选区右下角（视觉 8px 方块，外层 14px 透明命中区方便抓取）；
-              排序/筛选态与 Ctrl 多选态隐藏（多区填充语义不明确） */}
-          {!readOnly && !viewTransformed && extraRanges.length === 0 && (
+          {/* 填充手柄（仅桌面）：主选区右下角（视觉 8px 方块，外层 14px 透明命中区方便抓取）；
+              排序/筛选态与 Ctrl 多选态隐藏（多区填充语义不明确）。
+              触屏改为下方选区延展把手 + 单元格菜单的填充项（desktop-to-android 映射） */}
+          {!readOnly && !viewTransformed && !TOUCH && extraRanges.length === 0 && (
             <span
               data-testid="csv-fill-handle"
               className="absolute z-[26] cursor-crosshair"
@@ -1292,9 +1518,31 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
                 width: 14,
                 height: 14,
               }}
-              onMouseDown={beginFillDrag}
+              onPointerDown={beginFillDrag}
             >
               <span className={cn('absolute bottom-[3px] right-[3px] h-2 w-2', dark ? 'bg-blue-400' : 'bg-blue-500')} />
+            </span>
+          )}
+
+          {/* 选区延展把手（仅触屏）：选区右下角圆点，拖动改 focus 延展选区（Sheets 移动端同款）。
+              编辑中隐藏（让位给单元格输入框）；touch-action:none 让拖动走兼容鼠标事件流 */}
+          {!readOnly && TOUCH && !editing && extraRanges.length === 0 && (
+            <span
+              data-testid="csv-sel-handle"
+              role="button"
+              aria-label={t('csv.selHandleAria')}
+              className="absolute z-[26] cursor-crosshair"
+              style={{
+                left: ROW_NUM_W + colLeft[rect.c2 + 1] - SEL_HANDLE_HIT / 2,
+                top: bodyTop + rowTops[rect.r2 + 1] - SEL_HANDLE_HIT / 2,
+                width: SEL_HANDLE_HIT,
+                height: SEL_HANDLE_HIT,
+                touchAction: 'none',
+              }}
+              onPointerDown={beginSelectionDrag}
+            >
+              <span className={cn('absolute bottom-[3px] right-[3px] h-3 w-3 rounded-full border-2',
+                dark ? 'bg-blue-400 border-zinc-900' : 'bg-blue-500 border-white')} />
             </span>
           )}
 

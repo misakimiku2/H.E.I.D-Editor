@@ -218,6 +218,21 @@ export function clearCells(grid: string[][], rect: GridRect): string[][] {
   return setCells(grid, rect, values);
 }
 
+/** 选区方向填充（触屏菜单项，替代桌面填充手柄的 Excel「填充」语义）：
+    向下 = 选区首行复制到区内其余行；向右 = 选区首列复制到区内其余列。
+    与 fillInto 不同：不延续数字序列/循环，只做纯复制 */
+export function fillDir(grid: string[][], rect: GridRect, dir: 'down' | 'right'): string[][] {
+  const rows = rect.r2 - rect.r1 + 1;
+  const cols = rect.c2 - rect.c1 + 1;
+  if (dir === 'down') {
+    const src = Array.from({ length: cols }, (_, c) => grid[rect.r1]?.[rect.c1 + c] ?? '');
+    return setCells(grid, rect, Array.from({ length: rows }, () => src.slice()));
+  }
+  return setCells(grid, rect, Array.from({ length: rows }, (_, r) =>
+    Array.from({ length: cols }, () => grid[rect.r1 + r]?.[rect.c1] ?? '')));
+}
+
+
 export function insertRowAbove(grid: string[][], at: number): string[][] {
   const width = Math.max(1, ...grid.map(r => r.length));
   const out = grid.map(r => r.slice());

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  blockToHtml, computeFill, detectDelimiter, estimateColumnWidths, parseCsv, serializeCsv,
+  blockToHtml, computeFill, fillDir, detectDelimiter, estimateColumnWidths, parseCsv, serializeCsv,
   estimateWrappedLines, moveCol, moveRow, swapCols, swapRows,
 } from './csv';
 
@@ -462,5 +462,37 @@ describe('blockToHtml（剪贴板 text/html 通道）', () => {
   it('单元格内换行保留为文本换行，特殊字符转义', () => {
     expect(blockToHtml([['a<b', 'x&y'], ['l1\nl2', '']]))
       .toBe('<table><tr><td>a&lt;b</td><td>x&amp;y</td></tr><tr><td>l1\nl2</td><td></td></tr></table>');
+  });
+});
+
+describe('fillDir（触屏菜单的方向填充）', () => {
+  it('向下填充：选区首行复制到区内其余行，数字不延续序列', () => {
+    const g = [['1', 'a'], ['', ''], ['', 'b']];
+    expect(fillDir(g, { r1: 0, c1: 0, r2: 2, c2: 1 }, 'down'))
+      .toEqual([['1', 'a'], ['1', 'a'], ['1', 'a']]);
+  });
+
+  it('填充只覆盖选区内：区外单元格保留', () => {
+    const g = [['2', 'a', 'x'], ['', '', 'y']];
+    expect(fillDir(g, { r1: 0, c1: 0, r2: 1, c2: 1 }, 'down'))
+      .toEqual([['2', 'a', 'x'], ['2', 'a', 'y']]);
+  });
+
+  it('向右填充：选区首列复制到区内其余列', () => {
+    const g = [['x', '', ''], ['y', '', 'keep']];
+    expect(fillDir(g, { r1: 0, c1: 0, r2: 1, c2: 2 }, 'right'))
+      .toEqual([['x', 'x', 'x'], ['y', 'y', 'y']]);
+  });
+
+  it('越界格按空串取源值', () => {
+    const g = [['a']];
+    expect(fillDir(g, { r1: 0, c1: 0, r2: 1, c2: 1 }, 'down'))
+      .toEqual([['a', ''], ['a', '']]);
+  });
+
+  it('单行/单列选区为恒等变换', () => {
+    const g = [['1', '2'], ['3', '4']];
+    expect(fillDir(g, { r1: 0, c1: 0, r2: 0, c2: 1 }, 'down')).toEqual(g);
+    expect(fillDir(g, { r1: 0, c1: 0, r2: 1, c2: 0 }, 'right')).toEqual(g);
   });
 });

@@ -1490,6 +1490,8 @@ export default function App() {
           canToggleView={!!isMarkdown && !activeTab?.readOnly}
           view={effectiveView === 'preview' ? 'preview' : 'edit'}
           onToggleView={toggleMdView}
+          csvView={isCsv && activeTab && !activeTab.binary ? effectiveCsvView : undefined}
+          onToggleCsvView={() => editor.setCsvState({ csvView: effectiveCsvView === 'grid' ? 'text' : 'grid' })}
         />
       ) : (
       <div

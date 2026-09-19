@@ -38,6 +38,10 @@ export const ContextMenu = React.memo<{
   onClose: () => void;
 }>(({ menu, isDarkMode, onClose }) => {
   const ref = useRef<HTMLDivElement | null>(null);
+  /* 挂载时刻：长按弹出的菜单可能被视口夹紧到手指正下方，触屏抬手后合成的
+     click 会落在某个菜单项上直接误执行。挂载后短窗口内的 click 一律忽略
+     （真人重新瞄准再点远快于此窗口下限）；同时覆盖文件树等所有共用方 */
+  const mountedAtRef = useRef(Date.now());
 
   useEffect(() => {
     const onDown = (e: PointerEvent | MouseEvent) => {
@@ -83,7 +87,14 @@ export const ContextMenu = React.memo<{
             <div className={cn("h-px mx-1 my-0.5", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
           )}
           <button
-            onClick={() => { onClose(); item.onSelect(); }}
+            onClick={() => {
+              /* 长按弹出的菜单可能被视口夹紧到手指正下方，触屏抬手后合成的 click
+                 会落在某个菜单项上直接误执行——挂载后短窗口内的触屏 click 忽略
+                 （真人重新瞄准再点远快于此窗口下限）。仅触屏启用，桌面零变化 */
+              if (TOUCH && Date.now() - mountedAtRef.current < 300) return;
+              onClose();
+              item.onSelect();
+            }}
             disabled={item.disabled}
             title={item.label}
             className={cn(

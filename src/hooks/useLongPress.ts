@@ -35,6 +35,13 @@ export interface LongPressOptions {
   onContextMenu?: (e: React.MouseEvent) => void;
   /** 点击回调（触屏上，长按触发后紧随的 click 被吞掉；桌面原样透传） */
   onClick?: (e: React.MouseEvent) => void;
+  /** mousedown 回调（元素自身的选择/拖拽起点逻辑）：长按触发后的合成 mousedown
+      仍被吞掉，其余情况在吞抑检查之后调用——网格单元格等已有 mousedown 逻辑用这个接线 */
+  onMouseDown?: (e: React.MouseEvent) => void;
+  /** pointerdown 回调（Pointer 事件系拖拽的起点）：桌面鼠标/触屏都调用
+      （第二指按下触屏取消路径除外）；长按簿记之后执行，触屏上拖动超阈值
+      会取消长按，两者可安全共存于同一元素 */
+  onPointerDown?: (e: React.PointerEvent) => void;
 }
 
 interface PendingPress {
@@ -65,7 +72,7 @@ export function useLongPress() {
 
   const bind = useCallback((opts: LongPressOptions) => ({
     onPointerDown: (e: React.PointerEvent) => {
-      if (!IS_TOUCH_PRIMARY || e.pointerType === 'mouse') return;
+      if (!IS_TOUCH_PRIMARY || e.pointerType === 'mouse') { opts.onPointerDown?.(e); return; }
       /* 已有待定长按时再来第二根手指：取消（捏合缩放优先） */
       if (pendingRef.current) { cancel(); return; }
       const startX = e.clientX;
@@ -82,6 +89,7 @@ export function useLongPress() {
       try { e.currentTarget.setPointerCapture(pointerId); } catch { /* 指针已失效则忽略 */ }
       /* 嵌套 bind（树行 vs 树空白、标签 vs 标签栏）只让最内层长按生效 */
       e.stopPropagation();
+      opts.onPointerDown?.(e);
     },
     onPointerMove: (e: React.PointerEvent) => {
       const pending = pendingRef.current;
@@ -95,11 +103,13 @@ export function useLongPress() {
     /* 触屏抬手后 WebView 会合成 mousedown/mouseup/click——不拦住 mousedown，
        刚弹出的菜单会被「点击外部关闭」逻辑立刻关掉（桌面路径不经过此分支） */
     onMouseDown: (e: React.MouseEvent) => {
-      if (!IS_TOUCH_PRIMARY) return;
+      if (!IS_TOUCH_PRIMARY) { opts.onMouseDown?.(e); return; }
       if (Date.now() - firedAtRef.current < CLICK_SUPPRESS_MS) {
         e.preventDefault();
         e.stopPropagation();
+        return;
       }
+      opts.onMouseDown?.(e);
     },
     onClick: (e: React.MouseEvent) => {
       if (IS_TOUCH_PRIMARY && Date.now() - firedAtRef.current < CLICK_SUPPRESS_MS) {

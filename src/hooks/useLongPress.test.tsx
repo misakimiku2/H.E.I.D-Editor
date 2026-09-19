@@ -24,10 +24,11 @@ let target: HTMLElement | null = null;
 const onLongPress = vi.fn();
 const onContextMenuMouse = vi.fn();
 const onClickMouse = vi.fn();
+const onMouseDownMouse = vi.fn();
 
 function Probe() {
   const { bind } = useLongPress();
-  return <div data-testid="target" {...bind({ onLongPress, onContextMenu: onContextMenuMouse, onClick: onClickMouse })} />;
+  return <div data-testid="target" {...bind({ onLongPress, onContextMenu: onContextMenuMouse, onClick: onClickMouse, onMouseDown: onMouseDownMouse })} />;
 }
 
 function mount() {
@@ -54,6 +55,7 @@ beforeEach(() => {
   onLongPress.mockClear();
   onContextMenuMouse.mockClear();
   onClickMouse.mockClear();
+  onMouseDownMouse.mockClear();
   mount();
 });
 
@@ -161,6 +163,20 @@ describe('useLongPress', () => {
     const md = new Event('mousedown', { bubbles: true, cancelable: true });
     act(() => { target!.dispatchEvent(md); });
     expect(md.defaultPrevented).toBe(false);
+  });
+
+  it('onMouseDown 透传：普通点按时收到回调，长按抑制窗口内不收到', () => {
+    /* 普通点按：透传给元素自身的 mousedown 逻辑 */
+    fire('pointerdown');
+    fire('pointerup');
+    act(() => { target!.dispatchEvent(new Event('mousedown', { bubbles: true, cancelable: true })); });
+    expect(onMouseDownMouse).toHaveBeenCalledTimes(1);
+    /* 长按触发后的合成 mousedown：仍被吞掉，透传回调不触发 */
+    fire('pointerdown');
+    act(() => { vi.advanceTimersByTime(LONG_PRESS_MS); });
+    fire('pointerup');
+    act(() => { target!.dispatchEvent(new Event('mousedown', { bubbles: true, cancelable: true })); });
+    expect(onMouseDownMouse).toHaveBeenCalledTimes(1);
   });
 
   it('普通点按的 click 正常透传', () => {
