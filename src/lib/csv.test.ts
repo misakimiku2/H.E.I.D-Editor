@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  computeFill, detectDelimiter, estimateColumnWidths, parseCsv, serializeCsv,
+  blockToHtml, computeFill, detectDelimiter, estimateColumnWidths, parseCsv, serializeCsv,
   estimateWrappedLines, moveCol, moveRow, swapCols, swapRows,
 } from './csv';
 
@@ -455,5 +455,12 @@ describe('estimateWrappedLines（自适应行高的折行估算）', () => {
 
   it('硬换行逐行累计', () => {
     expect(estimateWrappedLines('a\nb\nc', 6)).toBe(3);
+  });
+});
+
+describe('blockToHtml（剪贴板 text/html 通道）', () => {
+  it('单元格内换行保留为文本换行，特殊字符转义', () => {
+    expect(blockToHtml([['a<b', 'x&y'], ['l1\nl2', '']]))
+      .toBe('<table><tr><td>a&lt;b</td><td>x&amp;y</td></tr><tr><td>l1\nl2</td><td></td></tr></table>');
   });
 });

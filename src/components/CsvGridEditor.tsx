@@ -5,9 +5,9 @@ import { useT } from '../lib/i18nContext';
 import { clipboardReadPermissionState } from '../lib/fileOps';
 import { ContextMenu, type ContextMenuItem, type ContextMenuState } from './ContextMenu';
 import {
-  clearCells, computeRowOrder, deleteCols, deleteRows, estimateColumnWidths, estimateWrappedLines, fillInto,
+  blockToHtml, clearCells, computeRowOrder, deleteCols, deleteRows, estimateColumnWidths, estimateWrappedLines, fillInto,
   insertColAfter, insertColBefore, insertRowAbove, insertRowBelow, moveCol, moveRow,
-  parseClipboardTable, parseCsv, selectionToTsv, serializeCsv, setCells, swapCols, swapRows,
+  parseClipboardTable, parseCsv, parseHtmlTable, selectionToTsv, serializeCsv, setCells, swapCols, swapRows,
   type CsvDelimiter, type CsvSortState, type GridRect,
 } from '../lib/csv';
 
@@ -280,44 +280,85 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
   useLayoutEffect(() => {
     /* 只接管单元格内发起的编辑；编辑栏发起的（src='bar'）焦点本就在栏里，
        抢走会触发编辑栏 blur → 误提交并关框（打一个字就被提交、退格清空整格的根因） */
-    if (editing && editing.src === 'cell') editInputRef.current?.focus();
+    if (editing && editing.src === 'cell') {
+      const el = editInputRef.current;
+      if (!el) return;
+      el.focus();
+      /* 程序化 focus 的光标落在文本开头，而键入进入编辑时首字符已代入 value：
+         不把光标挪到末尾，第二个字符会插到最前（输入 "20" 得 "02"）。
+         F2/双击进入编辑同样落到末尾（Excel F2 语义）。 */
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+    }
   }, [editing?.r, editing?.c, editing?.src]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---- 剪贴板 ---- */
-  const writeClipboard = useCallback((text: string) => {
-    const proxy = proxyRef.current;
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(text).catch(() => {
-        if (proxy) {
-          proxy.value = text;
-          proxy.select();
-          document.execCommand('copy');
-          proxy.value = '';
-        }
-      });
-    } else if (proxy) {
-      proxy.value = text;
-      proxy.select();
-      document.execCommand('copy');
-      proxy.value = '';
+  /* 双 MIME 写入：text/html 携带表格结构（多行单元格在网格/Excel 间往返不散架），
+     text/html 写入失败或环境不支持时回退纯文本 */
+  const writeClipboard = useCallback((text: string, html?: string) => {
+    const viaProxy = () => {
+      const proxy = proxyRef.current;
+      if (proxy) {
+        proxy.value = text;
+        proxy.select();
+        document.execCommand('copy');
+        proxy.value = '';
+      }
+    };
+    const nc = navigator.clipboard;
+    if (html && nc?.write && typeof ClipboardItem === 'function') {
+      try {
+        nc.write([new ClipboardItem({ 'text/plain': text, 'text/html': html })])
+          .catch(() => { if (nc.writeText) nc.writeText(text).catch(viaProxy); else viaProxy(); });
+        return;
+      } catch { /* 构造受限等异常 → 回退纯文本 */ }
     }
+    if (nc?.writeText) nc.writeText(text).catch(viaProxy);
+    else viaProxy();
   }, []);
 
-  /* 多选区复制：各选区 TSV 块顺序拼接（与 Excel 多区复制口径一致） */
+  /** 选区矩形 → 原始值块（HTML 通道用；TSV 通道仍走 selectionToTsv 的引号转义） */
+  const rangeBlock = (rg: GridRect): string[][] => {
+    const rows: string[][] = [];
+    for (let r = rg.r1; r <= rg.r2; r++) {
+      const row: string[] = [];
+      for (let c = rg.c1; c <= rg.c2; c++) row.push(grid[r]?.[c] ?? '');
+      rows.push(row);
+    }
+    return rows;
+  };
+
+  /* 多选区复制：各选区 TSV 块顺序拼接（与 Excel 多区复制口径一致），HTML 同步携带 */
   const doCopy = useCallback(
-    () => writeClipboard(allRangesRef.current.map(rg => selectionToTsv(grid, rg)).join('')),
+    () => writeClipboard(
+      allRangesRef.current.map(rg => selectionToTsv(grid, rg)).join(''),
+      allRangesRef.current.map(rg => blockToHtml(rangeBlock(rg))).join(''),
+    ),
     [writeClipboard, grid],
   );
 
   const doCut = useCallback(() => {
     if (readOnly || viewTransformed) return;
-    writeClipboard(allRangesRef.current.map(rg => selectionToTsv(grid, rg)).join(''));
+    writeClipboard(
+      allRangesRef.current.map(rg => selectionToTsv(grid, rg)).join(''),
+      allRangesRef.current.map(rg => blockToHtml(rangeBlock(rg))).join(''),
+    );
     commitGrid(allRangesRef.current.reduce((g, rg) => clearCells(g, rg), grid));
   }, [readOnly, viewTransformed, writeClipboard, grid, commitGrid]);
 
-  const applyPasteText = useCallback((text: string) => {
+  const applyPasteText = useCallback((text: string, html?: string) => {
     if (readOnly || viewTransformed || !text) return;
-    const block = parseClipboardTable(text.replace(/\r\n?/g, '\n'));
+    const plain = text.replace(/\r\n?/g, '\n');
+    let block = html ? parseHtmlTable(html) : null;
+    if (!block) {
+      /* 纯文本无制表符的多行内容 + 单格目标 → 整段（含换行）写入一格，不拆行覆盖下方；
+         带制表符或多格目标仍按表格块解析（列/区块粘贴语义不变，可先选好目标区再粘贴拆行） */
+      const rg = rectRef.current;
+      const singleCell = rg.r1 === rg.r2 && rg.c1 === rg.c2;
+      block = (!plain.includes('\t') && plain.includes('\n') && singleCell)
+        ? [[plain]]
+        : parseClipboardTable(plain);
+    }
     commitGrid(setCells(grid, rectRef.current, block));
     setExtraRanges([]); // 粘贴后选区收拢到主选区
   }, [readOnly, viewTransformed, grid, commitGrid]);
@@ -340,12 +381,12 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     const text = e.clipboardData.getData('text/plain');
     if (!text) return;
     e.preventDefault();
-    applyPasteText(text);
+    applyPasteText(text, e.clipboardData.getData('text/html') || undefined);
   }, [editing, readOnly, applyPasteText]);
 
   const onProxyPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     e.preventDefault();
-    applyPasteText(e.clipboardData.getData('text/plain'));
+    applyPasteText(e.clipboardData.getData('text/plain'), e.clipboardData.getData('text/html') || undefined);
     requestAnimationFrame(() => wrapperRef.current?.focus());
   }, [applyPasteText]);
 
@@ -732,11 +773,36 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     });
   }, [t, colOp, readOnly, viewTransformed, dataRows, manualWidths, resetColWidth, sort]);
 
-  /* 单元格右键：剪贴板 + 清空 + 行列操作；点在选区外先把选区收拢到该格 */
+  /* 编辑态右键粘贴：把剪贴板文本插到编辑框光标处（保住未提交的编辑），
+     而不是提交后按表格拆行覆盖下方；权限未授予时退回代理路径（下一次 Ctrl+V） */
+  const pasteIntoEdit = useCallback((el: HTMLTextAreaElement | null) => {
+    const viaProxy = () => proxyRef.current?.focus();
+    clipboardReadPermissionState().then((state) => {
+      if (state !== 'granted') { viaProxy(); return; }
+      navigator.clipboard.readText().then((text) => {
+        const ed = editingRef.current;
+        const ins = text.replace(/\r\n?/g, '\n');
+        if (!ed || !ins) return;
+        const start = el?.selectionStart ?? el?.value.length ?? ed.value.length;
+        const end = el?.selectionEnd ?? start;
+        const nextV = ed.value.slice(0, start) + ins + ed.value.slice(end);
+        setEditing(v => (v ? { ...v, value: nextV } : v));
+        if (el) requestAnimationFrame(() => el.setSelectionRange(start + ins.length, start + ins.length));
+      }).catch(viaProxy);
+    });
+  }, []);
+
+  /* 单元格右键：剪贴板 + 清空 + 行列操作；点在选区外先把选区收拢到该格。
+     右键的正是编辑中的那格时先不提交（粘贴要插回编辑框），其余菜单项执行前先落盘 */
   const openCellMenu = useCallback((r: number, c: number, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (editing) commitEdit('none');
+    const ed = editingRef.current;
+    const editingHere = !!ed && ed.r === r && ed.c === c;
+    if (!editingHere && editingRef.current) commitEdit('none');
+    /* 右键不移动焦点：此刻 activeElement 还停在编辑框上，据此选对插入目标 */
+    const editEl = document.activeElement === formulaInputRef.current ? formulaInputRef.current : editInputRef.current;
+    const withCommit = (fn: () => void) => () => { if (editingRef.current) commitEdit('none'); fn(); };
     const inSel = allRanges.some(rg => inRect(rg, r, c));
     if (!inSel) {
       setExtraRanges([]);
@@ -746,19 +812,19 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
     setMenu({
       x: e.clientX, y: e.clientY,
       items: [
-        { label: t('csv.menuCut'), disabled: readOnly || viewTransformed, onSelect: () => doCut() },
-        { label: t('csv.menuCopy'), onSelect: () => doCopy() },
-        { label: t('csv.menuPaste'), disabled: readOnly || viewTransformed, onSelect: () => doPaste() },
-        { label: t('csv.menuClear'), disabled: readOnly || viewTransformed, separatorBefore: true, onSelect: () => clearSelection() },
-        { label: t('csv.insertRowAbove'), separatorBefore: true, disabled: readOnly || viewTransformed, onSelect: () => rowOp('above', r) },
-        { label: t('csv.insertRowBelow'), disabled: readOnly || viewTransformed, onSelect: () => rowOp('below', r) },
-        { label: t('csv.deleteRows'), danger: true, disabled: readOnly || viewTransformed, onSelect: () => rowOp('delete', r) },
-        { label: t('csv.insertColLeft'), separatorBefore: true, disabled: readOnly || viewTransformed, onSelect: () => colOp('left', c) },
-        { label: t('csv.insertColRight'), disabled: readOnly || viewTransformed, onSelect: () => colOp('right', c) },
-        { label: t('csv.deleteCols'), danger: true, disabled: readOnly || viewTransformed, onSelect: () => colOp('delete', c) },
+        { label: t('csv.menuCut'), disabled: readOnly || viewTransformed, onSelect: withCommit(() => doCut()) },
+        { label: t('csv.menuCopy'), onSelect: withCommit(() => doCopy()) },
+        { label: t('csv.menuPaste'), disabled: readOnly || viewTransformed, onSelect: editingHere ? () => pasteIntoEdit(editEl) : withCommit(() => doPaste()) },
+        { label: t('csv.menuClear'), disabled: readOnly || viewTransformed, separatorBefore: true, onSelect: withCommit(() => clearSelection()) },
+        { label: t('csv.insertRowAbove'), separatorBefore: true, disabled: readOnly || viewTransformed, onSelect: withCommit(() => rowOp('above', r)) },
+        { label: t('csv.insertRowBelow'), disabled: readOnly || viewTransformed, onSelect: withCommit(() => rowOp('below', r)) },
+        { label: t('csv.deleteRows'), danger: true, disabled: readOnly || viewTransformed, onSelect: withCommit(() => rowOp('delete', r)) },
+        { label: t('csv.insertColLeft'), separatorBefore: true, disabled: readOnly || viewTransformed, onSelect: withCommit(() => colOp('left', c)) },
+        { label: t('csv.insertColRight'), disabled: readOnly || viewTransformed, onSelect: withCommit(() => colOp('right', c)) },
+        { label: t('csv.deleteCols'), danger: true, disabled: readOnly || viewTransformed, onSelect: withCommit(() => colOp('delete', c)) },
       ],
     });
-  }, [t, editing, allRanges, commitEdit, readOnly, viewTransformed, doCut, doCopy, doPaste, clearSelection, rowOp, colOp]);
+  }, [t, allRanges, commitEdit, readOnly, viewTransformed, doCut, doCopy, doPaste, clearSelection, rowOp, colOp, pasteIntoEdit]);
 
   /* ---- 键盘 ---- */
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {

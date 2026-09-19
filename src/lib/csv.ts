@@ -313,6 +313,37 @@ export function parseClipboardTable(text: string): string[][] {
   return parseCsv(text, '\t');
 }
 
+const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/** 表格块 → HTML 表格（剪贴板 text/html 通道）：单元格内换行保留为文本换行，
+    与 Excel/Google Sheets 的剪贴板 HTML 同构，使多行单元格在网格间往返不散架 */
+export function blockToHtml(block: string[][]): string {
+  const rows = block.map(row => `<tr>${row.map(v => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`).join('');
+  return `<table>${rows}</table>`;
+}
+
+/** 剪贴板 text/html → 表格块（本应用/Excel/Sheets 写出的 table 结构）；无表格返回 null */
+export function parseHtmlTable(html: string): string[][] | null {
+  if (typeof DOMParser === 'undefined') return null;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const tables = Array.from(doc.body.querySelectorAll('table'));
+  if (tables.length === 0) return null;
+  const out: string[][] = [];
+  for (const table of tables) {
+    for (const tr of Array.from(table.querySelectorAll('tr'))) {
+      const cells = Array.from(tr.children)
+        .filter(el => el.tagName === 'TD' || el.tagName === 'TH')
+        .map(td => {
+          const clone = td.cloneNode(true) as Element;
+          clone.querySelectorAll('br').forEach(br => br.replaceWith(doc.createTextNode('\n')));
+          return (clone.textContent ?? '').replace(/\r\n?/g, '\n');
+        });
+      if (cells.length > 0) out.push(cells);
+    }
+  }
+  return out.length > 0 ? out : null;
+}
+
 /**
  * 下拉填充应用：以选区为源，铺满 (targetRows × targetCols) 的目标块后写回。
  * 目标不大于选区时原网格原样返回。

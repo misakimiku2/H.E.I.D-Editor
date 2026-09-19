@@ -62,9 +62,11 @@ const setNavigator = (key: string, value: unknown) => {
 };
 
 /** 在元素上派发携带 clipboardData 的原生 paste 事件（模拟用户 Ctrl+V） */
-const firePaste = (el: Element, text: string) => {
+const firePaste = (el: Element, text: string, html?: string) => {
   const ev = new Event('paste', { bubbles: true, cancelable: true });
-  Object.defineProperty(ev, 'clipboardData', { value: { getData: () => text } });
+  Object.defineProperty(ev, 'clipboardData', {
+    value: { getData: (type: string) => (type === 'text/html' ? html : text) || '' },
+  });
   el.dispatchEvent(ev);
 };
 
@@ -154,6 +156,100 @@ describe('CsvGridEditor 粘贴通道', () => {
     await frame();
     expect(readTextSpy).toHaveBeenCalledTimes(1);
     expect(latest).toBe('p,q\n7,8\n');
+  });
+
+  it('纯文本多行无制表符粘贴到单格：整段进一格，不覆盖下方行（回归）', async () => {
+    act(() => {
+      (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    });
+    act(() => { firePaste(gridEl(), '其实我在想最开始的镜头是这样的\n先展示地下竞技场的样貌。\n切镜头。'); });
+    await frame();
+    /* 旧实现按行拆成 3 行 × 1 列覆盖 (0,0)-(2,0)；现整段写入一格（含换行，序列化加引号） */
+    expect(latest).toBe('"其实我在想最开始的镜头是这样的\n先展示地下竞技场的样貌。\n切镜头。",b\n1,2\n');
+  });
+
+  it('多行文本粘贴到已选多行区块：仍按表格拆行写入（拆行粘贴的出口保留）', async () => {
+    act(() => {
+      (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+      (host.querySelector('[data-testid="csv-cell-1-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, shiftKey: true }));
+    });
+    act(() => { firePaste(gridEl(), 'x\ny'); });
+    await frame();
+    expect(latest).toBe('x,b\ny,2\n');
+  });
+
+  it('HTML 剪贴板优先按表格解析：多行单元格（br/换行）进一格', async () => {
+    act(() => {
+      (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    });
+    const html = '<table><tr><td>A<br>B</td><td>z</td></tr><tr><td>c</td><td>d</td></tr></table>';
+    act(() => { firePaste(gridEl(), 'A Bz', html); });
+    await frame();
+    expect(latest).toBe('"A\nB",z\nc,d\n');
+  });
+
+  it('复制同时写 text/plain 与 text/html：多行单元格在 html 里保持单格结构', async () => {
+    act(() => {
+      root.render(
+        <CsvGridEditor
+          content={'"l1\nl2",b\nc,d'}
+          delimiter=","
+          isDarkMode={false}
+          headerOn={false}
+          onChange={(v) => { latest = v; }}
+          onHeaderToggle={() => {}}
+          onWidthsChange={() => {}}
+        />,
+      );
+    });
+    const htmlWriteSpy = vi.fn((_items: Array<{ items: Record<string, string> }>) => Promise.resolve());
+    const plainWriteSpy = vi.fn((_text: string) => Promise.resolve());
+    setNavigator('clipboard', { writeText: plainWriteSpy, write: htmlWriteSpy });
+    (globalThis as any).ClipboardItem = class { items: Record<string, string>; constructor(items: Record<string, string>) { this.items = items; } };
+    try {
+      act(() => {
+        (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
+          .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+      });
+      act(() => {
+        gridEl().dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }));
+      });
+      await frame();
+      expect(htmlWriteSpy).toHaveBeenCalledTimes(1);
+      expect(plainWriteSpy).not.toHaveBeenCalled();
+      const item = htmlWriteSpy.mock.calls[0][0][0];
+      expect(item.items['text/plain']).toBe('"l1\nl2"\n');
+      expect(item.items['text/html']).toContain('<td>l1\nl2</td>');
+    } finally {
+      delete (globalThis as any).ClipboardItem;
+    }
+  });
+
+  it('编辑态右键粘贴：插入编辑框光标处，不提交不拆行（回归）', async () => {
+    act(() => {
+      (host.querySelector('[data-testid="csv-cell-0-0"]') as HTMLElement)
+        .dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    const edit = host.querySelector('[data-testid="csv-edit-input"]') as HTMLTextAreaElement;
+    expect(edit).not.toBeNull();
+    expect(document.activeElement).toBe(edit);
+    queryPermission.mockResolvedValue({ state: 'granted' } as PermissionStatus);
+    readTextSpy.mockResolvedValue('A\nB');
+    act(() => {
+      edit.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    const pasteBtn = host.querySelector('button[title="csv.menuPaste"]') as HTMLButtonElement;
+    expect(pasteBtn).not.toBeNull();
+    act(() => { pasteBtn.click(); });
+    await frame();
+    /* 未提交（无写回、无拆行覆盖）；双击后光标在末尾，剪贴板内容插在原值之后 */
+    expect(latest).toBe('');
+    expect(edit.value).toBe('aA\nB');
+    expect(document.activeElement).toBe(edit);
   });
 });
 
@@ -316,6 +412,34 @@ describe('CsvGridEditor 单元格编辑与编辑栏', () => {
        旧实现 wrapper.focus() 抢焦点 → blur → 编辑框开启当帧即被关闭 */
     expect(editInput()).not.toBeNull();
     expect(document.activeElement).toBe(editInput());
+  });
+
+  it('单击选中后键入进入编辑：光标落在代入字符之后（"20" 不得变成 "02"）', async () => {
+    clickCell('[data-testid="csv-cell-0-0"]');
+    await frame();
+    const grid = host.querySelector('[role="grid"]') as HTMLElement;
+    grid.focus();
+    act(() => {
+      grid.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true }));
+    });
+    const edit = editInput();
+    expect(edit).not.toBeNull();
+    expect(edit!.value).toBe('2'); // 键入字符替换原内容（Excel 语义）
+    /* 回归：程序化 focus 的光标在文本开头，不挪到末尾则第二个字符插到最前 */
+    expect(edit!.selectionStart).toBe(1);
+    expect(edit!.selectionEnd).toBe(1);
+    /* 按当前光标位置模拟继续键入 '0'（jsdom 不会自动插入） */
+    act(() => {
+      const s = edit!.selectionStart ?? 0;
+      const e = edit!.selectionEnd ?? s;
+      setInputValue(edit!, edit!.value.slice(0, s) + '0' + edit!.value.slice(e));
+    });
+    expect(edit!.value).toBe('20');
+    act(() => {
+      edit!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await frame();
+    expect(latest).toBe('20,a\n1,2\n');
   });
 
   it('编辑栏修改：焦点不丢、逐键保留、不提前提交，Enter 才落盘', async () => {
