@@ -513,9 +513,10 @@ class MainActivity : TauriActivity() {
       val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
       cssTop = Math.round(bars.top / density)
       cssBottom = Math.round(bars.bottom / density)
-      /* 键盘高度 = IME 底边 − 手势条底边（键盘弹出时 IME 覆盖导航栏），
-         前端据此给根容器让位，使底部工具栏/信息栏始终浮在键盘上方，光标不被遮挡 */
-      cssKb = Math.max(0, Math.round(ime.bottom / density) - cssBottom)
+      /* 键盘高度 = IME 底边（从窗口最底量到键盘上沿，已含手势条区域，
+         不可再扣 cssBottom——少一段就表现为信息栏被键盘盖住一截）。
+         前端据此给根容器让位，使信息栏始终贴住键盘上沿，光标不被遮挡 */
+      cssKb = Math.round(ime.bottom / density)
       webView.evaluateJavascript(
         "window.dispatchEvent(new CustomEvent('heid-insets',{detail:{top:$cssTop,bottom:$cssBottom,kb:$cssKb}}))",
         null
