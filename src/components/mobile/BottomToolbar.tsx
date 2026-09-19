@@ -39,6 +39,9 @@ export function BottomToolbar({
         'safe-bottom',
         isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
       )}
+      /* 键盘弹出时按钮栏沉回键盘后方（v1.4 用户反馈：键盘上方只保留信息栏）；
+         --heid-kb 由 MainActivity 的 IME insets 注入，桌面恒为 0 无效果 */
+      style={{ transform: 'translateY(var(--heid-kb, 0px))' }}
     >
       <button onClick={onOpen} className={btnCls()} aria-label={t('menu.openFile')}>
         <FolderOpen size={19} />

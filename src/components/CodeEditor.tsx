@@ -358,6 +358,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   );
   const palette = codeTheme.palette;
   const cmRef = useRef<ReactCodeMirrorRef>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const stickyRef = useRef<HTMLElement | null>(null);
   const minimapRef = useRef<{ canvas: HTMLCanvasElement; container: HTMLElement } | null>(null);
   const minimapRafRef = useRef<number | null>(null);
@@ -409,6 +410,25 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onFindCloseRef.current = onFindClose;
   /** 查找栏读取编辑器视图的稳定入口（FindReplaceBar 的 effect 依赖稳定性靠它保证） */
   const getView = useCallback(() => viewReadyRef.current, []);
+
+  /* 触屏键盘弹出/收起使容器高度变化时，把光标滚回可视区——
+     安卓上根容器经 --heid-kb 收缩，纯 resize 时 CM 不会自动跟随光标 */
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let last = el.clientHeight;
+    const ro = new ResizeObserver(() => {
+      const h = el.clientHeight;
+      if (h === last) return;
+      last = h;
+      const view = viewReadyRef.current;
+      if (view && view.hasFocus) {
+        view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'nearest' }) });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   /* markdown 右键格式化后，下一次 onChange 以 major 记入撤销历史 */
   const majorNextRef = useRef(false);
   const [mdMenu, setMdMenu] = useState<{ x: number; y: number; from: number; to: number; text: string } | null>(null);
@@ -1685,7 +1705,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   }, [value, viewReady]);
 
   return (
-    <div className="relative h-full w-full" onContextMenu={handleEditorContextMenu}>
+    <div ref={rootRef} className="relative h-full w-full" onContextMenu={handleEditorContextMenu}>
       <CodeMirror
         ref={cmRef}
         value={initialValueRef.current}
