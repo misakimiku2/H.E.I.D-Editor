@@ -362,7 +362,7 @@ export function MermaidEditModal({ initialCode, isDarkMode, onClose, onSave }: M
           <button
             onClick={onClose}
             className={cn(
-              'px-4 h-8 rounded-md text-xs font-medium transition-colors border',
+              'px-4 h-8 rounded-md text-xs font-medium pointer-coarse:h-11 pointer-coarse:text-sm transition-colors border',
               isDarkMode ? 'border-zinc-700 text-zinc-300 hover:bg-zinc-800' : 'border-zinc-300 text-zinc-600 hover:bg-zinc-100',
             )}
           >

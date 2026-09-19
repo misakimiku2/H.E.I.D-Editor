@@ -95,7 +95,7 @@ export function TopAppBar({
       <button
         onClick={onOpenTabs}
         className={cn(
-          'flex items-center gap-1 px-2.5 h-9 rounded-md shrink-0 transition-colors',
+          'flex items-center gap-1 px-2.5 h-11 rounded-md shrink-0 transition-colors',
           isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600'
         )}
         aria-label={t('mobile.openTabs')}
@@ -126,14 +126,14 @@ export function TopAppBar({
         <button
           onClick={() => setMenuOpen(v => !v)}
           className={cn(
-            'w-9 h-9 rounded-md flex items-center justify-center transition-colors',
+            'w-11 h-11 rounded-md flex items-center justify-center transition-colors',
             menuOpen
               ? (isDarkMode ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-200 text-zinc-700')
               : (isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500')
           )}
           aria-label={t('mobile.moreMenu')}
         >
-          <MoreVertical size={18} />
+          <MoreVertical size={20} />
         </button>
 
         {menuOpen && (

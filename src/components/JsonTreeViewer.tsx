@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { writeClipboardText } from '../lib/fileOps';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import { ChevronRight, ChevronsDownUp, ChevronsUpDown, Copy, AlertTriangle } from 'lucide-react';
 import {
   buildTree, parseStructured, TREE_CHILD_RENDER_LIMIT, type JsonNode, type StructKind,
@@ -70,7 +71,8 @@ const NodeRow = React.memo(function NodeRow({
     <div data-testid={`json-node${id === ROOT_ID ? '-root' : ''}`} className="select-none">
       <div
         className={cn(
-          'group flex items-start gap-1 rounded px-1 py-[1px] text-xs leading-5 font-mono',
+          'group flex items-start gap-1 rounded px-1 text-xs leading-5 font-mono',
+          IS_TOUCH_PRIMARY ? 'py-[6px]' : 'py-[1px]',
           isBranch && 'cursor-pointer',
         )}
         style={{ paddingLeft: depth * 14 + 2 }}
@@ -113,8 +115,14 @@ const NodeRow = React.memo(function NodeRow({
         )}
         {node.kind === 'value' && (
           <Copy
-            size={11}
-            className={cn('shrink-0 mt-1 ml-1 opacity-0 group-hover:opacity-60 cursor-pointer', isDarkMode ? 'text-zinc-400' : 'text-zinc-500')}
+            size={IS_TOUCH_PRIMARY ? 14 : 11}
+            className={cn(
+              'shrink-0 cursor-pointer',
+              IS_TOUCH_PRIMARY
+                ? 'ml-1 p-1 opacity-70'
+                : 'mt-1 ml-1 opacity-0 group-hover:opacity-60 cursor-pointer',
+              isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+            )}
             onClick={(e) => { e.stopPropagation(); onCopy(id, node.raw); }}
           />
         )}
@@ -256,7 +264,8 @@ export const JsonTreeViewer = React.memo(function JsonTreeViewer({
       )}>
         <button
           data-testid="json-expand-all"
-          className={cn('flex items-center gap-1 px-1.5 py-0.5 rounded font-medium',
+          className={cn('flex items-center gap-1 rounded font-medium',
+            IS_TOUCH_PRIMARY ? 'px-2.5 py-2' : 'px-1.5 py-0.5',
             isDarkMode ? 'hover:bg-zinc-700 hover:text-zinc-200' : 'hover:bg-zinc-200 hover:text-zinc-700')}
           title={t('json.expandAll')}
           onClick={() => setExpanded(new Set(branchIds))}
@@ -266,7 +275,8 @@ export const JsonTreeViewer = React.memo(function JsonTreeViewer({
         </button>
         <button
           data-testid="json-collapse-all"
-          className={cn('flex items-center gap-1 px-1.5 py-0.5 rounded font-medium',
+          className={cn('flex items-center gap-1 rounded font-medium',
+            IS_TOUCH_PRIMARY ? 'px-2.5 py-2' : 'px-1.5 py-0.5',
             isDarkMode ? 'hover:bg-zinc-700 hover:text-zinc-200' : 'hover:bg-zinc-200 hover:text-zinc-700')}
           title={t('json.collapseAll')}
           onClick={() => setExpanded(new Set())}

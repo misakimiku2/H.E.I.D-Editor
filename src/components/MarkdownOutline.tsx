@@ -3,6 +3,8 @@ import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { ChevronRight, FoldVertical, ListTree, UnfoldVertical } from 'lucide-react';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
+import { useLongPress } from '../hooks/useLongPress';
 import { activeHeadingOffset } from '../lib/markdownOutline';
 import type { MdHeading } from '../lib/markdownOutline';
 
@@ -26,6 +28,8 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
   const t = useT();
   const [folded, setFolded] = useState<ReadonlySet<number>>(() => new Set());
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /* 触屏：长按行/空白区弹右键同款菜单（行上 bind 以吞掉长按后误跳转的 click） */
+  const { bind: bindMenu } = useLongPress();
   if (headings.length === 0) {
     return (
       <div className={cn(
@@ -85,10 +89,13 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
         aria-label={t('md.outlineAria')}
         data-testid="md-outline"
         className="px-1.5 py-2"
-        onContextMenu={(e) => {
-          e.preventDefault();
-          setMenu({ x: e.clientX, y: e.clientY });
-        }}
+        {...bindMenu({
+          onLongPress: (pos) => setMenu({ x: pos.x, y: pos.y }),
+          onContextMenu: (e) => {
+            e.preventDefault();
+            setMenu({ x: e.clientX, y: e.clientY });
+          },
+        })}
       >
       {rows.map(({ h, hidden, hasChildren }, i) => {
         if (hidden) return null;
@@ -100,8 +107,17 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
             data-testid={`md-outline-item-${i}`}
             role="button"
             tabIndex={0}
+            {...bindMenu({
+              onClick: () => onJump(h),
+              onLongPress: (pos) => setMenu({ x: pos.x, y: pos.y }),
+              onContextMenu: (e) => {
+                e.preventDefault();
+                setMenu({ x: e.clientX, y: e.clientY });
+              },
+            })}
             className={cn(
-              'mb-0.5 flex w-full items-center gap-0.5 rounded-lg py-1.5 pr-2.5 text-left text-xs leading-5 transition-colors',
+              'mb-0.5 flex w-full items-center gap-0.5 rounded-lg pr-2.5 text-left text-xs leading-5 transition-colors select-none',
+              IS_TOUCH_PRIMARY ? 'py-2.5' : 'py-1.5',
               levelColor(h.level),
               active
                 ? (isDarkMode ? 'bg-zinc-600/70 text-zinc-100' : 'bg-zinc-200/70 text-zinc-900')
@@ -111,7 +127,6 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
             )}
             style={{ paddingLeft: 10 + (h.level - 1) * 12 }}
             title={h.text || `H${h.level}`}
-            onClick={() => onJump(h)}
             onKeyDown={(e) => {
               /* 焦点在折叠钮上时的 Enter/空格由按钮自己处理，避免二次触发跳转 */
               if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
@@ -126,7 +141,8 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
                 aria-label={expanded ? t('md.outlineFold') : t('md.outlineUnfold')}
                 title={expanded ? t('md.outlineFold') : t('md.outlineUnfold')}
                 className={cn(
-                  'flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition-colors',
+                  'flex shrink-0 items-center justify-center rounded-md transition-colors',
+                  IS_TOUCH_PRIMARY ? 'h-7 w-7' : 'h-5 w-5',
                   isDarkMode ? 'hover:bg-zinc-600/70' : 'hover:bg-zinc-300/70',
                 )}
                 onClick={(e) => {
@@ -140,7 +156,7 @@ export const MarkdownOutline = React.memo(function MarkdownOutline({
                 />
               </button>
             ) : (
-              <span className="h-5 w-5 shrink-0" aria-hidden />
+              <span className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'h-7 w-7' : 'h-5 w-5')} aria-hidden />
             )}
             <span className="truncate">{h.text || `H${h.level}`}</span>
           </div>

@@ -17,6 +17,7 @@ import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
 import { gapIndexFromRects, isPrematureDragEnd, ownDropIndexOf, ownShiftFor, ownSlideOffsetX } from '../lib/tabDragCore';
 import type { FileTab } from '../lib/tabModel';
 import { useT } from '../lib/i18nContext';
+import { useLongPress } from '../hooks/useLongPress';
 
 /** 本应用自定义拖拽 MIME 标记:用于区分「我们的标签拖拽」与外部拖入(文件/文本) */
 const HEID_TAB_MIME = 'application/x-heid-tab';
@@ -210,6 +211,9 @@ export function TabBar({
     };
   }, [canDetach]);
 
+  /* 触屏：长按标签/空白区弹右键同款菜单（桌面走原生 onContextMenu） */
+  const { bind: bindMenu } = useLongPress();
+
   /* 外源合并占位符:普通标签造型(绿框)的流内元素——出现在插入点上,
      + 按钮与已有标签自然让位,松手后新标签恰好落进这个位置 */
   const foreignSlot = foreign && (
@@ -237,11 +241,14 @@ export function TabBar({
         onDragOver={handleStripDragOver}
         onDragLeave={handleStripDragLeave}
         onDrop={handleStripDrop}
-        onContextMenu={(e) => {
-          /* 空白处右键：无锚点标签，只提供新建与全部关闭 */
-          e.preventDefault();
-          onContextMenu(e.clientX, e.clientY, null);
-        }}
+        {...bindMenu({
+          onLongPress: (pos) => onContextMenu(pos.x, pos.y, null),
+          onContextMenu: (e) => {
+            /* 空白处右键：无锚点标签，只提供新建与全部关闭 */
+            e.preventDefault();
+            onContextMenu(e.clientX, e.clientY, null);
+          },
+        })}
       >
         {(() => {
           /* 逐标签计算让位:被拖标签滑向落点槽位,其后的标签右移一个占位宽 */
@@ -271,20 +278,25 @@ export function TabBar({
                   <div
                     data-tab-id={tab.id}
                     draggable={!IS_TOUCH_PRIMARY}
-                    onClick={() => {
-                      if (suppressClickRef.current) { suppressClickRef.current = false; return; }
-                      onSelect(tab.id);
-                    }}
+                    {...bindMenu({
+                      onClick: () => {
+                        if (suppressClickRef.current) { suppressClickRef.current = false; return; }
+                        onSelect(tab.id);
+                      },
+                      onLongPress: (pos) => onContextMenu(pos.x, pos.y, tab.id),
+                      onContextMenu: (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onContextMenu(e.clientX, e.clientY, tab.id);
+                      },
+                    })}
                     onDragStart={(e) => handleTabDragStart(e, tab.id)}
                     onDragEnd={handleTabDragEnd}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      onContextMenu(e.clientX, e.clientY, tab.id);
-                    }}
                     style={tabStyle}
                     className={cn(
-                      "px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-all group max-w-[180px] overflow-hidden",
+                      IS_TOUCH_PRIMARY
+                        ? "px-2.5 py-2 rounded-md text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-all group max-w-[180px] overflow-hidden select-none"
+                        : "px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-all group max-w-[180px] overflow-hidden",
                       /* 外源悬停期间允许压缩:为占位符腾位时不裁切(平时仍不收缩) */
                       foreign && !dragging ? "shrink" : "shrink-0",
                       /* 拖拽中的标签半透明滑向落点;同步折叠(width:0/opacity:0)会令
@@ -308,11 +320,12 @@ export function TabBar({
                     <button
                       onClick={(e2) => { e2.stopPropagation(); onCloseTab(tab.id); }}
                       className={cn(
-                        "p-0.5 rounded-sm hover:bg-zinc-500/20 transition-all shrink-0",
-                        IS_TOUCH_PRIMARY ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                        IS_TOUCH_PRIMARY
+                          ? "min-w-[28px] min-h-[28px] -mr-1 rounded-sm flex items-center justify-center hover:bg-zinc-500/20 active:bg-zinc-500/40 transition-all shrink-0 opacity-100"
+                          : "p-0.5 rounded-sm opacity-0 group-hover:opacity-100 hover:bg-zinc-500/20 transition-all shrink-0"
                       )}
                     >
-                      <X size={10} />
+                      <X size={IS_TOUCH_PRIMARY ? 14 : 10} />
                     </button>
                   </div>
                 );
@@ -328,12 +341,13 @@ export function TabBar({
       <button
         onClick={onNewTab}
         className={cn(
-          "p-1.5 rounded-md transition-colors shrink-0",
+          "rounded-md transition-colors shrink-0 flex items-center justify-center",
+          IS_TOUCH_PRIMARY ? "w-11 h-11 -mr-1" : "p-1.5",
           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
         )}
         title={newTabTitle}
       >
-        <Plus size={15} />
+        <Plus size={IS_TOUCH_PRIMARY ? 18 : 15} />
       </button>
     </>
   );

@@ -125,8 +125,11 @@ body {
 .heid-theme-card .heid-theme-preview {
   transition: filter 0.15s ease;
 }
-.heid-theme-card:hover .heid-theme-preview {
-  filter: brightness(1.12);
+/* 悬停提亮：触屏无 hover，包进媒体查询避免点按后粘滞 */
+@media (hover: hover) {
+  .heid-theme-card:hover .heid-theme-preview {
+    filter: brightness(1.12);
+  }
 }
 
 /* ---- 文件树长文件名悬停循环滚动 ----
@@ -137,11 +140,14 @@ body {
   70%, 85% { transform: translateX(var(--name-shift, 0px)); }
   85.01%, 100% { transform: translateX(0); }
 }
-.heid-tree-row:hover .heid-name-text {
-  animation: heid-name-scroll 8s linear 0.4s infinite;
-}
-.heid-tree-row:hover .heid-name-clip {
-  text-overflow: clip;
+/* 触屏无 hover：不触发长名滚动（点按后粘滞滚动是假动作），截断显示即可 */
+@media (hover: hover) {
+  .heid-tree-row:hover .heid-name-text {
+    animation: heid-name-scroll 8s linear 0.4s infinite;
+  }
+  .heid-tree-row:hover .heid-name-clip {
+    text-overflow: clip;
+  }
 }
 /* ---- Markdown 预览查找高亮（CSS Custom Highlight API，浅深主题通用）----
    黄绿 #B0D700，与笔记高亮的黄色区分开 */

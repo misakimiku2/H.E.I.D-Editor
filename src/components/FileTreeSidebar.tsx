@@ -22,6 +22,8 @@ import {
 import { fsMkdir, fsRename, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
 import { writeLocalPath } from '../lib/fileIO';
 import { appAlert } from '../lib/appAlert';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
+import { useLongPress } from '../hooks/useLongPress';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 
 export interface SidebarTabInfo {
@@ -63,7 +65,9 @@ const lister: DirLister | null = getDirLister(
 );
 
 /* ---- 树行虚拟化：扁平可见行 + 视口窗口渲染（大目录数千行时只画可视区附近） ---- */
-const TREE_ROW_H = 28; /* 树行统一 h-7（含命名/错误/加载行） */
+/* 树行高：触屏 40px（虚拟化行高与行内样式同源），桌面 28px */
+const TREE_ROW_H = IS_TOUCH_PRIMARY ? 40 : 28;
+const ROW_CLS_H = IS_TOUCH_PRIMARY ? 'h-10' : 'h-7';
 const TREE_OVERSCAN = 12; /* 视口上下额外渲染的行数 */
 const TREE_ALL_ROWS_LIMIT = 300; /* 行数不超过该值直接全量渲染，免滚动窗口计算 */
 
@@ -145,7 +149,7 @@ function NameRow({
     onCancel();
   };
   return (
-    <div style={{ paddingLeft: 8 + depth * 12 }} className="heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-7 flex items-center gap-1.5">
+    <div style={{ paddingLeft: 8 + depth * 12 }} className={`heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 ${ROW_CLS_H} flex items-center gap-1.5`}>
       {isDir
         ? <Folder size={13} className="shrink-0 opacity-70" />
         : <FileText size={13} className="shrink-0 opacity-60" />}
@@ -182,6 +186,8 @@ export function FileTreeSidebar({
   canManage, askDangerConfirm, onTabsRenamed, onFileDeleted,
 }: FileTreeSidebarProps) {
   const t = useT();
+  /* 触屏：长按树行/空白区弹右键同款菜单 */
+  const { bind: bindMenu } = useLongPress();
   const [tree, setTree] = useState<TreeNode | null>(null);
   /* 文件剪贴板（树内剪切/复制）；cut=true 表示粘贴后删除源 */
   const [clip, setClip] = useState<{ path: string; name: string; isDir: boolean; cut: boolean } | null>(null);
@@ -514,12 +520,10 @@ export function FileTreeSidebar({
     } catch (e) { opFailed(e); }
   }, [clip, opFailed, refreshTree, t]);
 
-  /* ---- 右键菜单 ---- */
+  /* ---- 右键菜单（桌面） / 长按菜单（触屏，共用同一份 items） ---- */
 
-  const openMenu = useCallback((e: React.MouseEvent, node: TreeNode | null) => {
+  const openMenuAt = useCallback((x: number, y: number, node: TreeNode | null) => {
     if (!canManage) return; /* 安卓 SAF / 浏览器：不接管（保持系统行为） */
-    e.preventDefault();
-    e.stopPropagation();
     const isRoot = node === null || node.path === rootPath;
     const selfDir = node?.isDir ? node.path : rootPath;
     const parentDir = node && !node.isDir ? parentPathOf(node.path) : selfDir;
@@ -540,8 +544,14 @@ export function FileTreeSidebar({
     if (!node || isDir) {
       items.push({ separatorBefore: true, icon: <RefreshCw size={13} />, label: t('tree.refresh'), onSelect: () => void refreshTree() });
     }
-    setMenu({ x: e.clientX, y: e.clientY, items });
+    setMenu({ x, y, items });
   }, [canManage, clip, renaming, rootPath, startCreate, handleDelete, handlePaste, opFailed, refreshTree, t]);
+
+  const openMenu = useCallback((e: React.MouseEvent, node: TreeNode | null) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openMenuAt(e.clientX, e.clientY, node);
+  }, [openMenuAt]);
 
   /* 单行渲染（行序与子行展开由 flattenTreeRows 决定；重命名行原位替换节点行） */
   const renderRow = (row: TreeRow): React.ReactNode => {
@@ -559,7 +569,7 @@ export function FileTreeSidebar({
     }
     if (row.kind === 'error') {
       return (
-        <div style={{ paddingLeft: 20 + row.depth * 12 }} className="mx-1.5 w-[calc(100%-12px)] pr-2 h-7 text-[10px] text-red-500 flex items-center gap-1">
+        <div style={{ paddingLeft: 20 + row.depth * 12 }} className={`mx-1.5 w-[calc(100%-12px)] pr-2 ${ROW_CLS_H} text-[10px] text-red-500 flex items-center gap-1`}>
           <span className="truncate flex-1">{row.node.error}</span>
           <button onClick={() => handleDirClick({ ...row.node, expanded: false })} className="opacity-70 hover:opacity-100">
             <RefreshCw size={10} />
@@ -569,7 +579,7 @@ export function FileTreeSidebar({
     }
     if (row.kind === 'loading') {
       return (
-        <div style={{ paddingLeft: 20 + row.depth * 12 }} className="mx-1.5 w-[calc(100%-12px)] pr-2 h-7 flex items-center text-zinc-500">
+        <div style={{ paddingLeft: 20 + row.depth * 12 }} className={`mx-1.5 w-[calc(100%-12px)] pr-2 ${ROW_CLS_H} flex items-center text-zinc-500`}>
           <Loader2 size={11} className="animate-spin" />
         </div>
       );
@@ -599,12 +609,15 @@ export function FileTreeSidebar({
     );
     return (
       <button
-        onClick={() => {
-          if (node.isDir) handleDirClick(node);
-          else if (isImagePath(node.path) && onOpenImage) onOpenImage(node.path);
-          else onOpenFile(node.path);
-        }}
-        onContextMenu={(e) => openMenu(e, node)}
+        {...bindMenu({
+          onClick: () => {
+            if (node.isDir) handleDirClick(node);
+            else if (isImagePath(node.path) && onOpenImage) onOpenImage(node.path);
+            else onOpenFile(node.path);
+          },
+          onLongPress: (pos) => openMenuAt(pos.x, pos.y, node),
+          onContextMenu: (e) => openMenu(e, node),
+        })}
         onMouseEnter={handleRowEnter}
         style={{ paddingLeft: 8 + row.depth * 12 }}
         className={rowClass}
@@ -650,7 +663,8 @@ export function FileTreeSidebar({
   const visibleRows = renderAll ? treeRows : treeRows.slice(firstIndex, lastIndex);
 
   const searchOptBtn = (active: boolean) => cn(
-    'h-6 px-2 rounded-md text-[10px] font-semibold font-mono transition-colors',
+    IS_TOUCH_PRIMARY ? 'h-8 px-2.5 rounded-md text-[11px]' : 'h-6 px-2 rounded-md text-[10px]',
+    'font-semibold font-mono transition-colors',
     active
       ? (isDarkMode ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-300 text-zinc-800')
       : (isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200'),
@@ -659,7 +673,8 @@ export function FileTreeSidebar({
   /* 命中分页：仅当结果可渲染且超过一页时出翻页条 */
   const paged = result && !result.error ? pageGroups(result.matches, page) : null;
   const pageBtn = cn(
-    'p-1.5 rounded-md transition-colors disabled:opacity-30',
+    IS_TOUCH_PRIMARY ? 'p-2.5' : 'p-1.5',
+    'rounded-md transition-colors disabled:opacity-30',
     isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500',
   );
 
@@ -672,7 +687,8 @@ export function FileTreeSidebar({
         onClick={() => onOpenFile(hit.path, { line: hit.line, col: hit.col })}
         title={`${relativePathUnderRoot(hit.path, rootPath)}:${hit.line}:${hit.col}\n${(d.prefix + hit.text).trim()}`}
         className={cn(
-          'heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-6 pl-8 rounded-lg text-[11px] flex items-center gap-1.5 transition-colors text-left',
+          'heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 rounded-lg text-xs flex items-center gap-1.5 transition-colors text-left',
+          IS_TOUCH_PRIMARY ? 'h-9 pl-8' : 'h-6 pl-8',
           isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-300' : 'hover:bg-zinc-200/70 text-zinc-700',
         )}
       >
@@ -740,7 +756,7 @@ export function FileTreeSidebar({
               onClick={() => onOpenFile(g.path)}
               title={g.path}
               className={cn(
-                'heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-7 rounded-lg text-xs flex items-center gap-1.5 transition-colors text-left',
+                `heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 ${ROW_CLS_H} rounded-lg text-xs flex items-center gap-1.5 transition-colors text-left`,
                 isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700',
               )}
             >
@@ -804,7 +820,8 @@ export function FileTreeSidebar({
               onClick={() => (searching ? exitSearch() : setSearching(true))}
               title={t('tree.searchInFiles')}
               className={cn(
-                'p-1.5 rounded-md transition-colors',
+                'rounded-md transition-colors',
+                IS_TOUCH_PRIMARY ? 'w-9 h-9 flex items-center justify-center' : 'p-1.5',
                 searching
                   ? (isDarkMode ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-200 text-zinc-800')
                   : (isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500'),
@@ -816,14 +833,14 @@ export function FileTreeSidebar({
           <button
             onClick={handleRefresh}
             title={t('tree.refresh')}
-            className={cn('p-1.5 rounded-md transition-colors', isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
+            className={cn('rounded-md transition-colors', IS_TOUCH_PRIMARY ? 'w-9 h-9 flex items-center justify-center' : 'p-1.5', isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
           >
             <RefreshCw size={13} />
           </button>
           <button
             onClick={() => onRootChange(null)}
             title={t('tree.closeFolder')}
-            className={cn('p-1.5 rounded-md transition-colors', isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
+            className={cn('rounded-md transition-colors', IS_TOUCH_PRIMARY ? 'w-9 h-9 flex items-center justify-center' : 'p-1.5', isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
           >
             <FolderX size={13} />
           </button>
@@ -918,7 +935,10 @@ export function FileTreeSidebar({
             ref={treeScrollRef}
             className="flex-1 min-h-0 overflow-y-auto heid-scroll py-1"
             onScroll={onTreeScroll}
-            onContextMenu={(e) => openMenu(e, null)}
+            {...bindMenu({
+              onLongPress: (pos) => openMenuAt(pos.x, pos.y, null),
+              onContextMenu: (e) => openMenu(e, null),
+            })}
           >
             {tree ? (
               emptyRoot ? (

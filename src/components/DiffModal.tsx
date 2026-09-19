@@ -282,7 +282,7 @@ export function DiffModal({
                       key={entry.id}
                       onClick={() => setSelected({ path: group.path, id: entry.id })}
                       className={cn(
-                        "w-full px-3 py-1.5 flex items-center gap-2 text-[11px] transition-colors text-left border-l-2",
+                        "w-full px-3 py-1.5 flex items-center gap-2 text-[11px] pointer-coarse:min-h-[44px] pointer-coarse:text-xs transition-colors text-left border-l-2",
                         isSel
                           ? cn("border-blue-500", isDarkMode ? "bg-zinc-700/70" : "bg-zinc-100")
                           : cn("border-transparent", isDarkMode ? "hover:bg-zinc-700/40" : "hover:bg-zinc-50")

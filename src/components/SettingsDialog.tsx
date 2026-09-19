@@ -102,7 +102,7 @@ function ThemeCard({ theme, selected, isDarkMode, onSelect }: {
       </div>
       <div
         className={cn(
-          'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium',
+          'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium pointer-coarse:min-h-[40px] pointer-coarse:px-3 pointer-coarse:text-xs',
           isDarkMode ? 'bg-zinc-900/60 text-zinc-200' : 'bg-zinc-50 text-zinc-700'
         )}
       >
@@ -438,7 +438,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
           </button>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-md text-xs font-medium bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-300/80 transition-colors shadow-sm"
+            className="px-4 py-1.5 rounded-md text-xs font-medium pointer-coarse:min-h-[44px] pointer-coarse:text-sm bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-300/80 transition-colors shadow-sm"
           >
             {t('common.done')}
           </button>

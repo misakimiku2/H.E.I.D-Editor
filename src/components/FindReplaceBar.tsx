@@ -6,6 +6,7 @@ import {
   WholeWord, X, Hash,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import { clampBarPosition } from '../lib/position';
 import { setFindMatchesEffect } from '../lib/editorSearch';
 import {
@@ -238,7 +239,8 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   };
 
   const optBtn = (active: boolean) => cn(
-    'w-7 h-7 rounded-md flex items-center justify-center transition-colors',
+    IS_TOUCH_PRIMARY ? 'w-10 h-10' : 'w-7 h-7',
+    'rounded-md flex items-center justify-center transition-colors',
     active
       ? (isDarkMode ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-300 text-zinc-800')
       : (isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200')
@@ -246,13 +248,14 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
 
   /* 输入框毛玻璃：半透明底 + 背景模糊，聚焦时略微加深保证可读性 */
   const inputCls = cn(
-    'h-7 px-2 rounded-md border text-xs outline-none transition-colors w-full backdrop-blur-md',
+    IS_TOUCH_PRIMARY ? 'h-10 px-3 text-sm' : 'h-7 px-2 text-xs',
+    'rounded-md border outline-none transition-colors w-full backdrop-blur-md',
     isDarkMode
       ? 'border-zinc-600 bg-zinc-900/45 text-zinc-200 focus:border-blue-500 focus:bg-zinc-900/70 placeholder:text-zinc-600'
       : 'border-zinc-300 bg-white/55 text-zinc-800 focus:border-blue-500 focus:bg-white/85 placeholder:text-zinc-400'
   );
 
-  const navBtn = 'w-7 h-7 rounded-md flex items-center justify-center transition-colors shrink-0 ' + (
+  const navBtn = (IS_TOUCH_PRIMARY ? 'w-10 h-10 ' : 'w-7 h-7 ') + 'rounded-md flex items-center justify-center transition-colors shrink-0 ' + (
     isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200'
   );
 

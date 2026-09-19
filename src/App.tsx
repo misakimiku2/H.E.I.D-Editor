@@ -118,6 +118,14 @@ function HeidMark({ className }: { className?: string }) {
   );
 }
 
+/* 主菜单/弹层菜单条目统一类：触屏行高 ≥44、字号 sm（桌面保持桌面密度） */
+const MENU_ITEM_CLS = IS_TOUCH_PRIMARY
+  ? 'mx-1.5 w-[calc(100%-12px)] min-h-[44px] rounded-lg px-3 text-sm font-medium flex items-center gap-2.5 transition-colors'
+  : 'mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors';
+const MENU_ITEM_LIGHT_CLS = IS_TOUCH_PRIMARY
+  ? 'mx-1.5 w-[calc(100%-12px)] min-h-[44px] rounded-lg px-3 text-sm flex items-center gap-2.5 transition-colors'
+  : 'mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs flex items-center gap-2 transition-colors';
+
 export default function App() {
   const { themeMode, setThemeMode, isDarkMode } = useTheme();
 
@@ -1006,7 +1014,9 @@ export default function App() {
   type StatusMenu = null | 'encoding-root' | 'encoding-reopen' | 'encoding-save' | 'eol';
   const [statusMenu, setStatusMenu] = useState<StatusMenu>(null);
   const statusItemCls = cn(
-    "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors text-left",
+    IS_TOUCH_PRIMARY
+      ? "mx-1.5 w-[calc(100%-12px)] min-h-[40px] rounded-lg px-3 text-sm font-medium flex items-center gap-2.5 transition-colors text-left"
+      : "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors text-left",
     isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
   );
 
@@ -1402,12 +1412,13 @@ export default function App() {
       <div
         data-tauri-drag-region={!IS_ANDROID_APP}
         className={cn(
-          "h-10 border-b flex items-center pl-3 gap-1.5 shrink-0 select-none",
+          "border-b flex items-center pl-3 gap-1.5 shrink-0 select-none",
+          IS_TOUCH_PRIMARY ? "h-12" : "h-10",
           isDarkMode ? "border-zinc-700 bg-zinc-800" : "border-zinc-200 bg-white"
         )}
         /* 安卓边到边：标题栏向下让出系统状态栏高度（var 仅安卓注入，桌面回退 0） */
         style={{
-          height: 'calc(2.5rem + var(--heid-safe-top, 0px))',
+          height: `calc(${IS_TOUCH_PRIMARY ? '3rem' : '2.5rem'} + var(--heid-safe-top, 0px))`,
           paddingTop: 'var(--heid-safe-top, 0px)',
         }}
       >
@@ -1446,21 +1457,24 @@ export default function App() {
       <div
         ref={menuRef}
         className={cn(
-          "h-9 border-b flex items-center px-2 shrink-0 relative select-none",
+          "border-b flex items-center px-2 shrink-0 relative select-none",
+          IS_TOUCH_PRIMARY ? "h-12" : "h-9",
           isDarkMode ? "border-zinc-700 bg-zinc-800/60" : "border-zinc-200 bg-zinc-100/60"
         )}
       >
         <button
           onClick={() => setMenuOpen(v => !v)}
           className={cn(
-            "p-1.5 rounded-md transition-colors flex items-center gap-1 text-xs",
+            IS_TOUCH_PRIMARY
+              ? "w-11 h-11 rounded-md transition-colors flex items-center justify-center"
+              : "p-1.5 rounded-md transition-colors flex items-center gap-1 text-xs",
             menuOpen
               ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
               : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
           )}
           title={t('menu.menuLabel')}
         >
-          <Menu size={15} />
+          <Menu size={IS_TOUCH_PRIMARY ? 18 : 15} />
         </button>
 
         {/* 文件夹树开关：紧邻菜单按钮（原在标题栏标签页前，移此聚拢视图类入口） */}
@@ -1468,13 +1482,14 @@ export default function App() {
           onClick={handleToggleTree}
           title={t('tree.toggle')}
           className={cn(
-            "ml-1 p-1.5 rounded-md flex items-center justify-center transition-colors shrink-0",
+            "ml-1 rounded-md flex items-center justify-center transition-colors shrink-0",
+            IS_TOUCH_PRIMARY ? "w-11 h-11" : "p-1.5",
             treeOpen
               ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
               : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
           )}
         >
-          <PanelLeft size={15} />
+          <PanelLeft size={IS_TOUCH_PRIMARY ? 18 : 15} />
         </button>
 
         <div className="flex-1" />
@@ -1485,12 +1500,13 @@ export default function App() {
         <button
           onClick={() => setDiffModalOpen(true)}
           className={cn(
-            "relative mr-2 p-1.5 rounded-md transition-colors shrink-0",
+            "relative mr-2 rounded-md transition-colors shrink-0",
+            IS_TOUCH_PRIMARY ? "w-11 h-11 flex items-center justify-center" : "p-1.5",
             isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
           )}
           title={activeTab ? t('diff.entryTitle', { name: activeTab.title }) : t('diff.menuTitle')}
         >
-          <GitCompare size={15} />
+          <GitCompare size={IS_TOUCH_PRIMARY ? 17 : 15} />
           {activePendingDiffs > 0 && (
             <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-orange-500 text-white text-[9px] font-bold flex items-center justify-center leading-none">
               {activePendingDiffs > 99 ? '99+' : activePendingDiffs}
@@ -1522,7 +1538,8 @@ export default function App() {
                   onClick={() => editor.setMdView(m)}
                   title={title}
                   className={cn(
-                    "w-7 h-6 rounded-full flex items-center justify-center transition-all",
+                    IS_TOUCH_PRIMARY ? "w-10 h-9" : "w-7 h-6",
+                    "rounded-full flex items-center justify-center transition-all",
                     active
                       ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
                       : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
@@ -1557,7 +1574,8 @@ export default function App() {
                   onClick={() => editor.setCsvState({ csvView: m })}
                   title={title}
                   className={cn(
-                    "w-7 h-6 rounded-full flex items-center justify-center transition-all",
+                    IS_TOUCH_PRIMARY ? "w-10 h-9" : "w-7 h-6",
+                    "rounded-full flex items-center justify-center transition-all",
                     active
                       ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
                       : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
@@ -1608,12 +1626,13 @@ export default function App() {
               onClick={() => void handleFormatStruct()}
               disabled={!!activeTab.readOnly}
               className={cn(
-                "p-1.5 rounded-md transition-colors shrink-0 disabled:opacity-40",
+                IS_TOUCH_PRIMARY ? "w-10 h-9 flex items-center justify-center" : "p-1.5",
+                "rounded-md transition-colors shrink-0 disabled:opacity-40",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
               )}
               title={t('json.format')}
             >
-              <Wand2 size={14} />
+              <Wand2 size={IS_TOUCH_PRIMARY ? 16 : 14} />
             </button>
           </div>
         )}
@@ -1661,7 +1680,7 @@ export default function App() {
             <button
               onClick={() => { setMenuOpen(false); file.handleOpenFile(); }}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                MENU_ITEM_CLS,
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -1673,7 +1692,7 @@ export default function App() {
               <button
                 onClick={() => { setMenuOpen(false); void chooseTreeFolder(); }}
                 className={cn(
-                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                  MENU_ITEM_CLS,
                   isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                 )}
               >
@@ -1685,7 +1704,7 @@ export default function App() {
               <button
                 onClick={() => { setMenuOpen(false); handleTreeRootChange(null); }}
                 className={cn(
-                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                  MENU_ITEM_CLS,
                   isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                 )}
               >
@@ -1704,7 +1723,7 @@ export default function App() {
                 onClick={() => setRecentSubOpen(v => !v)}
                 disabled={file.recentFiles.length === 0}
                 className={cn(
-                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40 disabled:pointer-events-none",
+                  MENU_ITEM_CLS, "disabled:opacity-40 disabled:pointer-events-none",
                   isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                 )}
               >
@@ -1728,7 +1747,7 @@ export default function App() {
                         key={f.path}
                         onClick={() => { setMenuOpen(false); void file.openPathIntoTab(f.path); }}
                         className={cn(
-                          "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs flex items-center gap-2 transition-colors",
+                          MENU_ITEM_LIGHT_CLS,
                           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
                         )}
                         title={f.path}
@@ -1741,7 +1760,7 @@ export default function App() {
                     <button
                       onClick={() => { file.setRecentFiles(clearRecentFiles()); }}
                       className={cn(
-                        "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                        MENU_ITEM_CLS,
                         isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                       )}
                     >
@@ -1757,7 +1776,7 @@ export default function App() {
               onClick={() => { setMenuOpen(false); file.handleSave(); }}
               disabled={!activeTab || activeTab.readOnly || file.saving}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                MENU_ITEM_CLS, "disabled:opacity-40",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -1769,7 +1788,7 @@ export default function App() {
               onClick={() => { setMenuOpen(false); file.handleSaveAs(); }}
               disabled={!activeTab || activeTab.readOnly || file.saving}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                MENU_ITEM_CLS, "disabled:opacity-40",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -1781,7 +1800,7 @@ export default function App() {
               onClick={() => { setMenuOpen(false); void handleExportHtml(); }}
               disabled={!isMarkdown || !!activeTab?.binary}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                MENU_ITEM_CLS, "disabled:opacity-40",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -1793,7 +1812,7 @@ export default function App() {
                 onClick={() => { setMenuOpen(false); void handlePrint(); }}
                 disabled={!activeTab || !!activeTab.binary || !!activeTab.largePreview}
                 className={cn(
-                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                  MENU_ITEM_CLS, "disabled:opacity-40",
                   isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                 )}
               >
@@ -1806,7 +1825,7 @@ export default function App() {
               <button
                 onClick={() => { setMenuOpen(false); setUrlImportOpen(true); }}
                 className={cn(
-                  "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                  MENU_ITEM_CLS,
                   isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                 )}
               >
@@ -1819,7 +1838,7 @@ export default function App() {
               onClick={() => { setMenuOpen(false); editor.handleUndo(); }}
               disabled={!editor.canUndo}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                MENU_ITEM_CLS, "disabled:opacity-40",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -1831,7 +1850,7 @@ export default function App() {
               onClick={() => { setMenuOpen(false); editor.handleRedo(); }}
               disabled={!editor.canRedo}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40",
+                MENU_ITEM_CLS, "disabled:opacity-40",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -1843,7 +1862,7 @@ export default function App() {
             <button
               onClick={() => { setMenuOpen(false); setSettingsOpen(true); }}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                MENU_ITEM_CLS,
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -1853,7 +1872,7 @@ export default function App() {
             <button
               onClick={() => { setMenuOpen(false); setShortcutsOpen(true); }}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                MENU_ITEM_CLS,
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -1863,7 +1882,7 @@ export default function App() {
             <button
               onClick={() => { setMenuOpen(false); setAboutOpen(true); }}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors",
+                MENU_ITEM_CLS,
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >
@@ -2040,7 +2059,7 @@ export default function App() {
               isDarkMode ? "border-zinc-700 bg-zinc-800 text-zinc-500" : "border-zinc-200 bg-zinc-100 text-zinc-500"
             )}
             style={{
-              height: 'calc(1.5rem + var(--heid-safe-bottom, 0px))',
+              height: `calc(${IS_TOUCH_PRIMARY ? '3rem' : '1.5rem'} + var(--heid-safe-bottom, 0px))`,
               paddingBottom: 'var(--heid-safe-bottom, 0px)',
             }}>
               <span className="truncate" title={activeTab.path || t('status.unsavedPath')}>{activeTab.path || t('status.unsavedPath')}</span>
@@ -2105,7 +2124,8 @@ export default function App() {
               <button
                 onClick={() => setStatusMenu(m => m === 'eol' ? null : 'eol')}
                 className={cn(
-                  "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 shrink-0",
+                  "rounded font-medium transition-colors flex items-center gap-1 shrink-0",
+                  IS_TOUCH_PRIMARY ? "min-h-[44px] min-w-[44px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
                 )}
                 title={t('status.eol')}
@@ -2118,7 +2138,8 @@ export default function App() {
               <button
                 onClick={() => setStatusMenu(m => m === 'encoding-root' ? null : 'encoding-root')}
                 className={cn(
-                  "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 shrink-0",
+                  "rounded font-medium transition-colors flex items-center gap-1 shrink-0",
+                  IS_TOUCH_PRIMARY ? "min-h-[44px] min-w-[44px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
                 )}
                 title={t('status.encoding')}
@@ -2132,12 +2153,13 @@ export default function App() {
                   onClick={file.handleRevert}
                   disabled={!activeTab.isDirty}
                   className={cn(
-                    "px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0",
+                    "rounded font-medium transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0",
+                    IS_TOUCH_PRIMARY ? "min-h-[44px] min-w-[44px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
                     isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                   )}
                   title={t('status.revertTip')}
                 >
-                  <RotateCcw size={10} /> {t('status.revert')}
+                  <RotateCcw size={IS_TOUCH_PRIMARY ? 13 : 10} /> {t('status.revert')}
                 </button>
               )}
 
@@ -2499,7 +2521,7 @@ export default function App() {
               onClick={() => { setTabMenu(null); action(); }}
               disabled={disabled}
               className={cn(
-                "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40 disabled:pointer-events-none",
+                MENU_ITEM_CLS, "disabled:opacity-40 disabled:pointer-events-none",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
               )}
             >

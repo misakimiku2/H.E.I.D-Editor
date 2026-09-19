@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { cn } from '../lib/utils';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 
 /**
  * 纵向列表式右键菜单（编辑器/文件树共用）：样式与标签栏右键菜单同源
@@ -25,8 +26,10 @@ export interface ContextMenuState {
   items: ContextMenuItem[];
 }
 
-const ITEM_H = 30;
-const PANEL_W = 216;
+/* 触屏变体：行高 ≥44、字号 sm、面板加宽（视觉估高随之变大，夹紧仍成立） */
+const TOUCH = IS_TOUCH_PRIMARY;
+const ITEM_H = TOUCH ? 46 : 30;
+const PANEL_W = TOUCH ? 280 : 216;
 const PANEL_PAD = 8;
 
 export const ContextMenu = React.memo<{
@@ -84,7 +87,9 @@ export const ContextMenu = React.memo<{
             disabled={item.disabled}
             title={item.label}
             className={cn(
-              "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40 disabled:pointer-events-none",
+              TOUCH
+                ? "mx-1.5 w-[calc(100%-12px)] min-h-[44px] rounded-lg px-3 text-sm font-medium flex items-center gap-2.5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                : "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40 disabled:pointer-events-none",
               item.danger
                 ? "text-red-500 hover:bg-red-500/10"
                 : isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"

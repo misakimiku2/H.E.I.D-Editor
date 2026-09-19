@@ -30,7 +30,7 @@ import { DEFAULT_SETTINGS, type EditorSettings } from '../lib/settings';
 import {
   resolveCodeTheme, type CodeTheme,
 } from '../lib/editorThemes';
-import { IS_ANDROID_APP } from '../lib/platform';
+import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
 import {
   computeMinimapMetrics, minimapCanvasDeviceSize, minimapLineY, minimapWidthFor,
   MINIMAP_BLOCK_HEIGHT, MINIMAP_CHAR_WIDTH, MINIMAP_LINE_PITCH, MINIMAP_PADDING,
@@ -1227,6 +1227,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   /* ---- 编辑器右键：markdown 有选区走格式菜单，其余统一弹通用编辑菜单 ---- */
 
   const handleEditorContextMenu = useCallback((e: React.MouseEvent) => {
+    /* 触屏：让位系统长按选择/复制/粘贴菜单，不 preventDefault 也不弹自绘右键 */
+    if (IS_TOUCH_PRIMARY) return;
     e.preventDefault();
     const view = viewReadyRef.current;
     if (!view) return;

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 
 /** 找到最近的滚动祖先（下拉面板会被它裁剪，展开方向按它的可视范围判定） */
 function scrollClip(el: HTMLElement | null): HTMLElement | null {
@@ -91,7 +92,9 @@ export function Dropdown<T extends string>({
         title={title}
         onClick={() => setOpen(v => !v)}
         className={cn(
-          "h-7 pl-2.5 pr-2 rounded-lg border text-xs outline-none cursor-pointer flex items-center justify-between gap-1.5 transition-colors",
+          IS_TOUCH_PRIMARY
+            ? "h-11 pl-3 pr-2.5 rounded-lg border text-sm outline-none cursor-pointer flex items-center justify-between gap-1.5 transition-colors"
+            : "h-7 pl-2.5 pr-2 rounded-lg border text-xs outline-none cursor-pointer flex items-center justify-between gap-1.5 transition-colors",
           dark
             ? "border-zinc-600 bg-zinc-900/80 text-zinc-200 hover:border-zinc-500"
             : "border-zinc-300 bg-white/90 text-zinc-800 hover:border-zinc-400",
@@ -122,7 +125,9 @@ export function Dropdown<T extends string>({
               aria-selected={o.value === value}
               onClick={() => { onChange(o.value); setOpen(false); }}
               className={cn(
-                "flex items-center gap-2 w-full text-left px-3 py-1.5 text-xs transition-colors",
+                IS_TOUCH_PRIMARY
+                  ? "flex items-center gap-2.5 w-full text-left min-h-[44px] px-3.5 text-sm transition-colors"
+                  : "flex items-center gap-2 w-full text-left px-3 py-1.5 text-xs transition-colors",
                 o.value === value
                   ? "text-[#A3B3FF] font-medium"
                   : dark

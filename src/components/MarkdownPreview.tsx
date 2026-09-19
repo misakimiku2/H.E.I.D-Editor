@@ -12,7 +12,8 @@ import { oneDark, ghcolors } from 'react-syntax-highlighter/dist/esm/styles/pris
 import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers, Workflow, Pencil, Maximize2, Minimize2, ImageDown } from 'lucide-react';
 import { renderMermaidSvg } from '../lib/mermaid';
 import { cn } from '../lib/utils';
-import { IS_ANDROID_APP } from '../lib/platform';
+import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
+import { useLongPress } from '../hooks/useLongPress';
 import { FormatMenu, INLINE_WRAPS, transformSlice, footnoteEdit, findInSlice, type MdOp, type MenuState } from './MarkdownTools';
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { MermaidEditModal } from './MermaidEditModal';
@@ -83,9 +84,11 @@ const MarkdownImage = React.memo<{
   /** 文档所在目录：相对图片地址以此为基准拼绝对路径读取 */
   baseDir?: string;
   onOpen?: (src: string, alt: string) => void;
-  onMenu?: (e: React.MouseEvent, info: { resolvedSrc: string; alt: string; srcStart?: number; srcEnd?: number }) => void;
+  onMenu?: (pos: { x: number; y: number }, info: { resolvedSrc: string; alt: string; srcStart?: number; srcEnd?: number }) => void;
 }>(({ src, alt, isDarkMode, srcStart, srcEnd, baseDir, onOpen, onMenu }) => {
   const t = useT();
+  /* 触屏：长按图片弹右键同款菜单 */
+  const { bind: bindMenu } = useLongPress();
   const [imgSrc, setImgSrc] = useState<string>('');
   const [loadError, setLoadError] = useState<string>('');
 
@@ -134,12 +137,15 @@ const MarkdownImage = React.memo<{
           border: `1px dashed ${isDarkMode ? '#52525b' : '#d4d4d8'}`,
           color: isDarkMode ? '#a1a1aa' : '#71717a', fontSize: '0.875rem'
         }}
-        onContextMenu={(e) => {
-          if (!onMenu) return;
-          e.preventDefault();
-          e.stopPropagation();
-          onMenu(e, { resolvedSrc: imgSrc || '', alt: alt || '', srcStart, srcEnd });
-        }}
+        {...bindMenu({
+          onLongPress: (pos) => onMenu?.(pos, { resolvedSrc: imgSrc || '', alt: alt || '', srcStart, srcEnd }),
+          onContextMenu: (e) => {
+            if (!onMenu) return;
+            e.preventDefault();
+            e.stopPropagation();
+            onMenu({ x: e.clientX, y: e.clientY }, { resolvedSrc: imgSrc || '', alt: alt || '', srcStart, srcEnd });
+          },
+        })}
       >
         <span style={{ fontSize: '1.5rem', marginBottom: '0.5rem', display: 'block' }}>🖼️</span>
         <span style={{ display: 'block' }}>{(alt || '').split('|||LOCAL-FILE:')[0] || t('image.defaultName')}</span>
@@ -155,8 +161,11 @@ const MarkdownImage = React.memo<{
       src={imgSrc} alt={altName}
       loading="lazy"
       onError={() => setLoadError(t('image.errLoad'))}
-      onClick={(e) => { if (!onOpen) return; e.stopPropagation(); e.preventDefault(); onOpen(imgSrc, altName); }}
-      onContextMenu={(e) => { if (!onMenu) return; e.stopPropagation(); onMenu(e, { resolvedSrc: imgSrc, alt: altName, srcStart, srcEnd }); }}
+      {...bindMenu({
+        onClick: (e) => { if (!onOpen) return; e.stopPropagation(); e.preventDefault(); onOpen(imgSrc, altName); },
+        onLongPress: (pos) => onMenu?.(pos, { resolvedSrc: imgSrc, alt: altName, srcStart, srcEnd }),
+        onContextMenu: (e) => { if (!onMenu) return; e.stopPropagation(); onMenu({ x: e.clientX, y: e.clientY }, { resolvedSrc: imgSrc, alt: altName, srcStart, srcEnd }); },
+      })}
       style={{ maxWidth: '100%', height: 'auto', borderRadius: '0.5rem', display: 'block', marginLeft: 'auto', marginRight: 'auto', margin: '1.5rem 0', cursor: onOpen ? 'zoom-in' : undefined }}
     />
   );
@@ -174,9 +183,11 @@ const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, 
   isDarkMode: boolean;
   canEdit?: boolean;
   onEdit?: (e: React.MouseEvent) => void;
-  onMenu?: (e: React.MouseEvent) => void;
+  onMenu?: (pos: { x: number; y: number }) => void;
 }) {
   const t = useT();
+  /* 触屏：长按图表弹右键同款菜单 */
+  const { bind: bindMenu } = useLongPress();
   const [svg, setSvg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   /* false = 保持 mermaid 的原始尺寸（宽图横向滚动，文字清晰）；true = 缩到容器宽看全貌 */
@@ -270,9 +281,17 @@ const MermaidRenderer = React.memo(function MermaidRenderer({ code, isDarkMode, 
     /* 外层不滚动：右上角按钮固定在这里，图表横向滚动时不会跟着跑 */
     <div
       className="group relative my-4"
-      /* 双击图表也能进编辑器（悬停右上角有按钮，双击是更顺手的入口） */
+      /* 双击图表也能进编辑器（悬停右上角有按钮，双击是更顺手的入口）；触屏长按弹菜单 */
       onDoubleClick={canEdit ? onEdit : undefined}
-      onContextMenu={canEdit ? onMenu : undefined}
+      {...bindMenu({
+        onLongPress: (pos) => { if (canEdit) onMenu?.(pos); },
+        onContextMenu: (e) => {
+          if (!canEdit || !onMenu) return;
+          e.preventDefault();
+          e.stopPropagation();
+          onMenu({ x: e.clientX, y: e.clientY });
+        },
+      })}
     >
       <div
         className={cn(
@@ -353,11 +372,13 @@ function ImageContextMenu({ x, y, canEdit, isDarkMode, onClose, onCopy, onCut, o
     };
   }, [onClose]);
 
-  const left = Math.min(x, window.innerWidth - 158);
-  const top = Math.min(y, window.innerHeight - (canEdit ? 158 : 52));
+  const left = Math.min(x, window.innerWidth - (IS_TOUCH_PRIMARY ? 216 : 158));
+  const top = Math.min(y, window.innerHeight - (canEdit ? (IS_TOUCH_PRIMARY ? 196 : 158) : (IS_TOUCH_PRIMARY ? 132 : 52)));
 
   const item = cn(
-    'flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-xs transition-colors text-left',
+    IS_TOUCH_PRIMARY
+      ? 'flex items-center gap-2.5 w-full min-h-[44px] px-3 rounded-md text-sm transition-colors text-left'
+      : 'flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-xs transition-colors text-left',
     isDarkMode ? 'hover:bg-zinc-700/70 text-zinc-200' : 'hover:bg-zinc-100 text-zinc-700',
   );
 
@@ -365,7 +386,9 @@ function ImageContextMenu({ x, y, canEdit, isDarkMode, onClose, onCopy, onCut, o
     <div
       ref={ref}
       className={cn(
-        'fixed z-[150] w-40 rounded-lg border shadow-xl backdrop-blur-md p-1 flex flex-col',
+        IS_TOUCH_PRIMARY
+          ? 'fixed z-[150] w-[208px] rounded-lg border shadow-xl backdrop-blur-md p-1.5 flex flex-col'
+          : 'fixed z-[150] w-40 rounded-lg border shadow-xl backdrop-blur-md p-1 flex flex-col',
         isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
       )}
       style={{ left, top }}
@@ -405,10 +428,12 @@ function MermaidContextMenu({ x, y, isDarkMode, onClose, onEdit, onDelete }: {
     };
   }, [onClose]);
 
-  const left = Math.min(x, window.innerWidth - 158);
-  const top = Math.min(y, window.innerHeight - 84);
+  const left = Math.min(x, window.innerWidth - (IS_TOUCH_PRIMARY ? 216 : 158));
+  const top = Math.min(y, window.innerHeight - (IS_TOUCH_PRIMARY ? 116 : 84));
   const item = cn(
-    'flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-xs transition-colors text-left',
+    IS_TOUCH_PRIMARY
+      ? 'flex items-center gap-2.5 w-full min-h-[44px] px-3 rounded-md text-sm transition-colors text-left'
+      : 'flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-xs transition-colors text-left',
     isDarkMode ? 'hover:bg-zinc-700/70 text-zinc-200' : 'hover:bg-zinc-100 text-zinc-700',
   );
 
@@ -416,7 +441,9 @@ function MermaidContextMenu({ x, y, isDarkMode, onClose, onEdit, onDelete }: {
     <div
       ref={ref}
       className={cn(
-        'fixed z-[150] w-40 rounded-lg border shadow-xl backdrop-blur-md p-1 flex flex-col',
+        IS_TOUCH_PRIMARY
+          ? 'fixed z-[150] w-[208px] rounded-lg border shadow-xl backdrop-blur-md p-1.5 flex flex-col'
+          : 'fixed z-[150] w-40 rounded-lg border shadow-xl backdrop-blur-md p-1 flex flex-col',
         isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70',
       )}
       style={{ left, top }}
@@ -633,14 +660,16 @@ const InsertMenu = React.memo<{
     };
   }, [onClose]);
 
-  const left = Math.max(4, Math.min(x, window.innerWidth - 176));
-  const top = Math.max(4, Math.min(y, window.innerHeight - 182));
+  const left = Math.max(4, Math.min(x, window.innerWidth - (IS_TOUCH_PRIMARY ? 224 : 176)));
+  const top = Math.max(4, Math.min(y, window.innerHeight - (IS_TOUCH_PRIMARY ? 244 : 182)));
 
   return (
     <div
       ref={ref}
       className={cn(
-        "fixed z-[90] w-40 rounded-xl border shadow-xl backdrop-blur-md p-1 flex flex-col",
+        IS_TOUCH_PRIMARY
+          ? "fixed z-[90] w-[208px] rounded-xl border shadow-xl backdrop-blur-md p-1.5 flex flex-col"
+          : "fixed z-[90] w-40 rounded-xl border shadow-xl backdrop-blur-md p-1 flex flex-col",
         isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
       )}
       style={{ left, top }}
@@ -652,7 +681,9 @@ const InsertMenu = React.memo<{
       <button
         onClick={onTable}
         className={cn(
-          "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
+          IS_TOUCH_PRIMARY
+            ? "mx-1 w-[calc(100%-8px)] min-h-[44px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
+            : "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
         )}
       >
@@ -663,7 +694,9 @@ const InsertMenu = React.memo<{
       <button
         onClick={onImage}
         className={cn(
-          "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
+          IS_TOUCH_PRIMARY
+            ? "mx-1 w-[calc(100%-8px)] min-h-[44px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
+            : "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
         )}
       >
@@ -673,7 +706,9 @@ const InsertMenu = React.memo<{
       <button
         onClick={onDiagram}
         className={cn(
-          "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
+          IS_TOUCH_PRIMARY
+            ? "mx-1 w-[calc(100%-8px)] min-h-[44px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
+            : "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
         )}
       >
@@ -779,6 +814,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const t = useT();
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<PreviewMenuState | null>(null);
+  /* 触屏：长按空白区弹插入菜单（文本区让位系统长按选择） */
+  const { bind: bindMenu } = useLongPress();
   const [blankMenu, setBlankMenu] = useState<{ x: number; y: number; insertAt: number } | null>(null);
   const [imageModal, setImageModal] = useState<SourceSnippet | null>(null);
   const [tableAction, setTableAction] = useState<TableAction | null>(null);
@@ -852,12 +889,10 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                   const end = sd['data-md-end'] ? Number(sd['data-md-end']) : NaN;
                   if (Number.isFinite(start) && Number.isFinite(end)) requestMermaidEditRef.current(codeContent, start, end);
                 }}
-                onMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
+                onMenu={(pos) => {
                   const start = sd['data-md-start'] ? Number(sd['data-md-start']) : NaN;
                   const end = sd['data-md-end'] ? Number(sd['data-md-end']) : NaN;
-                  if (Number.isFinite(start) && Number.isFinite(end)) requestMermaidMenuRef.current(e, codeContent, start, end);
+                  if (Number.isFinite(start) && Number.isFinite(end)) requestMermaidMenuRef.current(pos, codeContent, start, end);
                 }}
               />
             </div>
@@ -939,9 +974,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           srcStart={sd['data-md-start'] ? Number(sd['data-md-start']) : undefined}
           srcEnd={sd['data-md-end'] ? Number(sd['data-md-end']) : undefined}
           onOpen={(s, a) => setViewer({ src: s, alt: a })}
-          onMenu={(e, info) => {
-            e.preventDefault();
-            setImageMenu({ x: e.clientX, y: e.clientY, ...info, canEdit: !!onChangeRef.current });
+          onMenu={(pos, info) => {
+            setImageMenu({ x: pos.x, y: pos.y, ...info, canEdit: !!onChangeRef.current });
           }}
         />
       );
@@ -1029,10 +1063,10 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const [mermaidMenu, setMermaidMenu] = useState<{
     x: number; y: number; code: string; start: number; end: number;
   } | null>(null);
-  const requestMermaidMenuRef = useRef<(e: React.MouseEvent, code: string, start: number, end: number) => void>(() => {});
-  requestMermaidMenuRef.current = (e, code, start, end) => {
+  const requestMermaidMenuRef = useRef<(pos: { x: number; y: number }, code: string, start: number, end: number) => void>(() => {});
+  requestMermaidMenuRef.current = (pos, code, start, end) => {
     if (!onChangeRef.current) return;
-    setMermaidMenu({ x: e.clientX, y: e.clientY, code, start, end });
+    setMermaidMenu({ x: pos.x, y: pos.y, code, start, end });
   };
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -1205,6 +1239,27 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     }
   };
 
+  /* 空白/触屏长按弹出的插入菜单：insertAt 锚点计算（startEl 为按下目标元素；
+     触屏长按拿不到 pointer 事件目标，由调用方传 elementFromPoint 结果） */
+  const openBlankMenuAt = useCallback((x: number, y: number, startEl: HTMLElement | null) => {
+    setMenu(null);
+    setTableAction(null);
+    let el: HTMLElement | null = startEl;
+    let mdEnd: number | null = null;
+    while (el) {
+      const cand = el.closest?.('[data-md-end]') as HTMLElement | null;
+      if (cand && cand.dataset.mdEnd) mdEnd = Number(cand.dataset.mdEnd);
+      el = el.parentElement;
+    }
+    let insertAt = mdEnd;
+    if (insertAt == null) {
+      const root = contentRef.current;
+      const near = root ? findNearestBlockBoundary(root, y) : null;
+      insertAt = near ?? content.length;
+    }
+    setBlankMenu({ x, y, insertAt });
+  }, [content.length]);
+
   /* ---- 右键：有选区弹格式菜单；无选区弹插入菜单（表格/图片） ---- */
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -1238,25 +1293,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       }
     }
 
-    /* 空白处（无选区）：插入锚点 = 点中块的最外层末尾；未点中块（空隙/空白）→ 按鼠标 Y 就近取块边界 */
-    e.preventDefault();
-    setMenu(null);
-    setTableAction(null);
-    let el: HTMLElement | null = e.target as HTMLElement;
-    let mdEnd: number | null = null;
-    while (el) {
-      const cand = el.closest?.('[data-md-end]') as HTMLElement | null;
-      if (cand && cand.dataset.mdEnd) mdEnd = Number(cand.dataset.mdEnd);
-      el = el.parentElement;
-    }
-    let insertAt = mdEnd;
-    if (insertAt == null) {
-      const root = contentRef.current;
-      const near = root ? findNearestBlockBoundary(root, e.clientY) : null;
-      insertAt = near ?? content.length;
-    }
-    setBlankMenu({ x: e.clientX, y: e.clientY, insertAt });
-  }, [onChange, content.length]);
+    /* 空白处（无选区）：插入锚点 = 点中块的最外层末尾；未点中块（空隙/空白）→ 按指针 Y 就近取块边界 */
+    openBlankMenuAt(e.clientX, e.clientY, e.target as HTMLElement);
+  }, [onChange, openBlankMenuAt]);
 
   /* 选区格式化：从后往前替换，保证偏移量不失效 */
   const handleApply = useCallback((op: MdOp) => {
@@ -1537,9 +1576,15 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         onScroller?.(el);
       }}
       className="relative h-full overflow-auto heid-scroll"
-      onContextMenu={handleContextMenu}
       onMouseMove={handleMouseMove}
-      onClick={handleContainerClick}
+      {...bindMenu({
+        onClick: handleContainerClick,
+        onLongPress: (pos) => {
+          if (!onChangeRef.current) return;
+          openBlankMenuAt(pos.x, pos.y, document.elementFromPoint(pos.x, pos.y) as HTMLElement | null);
+        },
+        onContextMenu: handleContextMenu,
+      })}
     >
       <div className="mx-auto p-6 text-left max-w-[900px]">
         <div className={proseClassName}>

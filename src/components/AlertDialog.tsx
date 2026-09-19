@@ -39,7 +39,7 @@ export function AlertDialog({ title, message, isDarkMode, onClose }: AlertDialog
         <div className="mt-4 flex justify-end">
           <button
             onClick={onClose}
-            className="px-3 py-1.5 rounded-md text-xs font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500"
+            className="px-3 py-1.5 rounded-md text-xs font-medium pointer-coarse:min-h-[44px] pointer-coarse:px-4 pointer-coarse:text-sm text-white transition-colors bg-blue-600 hover:bg-blue-500"
           >
             {t('common.ok')}
           </button>

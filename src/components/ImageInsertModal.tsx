@@ -324,7 +324,7 @@ export const ImageInsertModal = React.memo<{
               <button
                 onClick={addUrl}
                 className={cn(
-                  "px-3 rounded-lg text-xs font-medium transition-colors shrink-0",
+                  "px-3 rounded-lg text-xs font-medium pointer-coarse:min-h-[44px] transition-colors shrink-0",
                   "bg-indigo-600 hover:bg-indigo-500 text-white"
                 )}
               >
@@ -373,7 +373,7 @@ export const ImageInsertModal = React.memo<{
           <button
             onClick={onClose}
             className={cn(
-              "px-3 py-1.5 text-xs rounded-lg transition-colors",
+              "px-3 py-1.5 text-xs rounded-lg pointer-coarse:min-h-[44px] pointer-coarse:text-sm transition-colors",
               isDarkMode ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-300" : "bg-zinc-200 hover:bg-zinc-300 text-zinc-600"
             )}
           >
@@ -383,7 +383,7 @@ export const ImageInsertModal = React.memo<{
             onClick={confirm}
             disabled={images.length === 0}
             className={cn(
-              "px-4 py-1.5 text-xs rounded-lg font-medium transition-colors bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              "px-4 py-1.5 text-xs rounded-lg font-medium pointer-coarse:min-h-[44px] pointer-coarse:text-sm transition-colors bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
             )}
           >
             {images.length > 0 ? t('image.insertCount', { n: images.length }) : t('image.insert')}
