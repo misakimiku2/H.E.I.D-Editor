@@ -106,6 +106,14 @@ body {
   bottom: 0;
 }
 
+/* 键盘弹出时：桌面状态栏收成纯内容行——手势条留白（safe-bottom）只在
+   键盘收起时有意义，弹出后留着会在键盘上方露出一段空占位（v1.4 用户反馈）。
+   !important 用于覆盖行内 calc 高度；释放的空间由 flex-1 编辑区吸收 */
+.heid-kb-open .heid-statusbar {
+  height: 3rem !important;
+  padding-bottom: 0 !important;
+}
+
 /* 底部抽屉动画 */
 @keyframes heid-sheet-up {
   from { transform: translateY(100%); }

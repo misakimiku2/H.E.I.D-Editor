@@ -2138,7 +2138,7 @@ export default function App() {
 
             {/* bottom status bar（手机端隐藏）：文件信息 + 光标位置 + 编码/换行符 + 还原 */}
             {!isPhone && (<div className={cn(
-              "border-t flex items-center px-4 gap-2 text-[11px] shrink-0 relative",
+              "heid-statusbar border-t flex items-center px-4 gap-2 text-[11px] shrink-0 relative",
               isDarkMode ? "border-zinc-700 bg-zinc-800 text-zinc-500" : "border-zinc-200 bg-zinc-100 text-zinc-500"
             )}
             style={{
