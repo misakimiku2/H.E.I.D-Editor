@@ -1,11 +1,13 @@
 import React, { useEffect, useRef } from 'react';
 import { cn } from '../lib/utils';
 import { IS_TOUCH_PRIMARY } from '../lib/platform';
+import { useShowKbdHints } from '../hooks/useHardwareKeyboard';
 
 /**
  * 纵向列表式右键菜单（编辑器/文件树共用）：样式与标签栏右键菜单同源
  * （zinc 半透明毛玻璃面板 + 圆角行项），支持分组分隔线、置灰与危险色项、
- * 右侧快捷键提示。点击外部（pointerdown 覆盖触屏）/ Esc / 滚动 / 调整窗口时关闭。
+ * 右侧快捷键提示（触屏为主设备仅在接入物理键盘后显示）。
+ * 点击外部（pointerdown 覆盖触屏）/ Esc / 滚动 / 调整窗口时关闭。
  */
 export interface ContextMenuItem {
   icon?: React.ReactNode;
@@ -38,6 +40,8 @@ export const ContextMenu = React.memo<{
   onClose: () => void;
 }>(({ menu, isDarkMode, onClose }) => {
   const ref = useRef<HTMLDivElement | null>(null);
+  /* 快捷键提示：触屏为主（平板）未接物理键盘时不渲染（useShowKbdHints 门控） */
+  const showKbdHints = useShowKbdHints();
   /* 挂载时刻：长按弹出的菜单可能被视口夹紧到手指正下方，触屏抬手后合成的
      click 会落在某个菜单项上直接误执行。挂载后短窗口内的 click 一律忽略
      （真人重新瞄准再点远快于此窗口下限）；同时覆盖文件树等所有共用方 */
@@ -108,7 +112,7 @@ export const ContextMenu = React.memo<{
           >
             {item.icon && <span className="shrink-0 flex items-center opacity-80">{item.icon}</span>}
             <span className="flex-1 text-left truncate">{item.label}</span>
-            {item.shortcut && (
+            {item.shortcut && showKbdHints && (
               <span className={cn("text-[10px] shrink-0", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
                 {item.shortcut}
               </span>

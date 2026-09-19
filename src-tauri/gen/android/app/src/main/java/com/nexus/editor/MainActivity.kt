@@ -1,12 +1,17 @@
 package com.nexus.editor
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.hardware.input.InputManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.view.InputDevice
+import android.view.KeyCharacterMap
+import android.view.KeyEvent
 import android.webkit.JavascriptInterface
 import android.webkit.MimeTypeMap
 import android.webkit.WebView
@@ -31,6 +36,33 @@ class MainActivity : TauriActivity() {
   private lateinit var openDocLauncher: ActivityResultLauncher<Intent>
   private lateinit var createDocLauncher: ActivityResultLauncher<Intent>
   private lateinit var openTreeLauncher: ActivityResultLauncher<Intent>
+
+  /** 物理键盘接入状态监听（前端快捷键提示仅接入时显示）；上次推送值用于去重 */
+  private var inputDeviceListener: InputManager.InputDeviceListener? = null
+  @Volatile private var lastPushedHwKb: Boolean? = null
+
+  /** 是否接有物理键盘：枚举输入设备里的非虚拟「全键盘」（键位表 FULL）。
+      外置键盘/键盘盖是 FULL；软键盘 isVirtual、电源键等 gpio-keys 内置按键的
+      键位表是 SPECIAL_FUNCTION，均排除——只按 KEYBOARD source 判会在几乎
+      所有真机上被电源键设备误报为已接入 */
+  private fun hasHardwareKeyboard(): Boolean {
+    val im = getSystemService(Context.INPUT_SERVICE) as? InputManager ?: return false
+    for (id in im.inputDeviceIds) {
+      val dev = im.getInputDevice(id) ?: continue
+      if (dev.isVirtual || (dev.sources and InputDevice.SOURCE_KEYBOARD) == 0) continue
+      val kcm = try { dev.keyCharacterMap } catch (_: Exception) { continue }
+      if (kcm.keyboardType == KeyCharacterMap.FULL) return true
+    }
+    return false
+  }
+
+  /** 接入状态变化推给前端（值未变化时跳过，dispatchKeyEvent 高频调用靠它去重） */
+  private fun pushHardwareKeyboard() {
+    val has = hasHardwareKeyboard()
+    if (lastPushedHwKb == has) return
+    lastPushedHwKb = has
+    evalJs("window.dispatchEvent(new CustomEvent('heid-hwkb',{detail:$has}))")
+  }
 
   /** 前端桥：安全区 / SAF 文件访问（读写 content URI） */
   private inner class InsetBridge {
@@ -223,6 +255,10 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun isSystemDark(): Boolean =
       (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
+    /** 是否接有物理键盘（初值由前端启动时补读；变化经 heid-hwkb 事件推送） */
+    @JavascriptInterface
+    fun hwKb(): Boolean = hasHardwareKeyboard()
 
     /** 状态栏/导航栏图标外观跟随应用主题（应用内切换深浅色时由 JS 调用；
         键盘自身主题无公开 API 可控，跟随系统设置） */
@@ -502,11 +538,24 @@ class MainActivity : TauriActivity() {
       super.onConfigurationChanged(newConfig)
       val dark = (newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
       evalJs("window.dispatchEvent(new CustomEvent('heid-sysdark',{detail:{dark:$dark}}))")
+      /* 键盘接入/拔出会切换 keyboard 配置项（NOKEYS↔QWERTY），顺带重推 */
+      pushHardwareKeyboard()
     }
 
   override fun onWebViewCreate(webView: WebView) {
     webViewRef = webView
     webView.addJavascriptInterface(InsetBridge(), "HeidBridge")
+    /* 物理键盘接入监听：外接键盘/键盘盖插拔时推给前端（初始值由 HeidBridge.hwKb()
+       在前端启动时补读，此处不再推——页面尚未就绪，事件会丢） */
+    (getSystemService(Context.INPUT_SERVICE) as? InputManager)?.let { im ->
+      val listener = object : InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) { pushHardwareKeyboard() }
+        override fun onInputDeviceRemoved(deviceId: Int) { pushHardwareKeyboard() }
+        override fun onInputDeviceChanged(deviceId: Int) { pushHardwareKeyboard() }
+      }
+      inputDeviceListener = listener
+      im.registerInputDeviceListener(listener, null)
+    }
     val density = resources.displayMetrics.density
     ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -523,6 +572,27 @@ class MainActivity : TauriActivity() {
       )
       insets
     }
+  }
+
+  /** 回前台时重推一次：后台期间键盘插拔的事件可能丢失（去重后只补差异） */
+  override fun onResume() {
+    super.onResume()
+    pushHardwareKeyboard()
+  }
+
+  /** 物理键盘按键必经此处（软键盘走 IME InputConnection，不进 Activity 分发）：
+      设备枚举万一漏报，敲任意键也会点亮/校正提示 */
+  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    pushHardwareKeyboard()
+    return super.dispatchKeyEvent(event)
+  }
+
+  override fun onDestroy() {
+    inputDeviceListener?.let { l ->
+      (getSystemService(Context.INPUT_SERVICE) as? InputManager)?.unregisterInputDeviceListener(l)
+    }
+    inputDeviceListener = null
+    super.onDestroy()
   }
 
   private fun evalJs(script: String) {

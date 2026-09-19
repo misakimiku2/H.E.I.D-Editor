@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
+  FileText, X, Plus, FolderOpen, Folder, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
   GitCompare, Columns2, History, ChevronRight, ChevronLeft, ChevronDown, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
   Table, Code, Braces, Wand2, Printer, RefreshCw, AppWindow,
@@ -89,6 +89,7 @@ import { useSessionPersistence } from './hooks/useSessionPersistence';
 import { usePlatformIntegration } from './hooks/usePlatformIntegration';
 import { useAppShortcuts } from './hooks/useAppShortcuts';
 import { useSplitScroll } from './hooks/useSplitScroll';
+import { useShowKbdHints } from './hooks/useHardwareKeyboard';
 import { useUpdater } from './hooks/useUpdater';
 import { useUpdateNotifications } from './hooks/useUpdateNotifications';
 import {
@@ -133,6 +134,9 @@ export default function App() {
   /* 移动端形态：安卓且窄屏（手机）采用专属布局；安卓宽屏（平板）沿用桌面布局 */
   const isNarrow = useMediaQuery(NARROW_QUERY);
   const isPhone = IS_ANDROID_APP && isNarrow;
+
+  /* 快捷键提示可见性：触屏为主（平板）仅接了物理键盘才显示，桌面恒显示 */
+  const showKbdHints = useShowKbdHints();
 
   /* ---- 编辑器设置（弹窗修改即时生效 + 持久化）---- */
   const [settings, setSettings] = useState<EditorSettings>(() => loadSettings());
@@ -1519,7 +1523,7 @@ export default function App() {
           isDarkMode={isDarkMode}
           conflictedIds={conflictedIds}
           canDetach={canMultiWindow}
-          newTabTitle={`${t('menu.newFile')} (Ctrl+N)`}
+          newTabTitle={`${t('menu.newFile')}${showKbdHints ? ' (Ctrl+N)' : ''}`}
           onSelect={editor.setActiveTabId}
           onCloseTab={(id) => { void file.closeTab(id); }}
           onContextMenu={(x, y, tabId) => setTabMenu({ x, y, tabId })}
@@ -1562,20 +1566,54 @@ export default function App() {
           <Menu size={IS_TOUCH_PRIMARY ? 18 : 15} />
         </button>
 
-        {/* 文件夹树开关：紧邻菜单按钮（原在标题栏标签页前，移此聚拢视图类入口） */}
-        <button
-          onClick={handleToggleTree}
-          title={t('tree.toggle')}
-          className={cn(
-            "ml-1 rounded-md flex items-center justify-center transition-colors shrink-0",
-            IS_TOUCH_PRIMARY ? "w-11 h-11" : "p-1.5",
-            treeOpen
-              ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
-              : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
-          )}
-        >
-          <PanelLeft size={IS_TOUCH_PRIMARY ? 18 : 15} />
-        </button>
+        {/* 文件夹树入口：桌面保持 PanelLeft 图标开关。平板把打开/关闭文件夹从主菜单
+            提取为菜单栏常驻图标按钮（与菜单栏其他按钮同为纯图标、44px 触控目标）：
+            无根目录=打开文件夹（唤起系统目录选择）；有根目录=点击开合树+旁置关闭 */}
+        {IS_TOUCH_PRIMARY ? (
+          <>
+            {isTauri && (
+              <button
+                onClick={treeRootPath ? handleToggleTree : () => void chooseTreeFolder()}
+                aria-label={treeRootPath ? t('tree.toggle') : t('tree.openFolder')}
+                title={treeRootPath ? t('tree.toggle') : t('tree.openFolder')}
+                className={cn(
+                  "ml-1 w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                  treeOpen
+                    ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
+                    : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
+                )}
+              >
+                {treeRootPath && treeOpen ? <Folder size={18} /> : <FolderOpen size={18} />}
+              </button>
+            )}
+            {isTauri && treeRootPath && (
+              <button
+                onClick={() => handleTreeRootChange(null)}
+                title={t('tree.closeFolder')}
+                aria-label={t('tree.closeFolder')}
+                className={cn(
+                  "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                  isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+                )}
+              >
+                <FolderX size={16} />
+              </button>
+            )}
+          </>
+        ) : (
+          <button
+            onClick={handleToggleTree}
+            title={t('tree.toggle')}
+            className={cn(
+              "ml-1 p-1.5 rounded-md flex items-center justify-center transition-colors shrink-0",
+              treeOpen
+                ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
+                : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
+            )}
+          >
+            <PanelLeft size={15} />
+          </button>
+        )}
 
         <div className="flex-1" />
 
@@ -1771,9 +1809,10 @@ export default function App() {
             >
               <FolderOpen size={14} />
               {t('menu.openFile')}
-              <span className="ml-auto text-[10px] opacity-50">Ctrl+O</span>
+              {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+O</span>}
             </button>
-            {isTauri && (
+            {/* 打开/关闭文件夹：平板已提取为菜单栏常驻按钮，仅桌面保留在菜单里 */}
+            {isTauri && !IS_TOUCH_PRIMARY && (
               <button
                 onClick={() => { setMenuOpen(false); void chooseTreeFolder(); }}
                 className={cn(
@@ -1785,7 +1824,7 @@ export default function App() {
                 {t('tree.openFolder')}
               </button>
             )}
-            {isTauri && treeRootPath && (
+            {isTauri && !IS_TOUCH_PRIMARY && treeRootPath && (
               <button
                 onClick={() => { setMenuOpen(false); handleTreeRootChange(null); }}
                 className={cn(
@@ -1867,7 +1906,7 @@ export default function App() {
             >
               <Save size={14} />
               {t('menu.save')}
-              <span className="ml-auto text-[10px] opacity-50">Ctrl+S</span>
+              {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+S</span>}
             </button>
             <button
               onClick={() => { setMenuOpen(false); file.handleSaveAs(); }}
@@ -1879,7 +1918,7 @@ export default function App() {
             >
               <SaveAll size={14} />
               {t('menu.saveAs')}
-              <span className="ml-auto text-[10px] opacity-50">Ctrl+Shift+S</span>
+              {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+Shift+S</span>}
             </button>
             <button
               onClick={() => { setMenuOpen(false); void handleExportHtml(); }}
@@ -1903,7 +1942,7 @@ export default function App() {
               >
                 <Printer size={14} />
                 {t('menu.print')}
-                <span className="ml-auto text-[10px] opacity-50">Ctrl+P</span>
+                {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+P</span>}
               </button>
             )}
             {isTauri && (
@@ -1929,7 +1968,7 @@ export default function App() {
             >
               <Undo2 size={14} />
               {t('menu.undo')}
-              <span className="ml-auto text-[10px] opacity-50">Ctrl+Z</span>
+              {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+Z</span>}
             </button>
             <button
               onClick={() => { setMenuOpen(false); editor.handleRedo(); }}
@@ -1941,7 +1980,7 @@ export default function App() {
             >
               <Redo2 size={14} />
               {t('menu.redo')}
-              <span className="ml-auto text-[10px] opacity-50">Ctrl+Y</span>
+              {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+Y</span>}
             </button>
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
             <button
