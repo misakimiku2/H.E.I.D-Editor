@@ -23,9 +23,10 @@ import java.nio.charset.Charset
 class MainActivity : TauriActivity() {
   private var webViewRef: WebView? = null
 
-  /** 安全区（状态栏/手势条高度），CSS px */
+  /** 安全区（状态栏/手势条高度）与键盘高度，CSS px */
   @Volatile private var cssTop = 0
   @Volatile private var cssBottom = 0
+  @Volatile private var cssKb = 0
 
   private lateinit var openDocLauncher: ActivityResultLauncher<Intent>
   private lateinit var createDocLauncher: ActivityResultLauncher<Intent>
@@ -38,6 +39,10 @@ class MainActivity : TauriActivity() {
 
     @JavascriptInterface
     fun bottom(): Int = cssBottom
+
+    /** 软键盘高度（已扣除手势条；0 = 键盘收起） */
+    @JavascriptInterface
+    fun kb(): Int = cssKb
 
     /** SAF content URI → 显示文件名（数字型 URI 前端无法自行解析） */
     @JavascriptInterface
@@ -505,10 +510,14 @@ class MainActivity : TauriActivity() {
     val density = resources.displayMetrics.density
     ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+      val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
       cssTop = Math.round(bars.top / density)
       cssBottom = Math.round(bars.bottom / density)
+      /* 键盘高度 = IME 底边 − 手势条底边（键盘弹出时 IME 覆盖导航栏），
+         前端据此给根容器让位，使底部工具栏/信息栏始终浮在键盘上方，光标不被遮挡 */
+      cssKb = Math.max(0, Math.round(ime.bottom / density) - cssBottom)
       webView.evaluateJavascript(
-        "window.dispatchEvent(new CustomEvent('heid-insets',{detail:{top:$cssTop,bottom:$cssBottom}}))",
+        "window.dispatchEvent(new CustomEvent('heid-insets',{detail:{top:$cssTop,bottom:$cssBottom,kb:$cssKb}}))",
         null
       )
       insets

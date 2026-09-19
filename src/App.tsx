@@ -1453,10 +1453,15 @@ export default function App() {
 
   return (
     <I18nProvider lang={lang}>
-    <div className={cn(
-      "h-dvh flex flex-col overflow-hidden relative",
-      isDarkMode ? "bg-zinc-900 text-zinc-200" : "bg-zinc-50 text-zinc-800"
-    )}>
+    <div
+      className={cn(
+        "h-dvh flex flex-col overflow-hidden relative",
+        isDarkMode ? "bg-zinc-900 text-zinc-200" : "bg-zinc-50 text-zinc-800"
+      )}
+      /* 安卓键盘弹出时整列收缩（--heid-kb 由 MainActivity 经 IME insets 注入），
+         底部工具栏/信息栏随之浮在键盘上方，编辑器光标不被遮挡 */
+      style={{ paddingBottom: 'var(--heid-kb, 0px)' }}
+    >
       {/* 标题栏：手机端用 TopAppBar 取代自绘标题栏 + 菜单栏；桌面与安卓平板保留原布局 */}
       {isPhone ? (
         <TopAppBar
@@ -1482,6 +1487,9 @@ export default function App() {
           treeOpen={treeOpen}
           hasTreeRoot={!!treeRootPath}
           onToggleTree={handleToggleTree}
+          canToggleView={!!isMarkdown && !activeTab?.readOnly}
+          view={effectiveView === 'preview' ? 'preview' : 'edit'}
+          onToggleView={toggleMdView}
         />
       ) : (
       <div
@@ -2559,13 +2567,10 @@ export default function App() {
           canUndo={editor.canUndo}
           canRedo={editor.canRedo}
           saving={file.saving}
-          isMarkdown={!!isMarkdown}
-          view={effectiveView === 'preview' ? 'preview' : 'edit'}
           onOpen={file.handleOpenFile}
           onSave={file.handleSave}
           onUndo={editor.handleUndo}
           onRedo={editor.handleRedo}
-          onToggleView={toggleMdView}
           onFind={() => openFind(false, false)}
         />
         </>

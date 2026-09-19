@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   FileText, FolderOpen, Folder, Save, SaveAll, Plus, MoreVertical,
   Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2, GitCompare,
+  Eye, Pencil,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useT } from '../../lib/i18nContext';
@@ -32,6 +33,10 @@ interface TopAppBarProps {
   treeOpen?: boolean;
   hasTreeRoot?: boolean;
   onToggleTree?: () => void;
+  /** 预览切换（仅 markdown 等支持预览的内容提供；放在顶栏，见 v1.4 用户反馈） */
+  canToggleView?: boolean;
+  view?: 'edit' | 'preview';
+  onToggleView?: () => void;
 }
 
 /**
@@ -44,6 +49,7 @@ export function TopAppBar({
   onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
   onCloseTab, onSettings, onShortcuts, onAbout,
   treeOpen, hasTreeRoot, onToggleTree,
+  canToggleView, view, onToggleView,
 }: TopAppBarProps) {
   const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -91,10 +97,13 @@ export function TopAppBar({
   return (
     <div
       className={cn(
-        'h-12 border-b flex items-center pl-1.5 pr-1 gap-1 shrink-0 select-none',
+        'border-b flex items-center pl-1.5 pr-1 gap-1 shrink-0 select-none',
         'safe-top',
         isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
       )}
+      /* 高度须在 safe-top 之外另有 48px 内容区：固定 h-12 会被系统状态栏 padding
+         挤压导致按钮被裁切（v1.4 用户反馈），与桌面标题栏同用 calc 方案 */
+      style={{ height: 'calc(3rem + var(--heid-safe-top, 0px))' }}
     >
       {/* 标签页入口：数量徽标 */}
       <button
@@ -126,6 +135,21 @@ export function TopAppBar({
         />
         <span className="truncate text-sm font-medium">{title}</span>
       </div>
+
+      {/* 预览切换：仅支持预览的内容（markdown）显示，放在顶栏（v1.4 用户反馈：
+          不占据全局底栏位置） */}
+      {canToggleView && onToggleView && (
+        <button
+          onClick={onToggleView}
+          className={cn(
+            'w-11 h-11 rounded-md flex items-center justify-center shrink-0 transition-colors',
+            isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500'
+          )}
+          aria-label={view === 'preview' ? t('mobile.switchToEdit') : t('mobile.switchToPreview')}
+        >
+          {view === 'preview' ? <Pencil size={19} /> : <Eye size={19} />}
+        </button>
+      )}
 
       {/* 文件树抽屉入口：已开=实心(点击收起)；未开且有根目录=展开；无根目录=唤起系统目录选择 */}
       {onToggleTree && (

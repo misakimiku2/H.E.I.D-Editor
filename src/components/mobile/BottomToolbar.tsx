@@ -1,4 +1,4 @@
-import { FolderOpen, Save, Undo2, Redo2, Eye, Pencil, Search } from 'lucide-react';
+import { FolderOpen, Save, Undo2, Redo2, Search } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useT } from '../../lib/i18nContext';
 
@@ -8,24 +8,20 @@ interface BottomToolbarProps {
   canUndo: boolean;
   canRedo: boolean;
   saving: boolean;
-  isMarkdown: boolean;
-  /** 当前生效视图（手机上分屏折叠为预览） */
-  view: 'edit' | 'preview';
   onOpen: () => void;
   onSave: () => void;
   onUndo: () => void;
   onRedo: () => void;
-  onToggleView: () => void;
   onFind: () => void;
 }
 
 /**
- * 手机端底部工具栏（拇指区）：打开 / 撤销 / 保存 / 重做 / 查找 / 编辑预览切换。
- * 取代桌面端键盘快捷键；触控目标 ≥44px。
+ * 手机端底部工具栏（拇指区）：打开 / 撤销 / 保存 / 重做 / 查找。
+ * 触控目标 ≥44px；预览切换已移至顶栏（v1.4 用户反馈）。
  */
 export function BottomToolbar({
-  isDarkMode, isDirty, canUndo, canRedo, saving, isMarkdown, view,
-  onOpen, onSave, onUndo, onRedo, onToggleView, onFind,
+  isDarkMode, isDirty, canUndo, canRedo, saving,
+  onOpen, onSave, onUndo, onRedo, onFind,
 }: BottomToolbarProps) {
   const t = useT();
   const btnCls = (disabled?: boolean) => cn(
@@ -75,15 +71,6 @@ export function BottomToolbar({
       <button onClick={onFind} className={btnCls()} aria-label={t('find.replaceTitle')}>
         <Search size={19} />
         {t('common.find')}
-      </button>
-      <button
-        onClick={onToggleView}
-        disabled={!isMarkdown}
-        className={btnCls(!isMarkdown)}
-        aria-label={view === 'preview' ? t('mobile.switchToEdit') : t('mobile.switchToPreview')}
-      >
-        {view === 'preview' ? <Pencil size={19} /> : <Eye size={19} />}
-        {view === 'preview' ? t('common.edit') : t('common.preview')}
       </button>
     </div>
   );
