@@ -12,8 +12,10 @@ if (IS_ANDROID_APP) {
     const n = (v: unknown) => (Number.isFinite(v) ? (v as number) : 0);
     root.style.setProperty('--heid-safe-top', `${n(top)}px`);
     root.style.setProperty('--heid-safe-bottom', `${n(bottom)}px`);
-    /* 键盘高度：App 根容器据此收缩布局，底部工具栏/信息栏始终浮在键盘上方 */
+    /* 键盘高度：App 根容器据此收缩布局，底部信息栏贴住键盘上沿；
+       同时在根元素上标记键盘开合，CSS 据此让底栏按钮退场（见 index.css） */
     root.style.setProperty('--heid-kb', `${n(kb)}px`);
+    root.classList.toggle('heid-kb-open', n(kb) > 0);
   };
   const bridge = (window as any).HeidBridge;
   if (bridge) {

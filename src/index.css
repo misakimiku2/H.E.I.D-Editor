@@ -97,6 +97,15 @@ body {
   padding-bottom: var(--heid-safe-bottom, env(safe-area-inset-bottom, 0px));
 }
 
+/* 键盘弹出时：底栏按钮脱离文档流沉到屏幕底（被键盘覆盖），
+   信息栏成为流内最后一项直接贴住键盘上沿——不留空槽 */
+.heid-kb-open .heid-bottom-toolbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
 /* 底部抽屉动画 */
 @keyframes heid-sheet-up {
   from { transform: translateY(100%); }
