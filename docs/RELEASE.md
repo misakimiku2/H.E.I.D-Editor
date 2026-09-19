@@ -23,6 +23,23 @@
 | `TAURI_SIGNING_PRIVATE_KEY` | `src-tauri/keys/heid.key` 文件的完整内容 |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 留空（密钥未设密码） |
 
+### 3. 安卓 release 签名（v1.4 起）
+
+桌面更新签名之外，安卓侧载 APK 自 v1.4 起用独立 keystore 做 release 签名（此前为 debug 签名，
+升级安装时系统要求签名一致，v1.3.x debug 包无法直接覆盖安装 v1.4.0+，需卸载重装一次）。
+
+- **密钥已生成**：`src-tauri/gen/android/app/heid-release.keystore`（alias `heid`，RSA 2048，
+  有效期 30 年），密码存于 `src-tauri/gen/android/keystore.properties`——两者均已被
+  .gitignore 排除，**务必备份**：丢失后无法再以同签名发版，已安装用户需卸载重装。
+- `app/build.gradle.kts` 的 `signingConfigs` 在 keystore.properties 存在时自动接上
+  release 签名，缺失时退回 debug 签名（保证 fork / 无密钥环境构建不失败）。
+- **GitHub secrets**（`android-release` 任务用，缺失时该任务显式报错）：
+
+  | Secret | 值 |
+  | --- | --- |
+  | `HEID_ANDROID_KEYSTORE_B64` | `base64 -w0 src-tauri/gen/android/app/heid-release.keystore` 的输出 |
+  | `HEID_ANDROID_KEYSTORE_PASSWORD` | `keystore.properties` 里的 `storePassword` 值 |
+
 ## 发布操作
 
 ```bash
@@ -52,8 +69,9 @@ git push origin v1.0.1
   两者先后在 windows-latest 上稳定报「Error creating asset temp dir」，
   softprops 在 ubuntu 上正常——疑似其新版上传实现在 Windows 上的缺陷，
   改用 runner 预装的 gh CLI 规避。）
-- **安卓**：构建 arm64 debug 签名 APK 附到同一 Release（侧载场景，不要求签名密钥）。
-  **2026-09-18 起暂缓**（`android-release` 任务 `if: false`，先专注桌面端；恢复时移除该行）。
+- **安卓**：v1.4 起恢复发布并升级为 **release 签名 APK**（`android-release` 任务，arm64）。
+  签名密钥经 secrets `HEID_ANDROID_KEYSTORE_B64` / `HEID_ANDROID_KEYSTORE_PASSWORD` 提供，
+  缺失时任务以显式报错失败；详见「一次性准备 → 安卓 release 签名」。
 
 日常 CI（`.github/workflows/ci.yml`，push/PR 触发）运行 vitest + tsc + 前端构建、
 Windows NSIS 构建（**关闭** `createUpdaterArtifacts`，无需 secrets）、安卓 arm64 debug APK 构建。
@@ -82,6 +100,10 @@ TAURI_SIGNING_PRIVATE_KEY=$(cat src-tauri/keys/heid.key) \
 TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
 npx tauri build
 # 产物：src-tauri/target/release/bundle/nsis/ 下含安装包 .exe 与更新签名 .exe.sig
+
+# 安卓 release 签名构建（需本地存在 keystore.properties，签名自动接入）：
+npx tauri android build --apk --target aarch64
+# 产物：src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk（已签名）
 ```
 
 ## 安装包外观

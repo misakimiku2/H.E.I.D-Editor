@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  FileText, FolderOpen, Save, SaveAll, Plus, MoreVertical,
+  FileText, FolderOpen, Folder, Save, SaveAll, Plus, MoreVertical,
   Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2, GitCompare,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
@@ -28,6 +28,10 @@ interface TopAppBarProps {
   onSettings: () => void;
   onShortcuts: () => void;
   onAbout: () => void;
+  /** 文件树抽屉：已开 → 收起；未开 → 无根目录时唤起系统目录选择，有根目录 → 展开 */
+  treeOpen?: boolean;
+  hasTreeRoot?: boolean;
+  onToggleTree?: () => void;
 }
 
 /**
@@ -39,6 +43,7 @@ export function TopAppBar({
   isDarkMode, title, isDirty, isMarkdown, saving, tabCount,
   onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
   onCloseTab, onSettings, onShortcuts, onAbout,
+  treeOpen, hasTreeRoot, onToggleTree,
 }: TopAppBarProps) {
   const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -121,6 +126,22 @@ export function TopAppBar({
         />
         <span className="truncate text-sm font-medium">{title}</span>
       </div>
+
+      {/* 文件树抽屉入口：已开=实心(点击收起)；未开且有根目录=展开；无根目录=唤起系统目录选择 */}
+      {onToggleTree && (
+        <button
+          onClick={onToggleTree}
+          className={cn(
+            'w-11 h-11 rounded-md flex items-center justify-center shrink-0 transition-colors',
+            treeOpen
+              ? (isDarkMode ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-200 text-zinc-700')
+              : (isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500')
+          )}
+          aria-label={hasTreeRoot ? t('tree.toggle') : t('tree.openFolder')}
+        >
+          {treeOpen || !hasTreeRoot ? <Folder size={19} /> : <FolderOpen size={19} />}
+        </button>
+      )}
 
       <div ref={menuRef} className="relative shrink-0">
         <button

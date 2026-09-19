@@ -87,9 +87,8 @@ jobs:
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
   android-release:
-    # 安卓侧载 APK 暂缓发布（2026-09-18 起，先专注桌面端）：恢复发布时删除下面这行 if 即可
-    if: false
-    name: 安卓发布（侧载 APK）
+    # v1.4 起恢复发布，改用 release 签名 APK（密钥经 secrets 提供，见 docs/RELEASE.md 安卓签名节）
+    name: 安卓发布（签名侧载 APK）
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -120,10 +119,27 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      - name: tauri android build（arm64 debug APK）
-        run: npx tauri android build --debug --apk --target aarch64
+      - name: 校验并还原签名密钥
+        env:
+          HEID_ANDROID_KEYSTORE_B64: ${{ secrets.HEID_ANDROID_KEYSTORE_B64 }}
+          HEID_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.HEID_ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$HEID_ANDROID_KEYSTORE_B64" ] || [ -z "$HEID_ANDROID_KEYSTORE_PASSWORD" ]; then
+            echo "::error::缺少仓库 secrets：HEID_ANDROID_KEYSTORE_B64 / HEID_ANDROID_KEYSTORE_PASSWORD。生成与导出步骤见 docs/RELEASE.md「安卓 release 签名」。"
+            exit 1
+          fi
+          echo "$HEID_ANDROID_KEYSTORE_B64" | base64 -d > src-tauri/gen/android/app/heid-release.keystore
+          cat > src-tauri/gen/android/keystore.properties <<EOF
+          storeFile=app/heid-release.keystore
+          storePassword=$HEID_ANDROID_KEYSTORE_PASSWORD
+          keyAlias=heid
+          keyPassword=$HEID_ANDROID_KEYSTORE_PASSWORD
+          EOF
+
+      - name: tauri android build（arm64 release APK，签名）
+        run: npx tauri android build --apk --target aarch64
 
       - name: 附到 Release
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk
+          files: src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk

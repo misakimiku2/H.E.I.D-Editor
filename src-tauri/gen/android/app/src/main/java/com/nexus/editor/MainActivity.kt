@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.webkit.JavascriptInterface
+import android.webkit.MimeTypeMap
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
@@ -132,6 +133,71 @@ class MainActivity : TauriActivity() {
       "[${items.joinToString(",")}]"
     } catch (e: Exception) {
       "[]"
+    }
+
+    /** SAF 树内路径约定（与前端 fileTree.ts 的 SAF_SEP 一致）：
+        目录 = "treeUri\u0000相对路径"，文件 = 完整 document URI（content://…） */
+
+    /** 拆出 treeUri 与相对路径（目录路径专用；根目录路径无分隔符 → rel 为空，与 listTree 的 JS 约定一致） */
+    private fun splitTreePath(dirPath: String): Pair<Uri, String>? {
+      val sepIdx = dirPath.indexOf('\u0000')
+      val root = Uri.parse(if (sepIdx >= 0) dirPath.substring(0, sepIdx) else dirPath)
+      val rel = if (sepIdx >= 0) dirPath.substring(sepIdx + 1) else ""
+      return root to rel
+    }
+
+    /** 条目路径 → document URI：文件（content://）原样；目录按 treeUri+rel 构建 */
+    private fun entryDocUri(entryPath: String): Uri? {
+      if (entryPath.startsWith("content://")) return Uri.parse(entryPath)
+      val (root, rel) = splitTreePath(entryPath) ?: return null
+      val treeDocId = DocumentsContract.getTreeDocumentId(root)
+      val docId = if (rel.isBlank()) treeDocId else "$treeDocId/$rel"
+      return DocumentsContract.buildDocumentUriUsingTree(root, docId)
+    }
+
+    /** 树内新建（目录 / 空文件，v1.4 SAF 文件管理）。parentDirPath 为父目录树内路径。
+        返回新建文档的 document URI，失败返回 null（前端以「提供器拒绝」提示） */
+    @JavascriptInterface
+    fun createInTree(parentDirPath: String, name: String, isDir: Boolean): String? {
+      return try {
+        val (root, rel) = splitTreePath(parentDirPath) ?: return null
+        val treeDocId = DocumentsContract.getTreeDocumentId(root)
+        val parentDocId = if (rel.isBlank()) treeDocId else "$treeDocId/$rel"
+        val parentUri = DocumentsContract.buildDocumentUriUsingTree(root, parentDocId)
+        val mime = if (isDir) DocumentsContract.Document.MIME_TYPE_DIR else mimeForName(name)
+        DocumentsContract.createDocument(contentResolver, parentUri, mime, name)?.toString()
+      } catch (e: Exception) {
+        null
+      }
+    }
+
+    /** 树内重命名（目录 / 文件；仅改名不移动）。name 为新显示名。
+        返回提供器确认后的新 document URI，失败返回 null */
+    @JavascriptInterface
+    fun renameEntry(entryPath: String, newName: String): String? {
+      return try {
+        val docUri = entryDocUri(entryPath) ?: return null
+        DocumentsContract.renameDocument(contentResolver, docUri, newName)?.toString()
+      } catch (e: Exception) {
+        null
+      }
+    }
+
+    /** 树内删除（目录由文档提供器递归处理） */
+    @JavascriptInterface
+    fun deleteEntry(entryPath: String): Boolean {
+      return try {
+        val docUri = entryDocUri(entryPath) ?: return false
+        DocumentsContract.deleteDocument(contentResolver, docUri)
+      } catch (e: Exception) {
+        false
+      }
+    }
+
+    /** 扩展名 → MIME（新建文件用；未知扩展名按纯文本） */
+    private fun mimeForName(name: String): String {
+      val ext = name.substringAfterLast('.', "").lowercase()
+      return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "text/plain"
     }
 
     /** WHATWG label → Charset（与前端 lib/encoding.ts 的选项一一对应） */

@@ -19,10 +19,9 @@ import {
   hitDisplay, pageGroups, searchInDir, searchProgress, cancelInDirSearch, HITS_PER_PAGE,
   type DirSearchOptions, type DirSearchResult, type FileHit, type SearchProgress,
 } from '../lib/dirSearch';
-import { fsMkdir, fsRename, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
-import { writeLocalPath } from '../lib/fileIO';
+import { fsMkdir, fsRename, fsCreateEmptyFile, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
 import { appAlert } from '../lib/appAlert';
-import { IS_TOUCH_PRIMARY } from '../lib/platform';
+import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
 import { useLongPress } from '../hooks/useLongPress';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 
@@ -463,10 +462,12 @@ export function FileTreeSidebar({
     setCreating(null);
     if (!target) return;
     if (!isValidEntryName(name)) { appAlert(t('tree.invalidName')); return; }
-    const newPath = joinPath(target.parentPath, name);
+    const joined = joinPath(target.parentPath, name);
+    let newPath = joined;
     try {
       if (target.isDir) await fsMkdir(newPath);
-      else await writeLocalPath(newPath, '', 'utf-8', false);
+      /* 安卓：经 SAF 新建空文档，实际路径为返回的 content URI（桌面=写空文件） */
+      else newPath = await fsCreateEmptyFile(joined);
       await refreshTree();
       if (!target.isDir) onOpenFile(newPath);
     } catch (e) { opFailed(e); }
@@ -478,8 +479,9 @@ export function FileTreeSidebar({
     if (!target || name === target.name) return;
     if (!isValidEntryName(name)) { appAlert(t('tree.invalidName')); return; }
     try {
-      const newPath = joinPath(parentPathOf(target.path), name);
-      await fsRename(target.path, newPath);
+      const joined = joinPath(parentPathOf(target.path), name);
+      /* 安卓文件重命名后旧 content URI 失效，以提供器返回的新 URI 为准 */
+      const newPath = await fsRename(target.path, joined);
       await refreshTree();
       onTabsRenamed(target.path, newPath, target.isDir);
     } catch (e) { opFailed(e); }
@@ -528,17 +530,19 @@ export function FileTreeSidebar({
     const selfDir = node?.isDir ? node.path : rootPath;
     const parentDir = node && !node.isDir ? parentPathOf(node.path) : selfDir;
     const isDir = !!node?.isDir;
+    /* SAF 桥只覆盖新建/重命名/删除：剪切移动（需 moveDocument）与树内复制暂不提供 */
+    const noSafMove = IS_ANDROID_APP;
     const items: ContextMenuItem[] = [
       { icon: <FilePlus size={13} />, label: t('menu.newFile'), onSelect: () => startCreate(selfDir, false) },
       { icon: <FolderPlus size={13} />, label: t('tree.newFolder'), onSelect: () => startCreate(selfDir, true) },
-      { separatorBefore: true, icon: <Scissors size={13} />, label: t('ctx.cut'), disabled: isRoot, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: true }) },
-      { icon: <Copy size={13} />, label: t('ctx.copy'), disabled: isRoot, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: false }) },
-      { icon: <ClipboardPaste size={13} />, label: t('ctx.paste'), disabled: !clip, onSelect: () => void handlePaste(parentDir) },
+      { separatorBefore: true, icon: <Scissors size={13} />, label: t('ctx.cut'), disabled: isRoot || noSafMove, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: true }) },
+      { icon: <Copy size={13} />, label: t('ctx.copy'), disabled: isRoot || noSafMove, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: false }) },
+      { icon: <ClipboardPaste size={13} />, label: t('ctx.paste'), disabled: !clip || noSafMove, onSelect: () => void handlePaste(parentDir) },
       { separatorBefore: true, icon: <Pencil size={13} />, label: t('tree.rename'), disabled: isRoot || !!renaming, onSelect: () => node && setRenaming({ path: node.path, name: node.name, isDir: node.isDir }) },
       { icon: <Trash2 size={13} />, label: t('tree.delete'), danger: true, disabled: isRoot, onSelect: () => node && void handleDelete(node) },
       { separatorBefore: true, icon: <Link2 size={13} />, label: t('tree.copyPath'), onSelect: () => void writeClipboardText(node?.path ?? rootPath).catch(() => {}) },
       { icon: <Link2 size={13} />, label: t('tree.copyRelPath'), onSelect: () => void writeClipboardText(relativePathUnderRoot(node?.path ?? rootPath, rootPath)).catch(() => {}) },
-      { icon: <FolderSearch size={13} />, label: t('tree.reveal'), onSelect: () => void fsReveal(node?.path ?? rootPath).catch(opFailed) },
+      { icon: <FolderSearch size={13} />, label: t('tree.reveal'), disabled: noSafMove, onSelect: () => void fsReveal(node?.path ?? rootPath).catch(opFailed) },
     ];
     /* 目录/根才有「刷新」语义（对文件无意义） */
     if (!node || isDir) {

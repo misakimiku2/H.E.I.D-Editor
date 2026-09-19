@@ -71,6 +71,7 @@ import {
 import { loadSessionForLabel, releaseWindowSession, safeLocalStorage } from './lib/sessionWindows';
 import { TopAppBar } from './components/mobile/TopAppBar';
 import { BottomToolbar } from './components/mobile/BottomToolbar';
+import { StatusStrip } from './components/mobile/StatusStrip';
 import { TabSheet } from './components/mobile/TabSheet';
 import { androidCreateDoc, androidWriteUri, formatFileSize, isTauri, writeLocalPath } from './lib/fileIO';
 import {
@@ -1379,6 +1380,77 @@ export default function App() {
     );
   };
 
+  /* 状态栏弹出菜单（编码 / 换行符）：桌面状态栏与手机精简条共用（锚定在各自条内） */
+  const statusMenuPanel = !statusMenu || !activeTab ? null : (
+    <>
+      <div className="fixed inset-0 z-40" onClick={() => setStatusMenu(null)} />
+      <div className={cn(
+        "absolute bottom-full mb-1 right-2 z-50 w-56 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col",
+        isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
+      )}>
+        {statusMenu === 'encoding-root' && (<>
+          <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>{t('status.encoding')}</div>
+          <button
+            onClick={() => setStatusMenu('encoding-reopen')}
+            className={statusItemCls}
+          >
+            <RotateCcw size={12} className="shrink-0" />
+            {t('status.reopenAsMenu')}
+          </button>
+          <button
+            onClick={() => setStatusMenu('encoding-save')}
+            disabled={!activeTab.path || activeTab.readOnly}
+            className={cn(statusItemCls, "disabled:opacity-40")}
+          >
+            <Save size={12} className="shrink-0" />
+            {t('status.convertSaveMenu')}
+          </button>
+          {!activeTab.path && (
+            <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+              {t('status.noPathEncoding')}
+            </div>
+          )}
+        </>)}
+        {(statusMenu === 'encoding-reopen' || statusMenu === 'encoding-save') && (
+          <>
+            <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
+              {statusMenu === 'encoding-reopen' ? t('status.reopenAsTitle') : t('status.convertSaveTitle')}
+            </div>
+            {ENCODING_OPTIONS.map(opt => (
+              <button
+                key={opt.id}
+                onClick={() => {
+                  setStatusMenu(null);
+                  if (statusMenu === 'encoding-reopen') void file.reopenWithEncoding(activeTab, opt.id);
+                  else void file.convertEncoding(activeTab, opt.id);
+                }}
+                className={cn(statusItemCls, "justify-between")}
+              >
+                <span className="flex items-center gap-2">
+                  {opt.id === 'utf-8' && activeTab.bom ? 'UTF-8 BOM' : opt.label}
+                </span>
+                {opt.id === activeTab.encoding && <span className="text-emerald-500">✓</span>}
+              </button>
+            ))}
+          </>
+        )}
+        {statusMenu === 'eol' && (<>
+          <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>{t('status.eol')}</div>
+          {(['lf', 'crlf', 'cr'] as LineEnding[]).map(e => (
+            <button
+              key={e}
+              onClick={() => { setStatusMenu(null); file.setTabEol(activeTab, e); }}
+              className={cn(statusItemCls, "justify-between")}
+            >
+              <span>{EOL_LABELS[e]}{e === 'lf' ? t('status.eolLfNote') : e === 'crlf' ? t('status.eolCrLfNote') : t('status.eolCrNote')}</span>
+              {activeTab.eol === e && <span className="text-emerald-500">✓</span>}
+            </button>
+          ))}
+        </>)}
+      </div>
+    </>
+  );
+
   return (
     <I18nProvider lang={lang}>
     <div className={cn(
@@ -1407,6 +1479,9 @@ export default function App() {
           onSettings={() => setSettingsOpen(true)}
           onShortcuts={() => setShortcutsOpen(true)}
           onAbout={() => setAboutOpen(true)}
+          treeOpen={treeOpen}
+          hasTreeRoot={!!treeRootPath}
+          onToggleTree={handleToggleTree}
         />
       ) : (
       <div
@@ -1894,9 +1969,9 @@ export default function App() {
       </div>
       )}
 
-      {/* editor area（桌面/平板：文件树侧栏开启时编辑区让位；手机无侧栏） */}
+      {/* editor area（桌面/平板：文件树侧栏开启时编辑区让位；手机=覆盖抽屉不占布局） */}
       <div className="flex flex-1 overflow-hidden">
-        {treeOpen && !isPhone && isTauri && treeRootPath && (
+        {treeOpen && isTauri && treeRootPath && (
           <FileTreeSidebar
             rootPath={treeRootPath}
             open={treeOpen}
@@ -1908,7 +1983,7 @@ export default function App() {
             onOpenImage={(p) => void openImageInViewer(p)}
             onRootChange={handleTreeRootChange}
             onClose={() => setTreeOpen(false)}
-            canManage={isTauri && !IS_ANDROID_APP}
+            canManage={isTauri}
             askDangerConfirm={askTreeConfirm}
             onTabsRenamed={handleTreeTabsRenamed}
             onFileDeleted={handleTreeFileDeleted}
@@ -2163,76 +2238,8 @@ export default function App() {
                 </button>
               )}
 
-              {/* 状态栏弹出菜单（点击遮罩关闭） */}
-              {statusMenu && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setStatusMenu(null)} />
-                  <div className={cn(
-                    "absolute bottom-full mb-1 right-2 z-50 w-56 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col",
-                    isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
-                  )}>
-                    {statusMenu === 'encoding-root' && (<>
-                      <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>{t('status.encoding')}</div>
-                      <button
-                        onClick={() => setStatusMenu('encoding-reopen')}
-                        className={statusItemCls}
-                      >
-                        <RotateCcw size={12} className="shrink-0" />
-                        {t('status.reopenAsMenu')}
-                      </button>
-                      <button
-                        onClick={() => setStatusMenu('encoding-save')}
-                        disabled={!activeTab.path || activeTab.readOnly}
-                        className={cn(statusItemCls, "disabled:opacity-40")}
-                      >
-                        <Save size={12} className="shrink-0" />
-                        {t('status.convertSaveMenu')}
-                      </button>
-                      {!activeTab.path && (
-                        <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-                          {t('status.noPathEncoding')}
-                        </div>
-                      )}
-                    </>)}
-                    {(statusMenu === 'encoding-reopen' || statusMenu === 'encoding-save') && (
-                      <>
-                        <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>
-                          {statusMenu === 'encoding-reopen' ? t('status.reopenAsTitle') : t('status.convertSaveTitle')}
-                        </div>
-                        {ENCODING_OPTIONS.map(opt => (
-                          <button
-                            key={opt.id}
-                            onClick={() => {
-                              setStatusMenu(null);
-                              if (statusMenu === 'encoding-reopen') void file.reopenWithEncoding(activeTab, opt.id);
-                              else void file.convertEncoding(activeTab, opt.id);
-                            }}
-                            className={cn(statusItemCls, "justify-between")}
-                          >
-                            <span className="flex items-center gap-2">
-                              {opt.id === 'utf-8' && activeTab.bom ? 'UTF-8 BOM' : opt.label}
-                            </span>
-                            {opt.id === activeTab.encoding && <span className="text-emerald-500">✓</span>}
-                          </button>
-                        ))}
-                      </>
-                    )}
-                    {statusMenu === 'eol' && (<>
-                      <div className={cn("px-3 py-1 text-[10px]", isDarkMode ? "text-zinc-500" : "text-zinc-400")}>{t('status.eol')}</div>
-                      {(['lf', 'crlf', 'cr'] as LineEnding[]).map(e => (
-                        <button
-                          key={e}
-                          onClick={() => { setStatusMenu(null); file.setTabEol(activeTab, e); }}
-                          className={cn(statusItemCls, "justify-between")}
-                        >
-                          <span>{EOL_LABELS[e]}{e === 'lf' ? t('status.eolLfNote') : e === 'crlf' ? t('status.eolCrLfNote') : t('status.eolCrNote')}</span>
-                          {activeTab.eol === e && <span className="text-emerald-500">✓</span>}
-                        </button>
-                      ))}
-                    </>)}
-                  </div>
-                </>
-              )}
+              {/* 状态栏弹出菜单（编码 / 换行符，与手机精简条共用） */}
+              {statusMenuPanel}
             </div>)}
           </>
         ) : (
@@ -2534,6 +2541,18 @@ export default function App() {
 
       {/* 手机端底部工具栏（拇指区，取代键盘快捷键） */}
       {isPhone && activeTab && (
+        <>
+        {/* 精简状态栏：语言 · 编码 · 换行符 · 行:列（编码/换行可点，弹层与桌面共用） */}
+        <StatusStrip
+          isDarkMode={isDarkMode}
+          languageLabel={LANGUAGE_LABELS[activeTab.language] || activeTab.language}
+          encodingLabel={encodingLabel(activeTab.encoding) + (activeTab.bom ? ' BOM' : '')}
+          eolLabel={EOL_LABELS[activeTab.eol]}
+          cursorLabel={t('status.cursor', { line: cursorInfo.line, col: cursorInfo.col }) + (cursorInfo.selChars > 0 ? t('status.selected', { n: cursorInfo.selChars }) : '')}
+          onEncoding={() => setStatusMenu(m => m === 'encoding-root' ? null : 'encoding-root')}
+          onEol={() => setStatusMenu(m => m === 'eol' ? null : 'eol')}
+          menuSlot={statusMenuPanel}
+        />
         <BottomToolbar
           isDarkMode={isDarkMode}
           isDirty={activeTab.isDirty}
@@ -2549,6 +2568,7 @@ export default function App() {
           onToggleView={toggleMdView}
           onFind={() => openFind(false, false)}
         />
+        </>
       )}
 
       {/* 移动端标签页抽屉 */}

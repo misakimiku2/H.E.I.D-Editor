@@ -13,6 +13,17 @@ val tauriProperties = Properties().apply {
     }
 }
 
+/** v1.4 安卓 release 签名：keystore.properties（storeFile/storePassword/keyAlias/keyPassword）
+    由本地或 CI 提供，不入库（见 .gitignore 与 docs/RELEASE.md）；缺失时 release 退回 debug 签名，
+    保证无密钥环境（fork / 首次 clone）构建不失败。 */
+val keystoreProperties = Properties().apply {
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+val hasReleaseKeystore = keystoreProperties.getProperty("storeFile") != null
+
 android {
     compileSdk = 36
     namespace = "com.nexus.editor"
@@ -23,6 +34,16 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("heidRelease") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -43,6 +64,9 @@ android {
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
                     .toList().toTypedArray()
             )
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("heidRelease")
+            }
         }
     }
     kotlinOptions {
