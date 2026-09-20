@@ -121,10 +121,13 @@ VS Code 风格的编辑体验：Canvas 语法着色迷你地图（点击/拖拽�
 | 文件 | 说明 |
 | --- | --- |
 | `H.I.D.E_*_x64-setup.exe` | Windows 安装程序（NSIS 简体中文向导，自动注册文件关联） |
-| `*.apk` | Android 侧载 APK（arm64，Android 7.0+） |
+| `H.I.D.E_*_arm64.apk` | Android 侧载 APK（arm64，**release 签名**，Android 7.0+） |
 
-- **系统要求**：Windows 10/11（WebView2 系统默认自带）
-- **应用内更新**：桌面端启动后静默检查新版本（每次启动必检），发现新版会弹窗确认并自动完成更新
+- **系统要求**：Windows 10/11（WebView2 系统默认自带）· Android 7.0（API 24）及以上
+- **应用内更新**：桌面端启动后静默检查新版本（每次启动必检），发现新版会弹窗确认并自动完成更新；
+  安卓端无静默更新通道，检测到新版会弹卡片跳 Releases 页手动安装 APK
+- **安卓 v1.3.x 老包升级**：v1.4.0 起 APK 改用 release 签名，与 v1.3.0 及更早的 debug 包签名
+  不一致，**需先卸载旧包再装新版**（卸载不动磁盘上的文件）；此后各版可直接覆盖安装
 - **便携运行**：安装目录下的 `nexus-editor.exe` 也可直接运行
 
 > 纯浏览器模式（`npm run dev`）下文件读写自动降级为浏览器 File System Access API / 下载。
@@ -141,7 +144,7 @@ npm run tauri:build         # 编译 Rust 并打包（首次约 4-10 分钟）
 产物位置：
 
 - **独立可执行文件**：`src-tauri/target/release/nexus-editor.exe`
-- **安装程序**：`src-tauri/target/release/bundle/nsis/H.I.D.E_1.3.1_x64-setup.exe`
+- **安装程序**：`src-tauri/target/release/bundle/nsis/H.I.D.E_<版本>_x64-setup.exe`
 
 ### 注册为系统编辑器
 
@@ -169,18 +172,28 @@ rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-andro
 
 npm run tauri android init      # 首次：生成 src-tauri/gen/android（已入库，含定制）
 npm run tauri android dev       # 连接设备/模拟器热更新调试
-npm run tauri android build --apk --debug --target aarch64   # debug APK
+npm run tauri android build -- --apk --debug --target aarch64   # debug APK（可 adb install、可 CDP 调试）
+npm run tauri android build -- --apk --target aarch64           # release APK（需本地 keystore.properties，见 docs/RELEASE.md）
 ```
 
-产物：`src-tauri/gen/android/app/build/outputs/apk/*/debug/app-universal-debug.apk`，`adb install` 安装即可。
+> ⚠️ `--` 分隔符不能省：直接写 `build --apk` 时 npm 会把 `--apk` 吃掉，
+> Tauri 退回默认产物（release **AAB**，既不能直接装也不能调试）。
+
+产物：`src-tauri/gen/android/app/build/outputs/apk/universal/{debug,release}/*.apk`，`adb install -r` 安装即可。
+真机 ARM 平板加 `--target aarch64`（只编 arm64，构建与传输都快一大截；产物名仍叫 universal，
+里面实际只有 arm64 库，`unzip -l … | grep 'lib/'` 可核对）。
 
 #### 安卓端适配要点
 
-- **手机**：顶栏（标签列表 / 文件名 / 溢出菜单）+ 底部工具栏（打开 / 撤销 / 保存 / 重做 / 编辑预览切换），无分屏与小地图
-- **平板（≥768px）**：沿用桌面布局（标签条 / 三视图切换 / 分屏），≥1024px 启用小地图与粘性滚动
-- **文件访问**：系统 SAF 文件选择器（`ACTION_OPEN_DOCUMENT` / `CREATE_DOCUMENT`），支持多选；读写授权经 `takePersistableUriPermission` 持久化，重启后会话恢复可用（见 `src-tauri/gen/android/.../MainActivity.kt` 的 `HeidBridge`）
+- **手机**：顶栏（标签列表 / 文件名 / 文件树 / 溢出菜单）+ 底部工具栏（打开 / 撤销 / 保存 / 重做 / 编辑预览切换），精简状态栏（语言·编码·换行·行列，后两项可点），无分屏与小地图
+- **平板（≥768px）**：沿用桌面布局（标签条 / 三视图切换 / 分屏 / 推拉式文件树），≥1024px 启用小地图与粘性滚动；菜单栏常驻一排纯图标高频按钮（打开 / 保存 / 撤销 / 重做 / 从网址导入 / 设置 / 分享 / 文件夹树）
+- **触屏交互**（v1.4 起）：长按 = 右键菜单（标签栏 / 文件树 / Markdown 预览 / 大纲 / JSON 树 / CSV）；双指捏合缩放 + 单指平移（图片、SVG 预览与编辑画布）；CSV 用长按菜单与选区把手替代桌面的拖拽填充柄；长按文字让位系统选字，Markdown 选区上方浮出复制 / 格式化工具条。全部由 `IS_TOUCH_PRIMARY` 与 `pointer-coarse` 门控，桌面行为不变
+- **触控目标**：主要触点 ≥44dp（关键操作 48dp），hover 样式包在 `@media (hover:hover) and (pointer:fine)`，自定义滚动条只在桌面出现
+- **快捷键提示**：接入物理键盘时才显示 `Ctrl+…` 提示（Kotlin 侧 `InputManager` 枚举与插拔事件上报，软键盘不算）
+- **文件访问**：系统 SAF 文件选择器（`ACTION_OPEN_DOCUMENT` / `CREATE_DOCUMENT`），支持多选；读写授权经 `takePersistableUriPermission` 持久化，重启后会话恢复可用（见 `src-tauri/gen/android/.../MainActivity.kt` 的 `HeidBridge`）；树内可直接新建 / 重命名 / 删除
 - **返回键**：逐层关闭弹层，最后弹出未保存退出确认
 - **外部修改 diff / 文件监听**：安卓版不实现（fs watch 不支持 Android 且 SAF 无真实路径）
+- **发布签名**：release APK 用独立 keystore 签名（`src-tauri/gen/android/keystore.properties`，不入库），与 v1.3.x 及更早的 debug 包签名不同，跨该边界升级需先卸载一次
 
 ### 开发调试
 

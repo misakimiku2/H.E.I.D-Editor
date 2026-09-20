@@ -1,7 +1,7 @@
 # H.I.D.E 后续开发规划
 
 > 定位：**轻量文本编辑器**。每项功能都要过"轻量"这道门槛：不显著增加包体积、不引入常驻后台、不让界面复杂化。
-> 当前版本：v1.3.0（2026-09，结构化内容与新格式批次已发布，另含标签拖拽多窗口、SVG 可视化编辑等路线图外批次）
+> 当前版本：v1.4.0（2026-09，安卓全面触屏适配 + SAF 文件管理 + release 签名发布；桌面端本版零改动）
 
 ## 版本策略
 
@@ -293,28 +293,49 @@ SVG 工作台（预览 + 可视化编辑：点选 / 拖拽 / 调色板换色 / P
 > 粘贴优先解析，多行单元格在网格 / Excel / Sheets 间往返不散架），编辑态右键
 > 粘贴插入编辑框光标处不再先提交。发行说明：docs/RELEASE-NOTES-v1.3.4.md。
 
-## v1.4 —— 移动端补齐与平台决策（P2）
+## v1.4 —— 移动端补齐 ✅ 已完成（2026-09）
 
-主题：**安卓从"能看"到"能用"**；同时给多平台一个明确答复。
+主题：**安卓从"能看"到"能用"**。桌面端本版零改动（触屏分支全由 `IS_TOUCH_PRIMARY` /
+`isPhone` / `pointer-coarse` 门控）。五批次交付：
 
-37. **手机端补齐**：图片查看入口（当前唯一入口是文件树，而文件树在手机端隐藏）、文件树抽屉化、精简状态栏
-38. **SAF 文件管理**：`src/lib/fileOps.ts` 的 `treeManageAvailable` 目前桌面专属，安卓侧补新建 / 重命名 / 删除
-39. **安卓 release 签名**：当前侧载用 debug 签名
+- **触控基建**：`useLongPress`（500ms、位移/捏合/滚动让位、吞掉抬手合成的 mousedown）+
+  `ContextMenu` 触屏变体（行高 44 / 面板 280）；长按接线到标签栏 / 文件树 / Markdown 预览 /
+  大纲 / JSON 树 / CSV；编辑器与预览长按文字让位系统选字；hover 样式收进
+  `@media (hover:hover) and (pointer:fine)`，页面自定义滚动条只留桌面；
+  快捷键提示按物理键盘门控（Kotlin `InputManager` 枚举 + `heid-hwkb` 事件）。
+- **手机端补齐（37）**：文件树覆盖式抽屉 + 顶栏入口（图片查看入口随之回归）、精简状态栏、
+  键盘避让（IME 高度经 `--heid-kb` 注入，底栏沉后 / 信息栏贴键盘上沿 / 光标滚入可视区）。
+- **SAF 文件管理（38）**：`treeManageAvailable` 放开双端，Kotlin 桥 `createInTree` /
+  `renameEntry` / `deleteEntry`；`fsRename` 返回生效新路径（改名后旧 content URI 失效）；
+  树根行解码 docId 显示真实目录名；系统不提供的能力（剪切 / 复制 / 打开所在目录）置灰。
+- **查看器与 CSV**：`usePinchZoom`（单指平移 + 双指捏合，锚点=双指中点）接 ImageViewer、
+  SvgCanvas、SvgWorkbench 预览面板；CSV 网格长按菜单 + 选区延展把手替代填充柄，
+  全部拖拽改 Pointer 事件系（WebView 拖拽不发 `mousemove`）。
+- **平板与弹层**：文件树改桌面同款推拉式、菜单栏常驻纯图标按钮 + 系统分享（`ACTION_SEND`）、
+  设置 / 关于弹窗触屏档、Markdown 选区工具条（复制 / 粘贴 / 全选 / 重复上次格式化 / 更多）。
+- **release 签名（39）**：独立 keystore 不入库、`build.gradle.kts` 自动接入、CI `android-release`
+  任务恢复；与 v1.3.x 的 debug 包签名不同，跨该边界需卸载重装一次（已写进 README 与发行说明）。
+
+## v1.5 —— 平台决策与移动端收尾（P2）
+
 40. **macOS / Linux 打包评估**：Tauri 本身跨平台，但 Windows 强绑定点明确（NSIS 钩子、注册表外壳集成、updater 产物为 `.exe`、CI 只有 `windows-latest` / `ubuntu-latest`）。先做可行性结论：要么补平台，要么明确「单平台做深」并写进 README
+41. **移动端遗留（v1.4 已知限制）**：Markdown 表格行列增删的 hover 线条手柄无触屏出口；
+    源码编辑器行号槽（点选整行 / 拖动多选）在安卓整体关闭；平板标签关闭钮 28×28
+    （扩到 48 会与邻标签重叠）；SVG 元素位置只能拖拽、无步进按钮
 
 ## v2.0 —— 可选 AI 与安全加固（P2）
 
 主题：**在不破坏"秒开、2-3 MB"的前提下，给一个默认关闭的 AI 入口**。
 
-41. **AI 按需接入（默认关闭）**
+42. **AI 按需接入（默认关闭）**
     - 形态约束：不常驻面板、不自动改文件；只能由快捷键 / 命令显式触发**单次**请求
     - 接入方式：优先对接 OpenAI 兼容端点（Ollama 本地端点即可跑通），把「离线、零费用、内容不出本机」作为默认推荐
     - 结果处理：生成内容先落在标签页或 diff 里，由用户逐条采纳 —— 复用既有 diff 时间线，规避「AI 改坏文件」的不信任
-42. **安全加固**
+43. **安全加固**
     - `tauri.conf.json` 的 `csp: null` 收紧为白名单策略
     - `src-tauri/capabilities/default.json` 的 fs 权限从 `path: "**"` 收窄到用户实际选择的目录
     - 更新链路：已用 minisign 签名，参照 Notepad++ 因更新器未校验下载物而遭供应链投毒的事件（CVE-2025-15556），补上「校验失败即中止」的显式分支与版本回滚说明
-43. **工程化收口**：引入 lint / format 并接入 CI；为 12 个 hooks 与主组件补关键路径测试；`MarkdownPreview.tsx`（1444 行）、`CodeEditor.tsx`（1369 行）继续拆分
+44. **工程化收口**：引入 lint / format 并接入 CI；为 12 个 hooks 与主组件补关键路径测试；`MarkdownPreview.tsx`（1444 行）、`CodeEditor.tsx`（1369 行）继续拆分
 
 ---
 
