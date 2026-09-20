@@ -2185,18 +2185,22 @@ export default function App() {
                   {renderMdPreview()}
                   {/* Markdown 大纲：贴预览视图右缘的毛玻璃小窗（手机无此面板）。
                       把手常驻：收起时是右移 10px 避让预览滚动条的 "<"，点击展开；
+                      触屏没有那条常驻滚动条（见 index.css 的 hover/pointer 媒体查询），
+                      再留 10px 就成悬空缝隙，故 pointer-coarse 下归零、紧贴视图右缘。
                       展开后面板在其左、把手变 ">"。面板与把手圆角均朝左（贴右缘故右侧直角），
                       面板滚动条用全局 heid-scroll 细样式。容器 pointer-events-none 穿透，
                       仅把手/面板可点，收起时透明留白不挡预览滚动条拖拽。
                       高度自适应内容，上限为视图高度减上下各 40px（容器 top/bottom-10 定高，
-                      面板 max-h-full 才能生效），超出即面板内滚动；展开/收起带过渡动画 */}
+                      面板 max-h-full 才能生效），超出即面板内滚动；展开/收起带过渡动画。
+                      收起态面板用 border-0 而非 border-transparent：border-box 下 w-0 的
+                      盒子最小宽度就是左右边框那 2px，会把把手从右缘顶开 2px */}
                   {isMarkdown && !isPhone && previewVisible && (
                     <div className="pointer-events-none absolute bottom-10 right-0 top-10 z-30 flex justify-end" data-testid="md-outline-pop">
                       <div className="flex h-full items-center">
                         <button
                           className={cn(
                             'pointer-events-auto flex h-11 w-5 shrink-0 items-center justify-center border shadow-md backdrop-blur-md transition-all duration-200 ease-out',
-                            outlineOpen ? 'rounded-l-lg' : 'mr-[10px] rounded-l-lg border-r-0',
+                            outlineOpen ? 'rounded-l-lg' : 'mr-[10px] rounded-l-lg border-r-0 pointer-coarse:mr-0',
                             isDarkMode
                               ? 'border-zinc-700/70 bg-zinc-800/70 text-zinc-400 hover:text-zinc-200'
                               : 'border-zinc-200/80 bg-white/70 text-zinc-500 hover:text-zinc-700',
@@ -2211,7 +2215,7 @@ export default function App() {
                             'pointer-events-auto max-h-full overflow-y-auto overscroll-contain heid-scroll border shadow-xl backdrop-blur-md transition-all duration-200 ease-out',
                             outlineOpen
                               ? (isDarkMode ? 'w-60 rounded-l-xl border-zinc-700/70 bg-zinc-800/70 opacity-100' : 'w-60 rounded-l-xl border-zinc-200/80 bg-white/70 opacity-100')
-                              : 'w-0 border-transparent opacity-0',
+                              : 'w-0 border-0 opacity-0',
                           )}
                         >
                           <MarkdownOutlineLive
