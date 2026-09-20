@@ -7,7 +7,6 @@ import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/
 import { Tag, tags as t, highlightTree, type Highlighter } from '@lezer/highlight';
 import { EditorState, Extension, StateEffect, StateField, RangeSet } from '@codemirror/state';
 import {
-  Type,
   Undo2, Redo2, Scissors, Copy, ClipboardPaste, TextSelect, Search, MessageSquareQuote, ImagePlus,
   CaseUpper, CaseLower, ArrowUpNarrowWide, ArrowDownWideNarrow, ListX, Eraser,
   CopyPlus, ArrowUp, ArrowDown, Trash2, Regex, FoldVertical, UnfoldVertical,
@@ -36,6 +35,8 @@ import {
   MINIMAP_BLOCK_HEIGHT, MINIMAP_CHAR_WIDTH, MINIMAP_LINE_PITCH, MINIMAP_PADDING,
 } from '../lib/minimap';
 import type { PointerPos } from '../hooks/useLastPointer';
+import { SelectionActionBar } from './SelectionActionBar';
+import { loadLastMdOp, recordMdOp } from '../lib/mdRecentOps';
 
 const CODE_FONT = '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace';
 
@@ -167,6 +168,14 @@ const LINE_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity:
 function selectedLines(view: EditorView): { fromLine: number; toLine: number } {
   const sel = view.state.selection.main;
   return { fromLine: view.state.doc.lineAt(sel.from).number, toLine: view.state.doc.lineAt(sel.to).number };
+}
+
+/** 选区的视口矩形（触屏选区工具条定位用）；坐标取不到时返回 null */
+function selRect(view: EditorView, from: number, to: number): { left: number; top: number; bottom: number } | null {
+  const a = view.coordsAtPos(from);
+  const b = view.coordsAtPos(to);
+  if (!a || !b) return null;
+  return { left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), bottom: Math.max(a.bottom, b.bottom) };
 }
 
 function replaceSelection(view: EditorView, transform: (text: string) => string): void {
@@ -456,8 +465,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   }, [ctxMenu]);
   /* 光标上报去重（extensions memo 重建时避免重复回调同值） */
   const lastCursorRef = useRef<{ line: number; col: number; selChars: number } | null>(null);
-  /* 触屏：选区非空时浮出「格式化」入口（长按 contextmenu 在安卓上不可靠） */
-  const [touchFmtBtn, setTouchFmtBtn] = useState<{ x: number; y: number; from: number; to: number } | null>(null);
+  /* 触屏：选区非空时在其上方浮出选区工具条（长按 contextmenu 在安卓上不可靠）。
+     left/top/bottom 为选区的视口矩形，工具条据此定位并避让系统选择手柄 */
+  const [touchFmtBtn, setTouchFmtBtn] = useState<{ left: number; top: number; bottom: number; from: number; to: number } | null>(null);
+  /* 最近使用的格式化命令（工具条「最近使用」面板） */
+  const [lastMdOp, setLastMdOp] = useState<MdOp | null>(() => loadLastMdOp());
   /* 颜色取色会话：seq 为会话 id（key），from/to 随文档编辑重映射；anchor 是圆点视口坐标。
      majorSent：本会话首次写入已标记 major（撤销历史独立成条，避免并进此前的打字条目） */
   const [colorSession, setColorSession] = useState<{ seq: number; from: number; to: number; majorSent: boolean } | null>(null);
@@ -832,6 +844,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       borderLeft: `1px solid ${palette.chromeBorder}`,
       overflow: 'hidden',
       cursor: 'default',
+      /* 小地图是纵向滑块：不关掉浏览器默认触摸行为的话，手指一移动就被判成页面
+         滚动并派发 pointercancel，拖拽立刻断掉 */
+      touchAction: 'none',
       zIndex: '25',
     });
 
@@ -1126,7 +1141,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       view.scrollDOM.scrollTop = Math.max(0, Math.min(maxScroll, targetScrollTop));
     };
 
-    const handleMinimapMouseDown = (e: MouseEvent) => {
+    /* 一律用 Pointer 事件：Android WebView 只为 tap 合成鼠标事件，拖拽没有
+       mousemove，所以小地图在触屏上「能点不能拖」。pointermove 同时覆盖鼠标与
+       手指，配合容器的 touch-action:none 生效（与 CSV 列宽拖拽同一套做法）。
+       isPrimary 过滤掉第二指，避免多指互相抢滑块 */
+    const handleMinimapPointerDown = (e: PointerEvent) => {
+      if (!e.isPrimary) return;
       e.preventDefault();
       const rect = container.getBoundingClientRect();
       const relY = e.clientY - rect.top;
@@ -1142,8 +1162,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       }
     };
 
-    const handleMinimapMouseMove = (e: MouseEvent) => {
-      if (!isDragging) return;
+    const handleMinimapPointerMove = (e: PointerEvent) => {
+      if (!isDragging || !e.isPrimary) return;
       if (dragRafId) return;
       const currentClientY = e.clientY;
       dragRafId = requestAnimationFrame(() => {
@@ -1163,7 +1183,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       });
     };
 
-    const handleMinimapMouseUp = () => {
+    const handleMinimapPointerUp = () => {
       isDragging = false;
       isDraggingViewport = false;
       if (dragRafId) {
@@ -1190,9 +1210,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     updateOverlay();
 
     view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
-    container.addEventListener('mousedown', handleMinimapMouseDown);
-    window.addEventListener('mousemove', handleMinimapMouseMove);
-    window.addEventListener('mouseup', handleMinimapMouseUp);
+    container.addEventListener('pointerdown', handleMinimapPointerDown);
+    window.addEventListener('pointermove', handleMinimapPointerMove);
+    window.addEventListener('pointerup', handleMinimapPointerUp);
+    /* 手指被系统接管（如误判为页面滚动）时收尾，否则 isDragging 卡在 true */
+    window.addEventListener('pointercancel', handleMinimapPointerUp);
 
     let resizeRafId = 0;
     let lastBoxH = container.clientHeight;
@@ -1219,9 +1241,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
     cleanupFns.current.push(() => {
       view.scrollDOM.removeEventListener('scroll', onScroll);
-      container.removeEventListener('mousedown', handleMinimapMouseDown);
-      window.removeEventListener('mousemove', handleMinimapMouseMove);
-      window.removeEventListener('mouseup', handleMinimapMouseUp);
+      container.removeEventListener('pointerdown', handleMinimapPointerDown);
+      window.removeEventListener('pointermove', handleMinimapPointerMove);
+      window.removeEventListener('pointerup', handleMinimapPointerUp);
+      window.removeEventListener('pointercancel', handleMinimapPointerUp);
       resizeObserver.disconnect();
       if (resizeRafId) cancelAnimationFrame(resizeRafId);
       if (minimapRafRef.current !== null) cancelAnimationFrame(minimapRafRef.current);
@@ -1247,8 +1270,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   /* ---- 编辑器右键：markdown 有选区走格式菜单，其余统一弹通用编辑菜单 ---- */
 
   const handleEditorContextMenu = useCallback((e: React.MouseEvent) => {
-    /* 触屏：让位系统长按选择/复制/粘贴菜单，不 preventDefault 也不弹自绘右键 */
-    if (IS_TOUCH_PRIMARY) return;
+    /* 触屏：屏蔽系统自带的选区弹窗（Translate / Cut / Copy / Paste / Select all /
+       Read aloud），选区操作统一走浮出的 SelectionActionBar，不再两个浮层叠在一起。
+       preventDefault 只压掉那个弹窗，选区本身和两端的拖拽手柄不受影响 */
+    if (IS_TOUCH_PRIMARY) { e.preventDefault(); return; }
     e.preventDefault();
     const view = viewReadyRef.current;
     if (!view) return;
@@ -1264,6 +1289,18 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
     setCtxMenu({ x: e.clientX, y: e.clientY });
   }, [markdownMenu]);
+
+  /** 粘贴：markdown 下先试剪贴板图片（有图落盘插入），无图/读图失败回退文本粘贴。
+   *  右键菜单与触屏选区工具条共用，两条入口行为必须一致 */
+  const pasteAtCursor = useCallback(async (v: EditorView) => {
+    const insert = onPasteImageRef.current ? await onPasteImageRef.current() : null;
+    if (!insert) { await pasteFromClipboard(v); return; }
+    const pos = v.state.selection.main.head;
+    /* 含空白/括号的地址用尖括号包裹（与 Ctrl+V 直贴同一格式） */
+    const text = /[()\s]/.test(insert) ? `![](<${insert}>)` : `![](${insert})`;
+    v.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length } });
+    v.focus();
+  }, []);
 
   /** 通用编辑菜单项：按当前可编辑/选区/语言状态裁剪（右侧快捷键为真实已绑定的键） */
   const buildEditorMenuItems = useCallback((): ContextMenuItem[] => {
@@ -1297,15 +1334,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         label: (onPasteImageRef.current && clipboardHasImage) ? tr('ctx.pasteImage') : tr('ctx.paste'),
         shortcut: 'Ctrl+V',
         disabled: readOnly || !pasteAvailable,
-        onSelect: run(async (v: EditorView) => {
-          const insert = onPasteImageRef.current ? await onPasteImageRef.current() : null;
-          if (!insert) { await pasteFromClipboard(v); return; }
-          const pos = v.state.selection.main.head;
-          /* 含空白/括号的地址用尖括号包裹（与 Ctrl+V 直贴同一格式） */
-          const text = /[()\s]/.test(insert) ? `![](<${insert}>)` : `![](${insert})`;
-          v.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length } });
-          v.focus();
-        }),
+        onSelect: run(pasteAtCursor),
       },
       { icon: <TextSelect size={13} />, label: tr('ctx.selectAll'), shortcut: 'Ctrl+A', onSelect: run(v => { selectAll(v); v.focus(); }), separatorBefore: true },
       { icon: <Search size={13} />, label: tr('ctx.find'), shortcut: 'Ctrl+F', disabled: !onFindOpen, onSelect: () => onFindOpen?.() },
@@ -1365,11 +1394,15 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     return items;
   }, [editable, history, pasteAvailable, onFindOpen, tr]);
 
-  const applyEditorMdOp = useCallback((op: MdOp) => {
+  const applyEditorMdOp = useCallback((op: MdOp, at?: { from: number; to: number; text: string }) => {
     const view = viewReadyRef.current;
-    if (!view || !mdMenu) return;
-    let { from, to } = mdMenu;
+    const target = at ?? mdMenu;
+    if (!view || !target) return;
+    let { from, to } = target;
     const doc = view.state.doc;
+    /* 触屏选区工具条直接套用时不会经过菜单，菜单打开状态下的收尾调用是幂等的 */
+    if (at) setMdMenu(null);
+    setLastMdOp(recordMdOp(op));
 
     /* 块级操作扩展到整行（标题/列表/引用按行生效） */
     const isInline = op.kind === 'link' || op.kind === 'image' || !!INLINE_WRAPS[op.kind];
@@ -1420,7 +1453,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
     /* 脚注：选中文本后插 [^n] 标记，文末生成定义行 */
     if (op.kind === 'footnote') {
-      const fe = footnoteEdit(doc.toString(), { start: from, end: to }, mdMenu.text);
+      const fe = footnoteEdit(doc.toString(), { start: from, end: to }, target.text);
       const changes = fe.defAt > fe.markerAt
         ? [{ from: fe.markerAt, insert: fe.marker }, { from: fe.defAt, insert: fe.def }]
         : [{ from: fe.markerAt, insert: fe.marker + fe.def }];
@@ -1430,7 +1463,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       return;
     }
 
-    const replaced = transformSlice(op, doc.sliceString(from, to), mdMenu.text, tr('md.tableTemplate'), tr('md.mermaidTemplate'));
+    const replaced = transformSlice(op, doc.sliceString(from, to), target.text, tr('md.tableTemplate'), tr('md.mermaidTemplate'));
     majorNextRef.current = true;
     view.dispatch({
       changes: { from, to, insert: replaced },
@@ -1639,14 +1672,14 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     if (settings.showWhitespace) {
       exts.push(highlightWhitespace());
     }
-    /* 触屏选区跟随：非空选区时在其上方浮出格式化入口按钮 */
+    /* 触屏选区跟随：非空选区时在其旁浮出格式化入口按钮 */
     exts.push(EditorView.updateListener.of((u) => {
       if (!u.selectionSet && !u.docChanged) return;
       const sel = u.state.selection.main;
       if (sel.empty) { setTouchFmtBtn(null); return; }
-      const coords = u.view.coordsAtPos(sel.head);
-      if (!coords) { setTouchFmtBtn(null); return; }
-      setTouchFmtBtn({ x: coords.left, y: coords.top, from: sel.from, to: sel.to });
+      const rect = selRect(u.view, sel.from, sel.to);
+      if (!rect) { setTouchFmtBtn(null); return; }
+      setTouchFmtBtn({ ...rect, from: sel.from, to: sel.to });
     }));
     /* 光标/选区变化上报（状态栏 行:列 / 选中字符数）；值未变化时跳过 */
     exts.push(EditorView.updateListener.of((u) => {
@@ -1703,6 +1736,24 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
     view.dispatch({ changes: { from: start, to: endCur, insert: value.slice(start, endVal) } });
   }, [value, viewReady]);
+
+  /* 入口按钮是 fixed 定位，编辑器自身滚动后必须重算纵界，否则按钮会脱离选区
+     停在原地；选区整段滚出可视区时直接收起（届时也点不到选区了） */
+  useEffect(() => {
+    if (!touchFmtBtn) return;
+    const view = viewReadyRef.current;
+    if (!view) return;
+    const { from, to } = touchFmtBtn;
+    const follow = () => {
+      const rect = selRect(view, from, to);
+      const box = view.scrollDOM.getBoundingClientRect();
+      if (!rect || rect.bottom < box.top || rect.top > box.bottom) { setTouchFmtBtn(null); return; }
+      setTouchFmtBtn(s => (s && s.from === from ? { ...s, ...rect } : s));
+    };
+    const dom = view.scrollDOM;
+    dom.addEventListener('scroll', follow, { passive: true });
+    return () => dom.removeEventListener('scroll', follow);
+  }, [touchFmtBtn?.from, touchFmtBtn?.to]);
 
   return (
     <div ref={rootRef} className="relative h-full w-full" onContextMenu={handleEditorContextMenu}>
@@ -1770,27 +1821,50 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           onClose={() => setCtxMenu(null)}
         />
       )}
+      {/* 触屏选区工具条：与预览区同一套（复制 / 粘贴 / 全选 / 最近使用 / 更多→桌面同款菜单）。
+          系统选区弹窗在这里被屏蔽，剪贴板动作改由本条提供，不能因为屏蔽就丢掉能力 */}
       {IS_ANDROID_APP && markdownMenu && touchFmtBtn && !mdMenu && (
-        <button
-          onClick={() => {
+        <SelectionActionBar
+          anchor={{ left: touchFmtBtn.left, top: touchFmtBtn.top, bottom: touchFmtBtn.bottom }}
+          isDarkMode={isDarkMode}
+          canEdit
+          lastOp={lastMdOp}
+          extraActions={[
+            ...(pasteAvailable ? [{
+              label: tr('ctx.paste'),
+              icon: <ClipboardPaste size={18} />,
+              onSelect: () => {
+                const view = viewReadyRef.current;
+                if (view) void pasteAtCursor(view);
+              },
+            }] : []),
+            {
+              label: tr('ctx.selectAll'),
+              icon: <TextSelect size={18} />,
+              onSelect: () => {
+                const view = viewReadyRef.current;
+                if (view) { selectAll(view); view.focus(); }
+              },
+            },
+          ]}
+          onCopy={() => {
+            const view = viewReadyRef.current;
+            if (view) void copySelectionText(view);
+          }}
+          onApply={(op) => {
             const view = viewReadyRef.current;
             if (!view) return;
-            const { from, to, x, y } = touchFmtBtn;
-            setMdMenu({ x, y, from, to, text: view.state.sliceDoc(from, to) });
+            const { from, to } = touchFmtBtn;
+            applyEditorMdOp(op, { from, to, text: view.state.sliceDoc(from, to) });
+          }}
+          onMore={() => {
+            const view = viewReadyRef.current;
+            if (!view) return;
+            const { from, to, left, bottom } = touchFmtBtn;
+            setMdMenu({ x: left, y: bottom, from, to, text: view.state.sliceDoc(from, to) });
             setTouchFmtBtn(null);
           }}
-          className={cn(
-            "fixed z-[85] h-9 px-3 rounded-full border shadow-lg flex items-center gap-1.5 text-xs font-medium select-none",
-            isDarkMode ? "border-zinc-600 bg-zinc-800 text-zinc-200" : "border-zinc-300 bg-white text-zinc-700"
-          )}
-          style={{
-            left: Math.max(8, Math.min(touchFmtBtn.x - 28, window.innerWidth - 110)),
-            top: Math.max(8, touchFmtBtn.y - 44),
-          }}
-        >
-          <Type size={14} />
-          {tr('md.format')}
-        </button>
+        />
       )}
     </div>
   );

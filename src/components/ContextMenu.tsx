@@ -28,9 +28,9 @@ export interface ContextMenuState {
   items: ContextMenuItem[];
 }
 
-/* 触屏变体：行高 ≥44、字号 sm、面板加宽（视觉估高随之变大，夹紧仍成立） */
+/* 触屏变体：行高 ≥48（技能硬性下限）、字号 sm、面板加宽（视觉估高随之变大，夹紧仍成立） */
 const TOUCH = IS_TOUCH_PRIMARY;
-const ITEM_H = TOUCH ? 46 : 30;
+const ITEM_H = TOUCH ? 50 : 30;
 const PANEL_W = TOUCH ? 280 : 216;
 const PANEL_PAD = 8;
 
@@ -42,10 +42,17 @@ export const ContextMenu = React.memo<{
   const ref = useRef<HTMLDivElement | null>(null);
   /* 快捷键提示：触屏为主（平板）未接物理键盘时不渲染（useShowKbdHints 门控） */
   const showKbdHints = useShowKbdHints();
-  /* 挂载时刻：长按弹出的菜单可能被视口夹紧到手指正下方，触屏抬手后合成的
-     click 会落在某个菜单项上直接误执行。挂载后短窗口内的 click 一律忽略
-     （真人重新瞄准再点远快于此窗口下限）；同时覆盖文件树等所有共用方 */
-  const mountedAtRef = useRef(Date.now());
+  /* 长按弹出的菜单可能被视口夹紧到手指正下方，触屏抬手合成的 click 会落在某个
+     菜单项上直接误执行（文件树里可能就是「删除」）。只认「挂载之后真实按下过」的
+     点击：合成 click 不伴随 pointerdown，而真人点之前一定先按下。
+     按时间窗口挡不住——按住 900ms 时合成 click 落在挂载后 400ms */
+  const armedRef = useRef(!TOUCH);
+  useEffect(() => {
+    if (!TOUCH) return;
+    const onDown = () => { armedRef.current = true; };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, []);
 
   useEffect(() => {
     const onDown = (e: PointerEvent | MouseEvent) => {
@@ -92,10 +99,7 @@ export const ContextMenu = React.memo<{
           )}
           <button
             onClick={() => {
-              /* 长按弹出的菜单可能被视口夹紧到手指正下方，触屏抬手后合成的 click
-                 会落在某个菜单项上直接误执行——挂载后短窗口内的触屏 click 忽略
-                 （真人重新瞄准再点远快于此窗口下限）。仅触屏启用，桌面零变化 */
-              if (TOUCH && Date.now() - mountedAtRef.current < 300) return;
+              if (!armedRef.current) return;
               onClose();
               item.onSelect();
             }}
@@ -103,7 +107,7 @@ export const ContextMenu = React.memo<{
             title={item.label}
             className={cn(
               TOUCH
-                ? "mx-1.5 w-[calc(100%-12px)] min-h-[44px] rounded-lg px-3 text-sm font-medium flex items-center gap-2.5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                ? "mx-1.5 w-[calc(100%-12px)] min-h-[48px] rounded-lg px-3 text-sm font-medium flex items-center gap-2.5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
                 : "mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors disabled:opacity-40 disabled:pointer-events-none",
               item.danger
                 ? "text-red-500 hover:bg-red-500/10"

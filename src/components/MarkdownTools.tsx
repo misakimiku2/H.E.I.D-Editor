@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Heading1, Heading2, Heading3, Heading4, Heading5, Heading6, Pilcrow,
   Bold, Italic, Strikethrough, Code, TextQuote,
@@ -10,6 +10,7 @@ import {
 import { cn } from '../lib/utils';
 import { useT, type MessageKey } from '../lib/i18nContext';
 import { MARK_COLORS } from '../lib/remarkExt';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 
 /* ---- markdown 快捷格式化：预览/源码编辑器右键菜单共用的转换与菜单 ---- */
 
@@ -282,6 +283,10 @@ export interface MenuState {
   text: string;
 }
 
+/* 触屏变体：与桌面同一份弹层（跟随选区定位、同样的分区与命令），只把格子从
+   40×47 放大到 ≥56dp、列数按视口收窄；桌面分支的类名与尺寸保持原样 */
+const TOUCH = IS_TOUCH_PRIMARY;
+
 export const FormatMenu = React.memo<{
   menu: MenuState;
   isDarkMode: boolean;
@@ -294,14 +299,24 @@ export const FormatMenu = React.memo<{
 }>(({ menu, isDarkMode, canUndo, canRedo, onUndo, onRedo, onApply, onClose }) => {
   const t = useT();
   const ref = useRef<HTMLDivElement | null>(null);
-
-  /* 点击外部（pointerdown 覆盖触屏）/ Esc / 滚动 / 调整窗口时关闭 */
+  /* 菜单由选区工具条「更多」弹出时，抬手可能正好合成一次 click 落在刚出现的格子上
+     （弹层锚在选区旁，手指就在那儿）。只认「挂载之后真实按下过」的点击，否则会顺手
+     误执行一个格式化操作。按时间窗口（如 300ms）挡不住：按住 900ms 时合成点击落在
+     挂载后 400ms。桌面 !TOUCH 直接视为已就绪，行为零变化 */
+  const armedRef = useRef(!TOUCH);
   useEffect(() => {
-    const onDown = (e: PointerEvent | MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
-    };
+    if (!TOUCH) return;
+    const onDown = () => { armedRef.current = true; };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, []);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
+    };
+    const onDown = (e: PointerEvent | MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
     };
     const onScrollOrResize = () => onClose();
     document.addEventListener('pointerdown', onDown);
@@ -318,73 +333,76 @@ export const FormatMenu = React.memo<{
     };
   }, [onClose]);
 
-  /* 视口内夹紧，避免菜单溢出屏幕；小屏（横屏手机）允许内部滚动 */
-  const MENU_W = 320;
-  const MENU_H = 560;
-  const left = Math.max(4, Math.min(menu.x, window.innerWidth - MENU_W - 8));
-  const top = Math.max(4, Math.min(menu.y, window.innerHeight - MENU_H - 8));
+  const run = (fn?: () => void) => () => {
+    if (!armedRef.current) return;
+    fn?.();
+  };
 
-  const itemBase = "flex flex-col items-center justify-center gap-1 rounded-md py-2 transition-colors";
+  /* 触屏：面板加宽、5~6 列、格子 ≥56dp；桌面维持 320px / 7 列原样。
+     列数用内联样式给（Tailwind 无法生成动态类名） */
+  const PANEL_W = TOUCH ? Math.min(468, window.innerWidth - 16) : 320;
+  const COLS = TOUCH ? (window.innerWidth >= 560 ? 6 : 5) : 7;
+  const gridCls = TOUCH ? "grid gap-1.5" : "grid grid-cols-7 gap-1";
+  const gridStyle = TOUCH ? { gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))` } : undefined;
+  const itemBase = TOUCH
+    ? "flex flex-col items-center justify-center gap-1.5 min-h-[56px] rounded-xl py-2 transition-colors"
+    : "flex flex-col items-center justify-center gap-1 rounded-md py-2 transition-colors";
   const itemTone = isDarkMode ? "hover:bg-zinc-700 text-zinc-200" : "hover:bg-zinc-100 text-zinc-600";
+  const sectionLabelCls = TOUCH
+    ? "text-[11px] font-semibold tracking-wider px-1 mt-1"
+    : "text-[10px] font-semibold tracking-wider px-0.5";
+  const labelCls = TOUCH
+    ? "text-[13px] leading-tight text-center"
+    : "text-[11px] leading-none whitespace-nowrap";
+  const iconSize = TOUCH ? 22 : 16;
+  const swatchCls = TOUCH ? "w-6 h-6 rounded-full shrink-0" : "w-4 h-4 rounded-full shrink-0";
+  const sectionTone = isDarkMode ? "text-zinc-400" : "text-zinc-500";
+  /* 触屏靠分区标题本身分隔、并省掉分隔线，压缩总高让 35 个命令尽量一屏放完 */
+  const sepCls = cn("h-px mx-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200");
 
-  return (
-    <div
-      ref={ref}
-      className={cn(
-        "fixed z-[90] rounded-xl border shadow-xl backdrop-blur-md p-2 flex flex-col gap-1.5 select-none overflow-y-auto",
-        isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
-      )}
-      style={{ left, top, width: MENU_W, maxHeight: 'calc(100dvh - 8px)' }}
-      onContextMenu={(e) => e.preventDefault()}
-    >
+  const sections = (
+    <>
       {(onUndo || onRedo) && (
         <>
-          <div className={cn("text-[10px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-400" : "text-zinc-500")}>
-            {t('md.sectionEdit')}
-          </div>
-          <div className="grid grid-cols-7 gap-1">
+          <div className={cn(sectionLabelCls, sectionTone)}>{t('md.sectionEdit')}</div>
+          <div className={gridCls} style={gridStyle}>
             <button
-              onClick={onUndo}
+              onClick={run(onUndo)}
               disabled={!canUndo}
               title={`${t('menu.undo')} (Ctrl+Z)`}
               className={cn(itemBase, itemTone, !canUndo && "opacity-40 pointer-events-none")}
             >
-              <Undo2 size={16} />
-              <span className="text-[11px] leading-none whitespace-nowrap">{t('menu.undo')}</span>
+              <Undo2 size={iconSize} />
+              <span className={labelCls}>{t('menu.undo')}</span>
             </button>
             <button
-              onClick={onRedo}
+              onClick={run(onRedo)}
               disabled={!canRedo}
               title={`${t('menu.redo')} (Ctrl+Y)`}
               className={cn(itemBase, itemTone, !canRedo && "opacity-40 pointer-events-none")}
             >
-              <Redo2 size={16} />
-              <span className="text-[11px] leading-none whitespace-nowrap">{t('menu.redo')}</span>
+              <Redo2 size={iconSize} />
+              <span className={labelCls}>{t('menu.redo')}</span>
             </button>
           </div>
-          <div className={cn("h-px mx-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+          {!TOUCH && <div className={sepCls} />}
         </>
       )}
       {MENU_SECTIONS.map((section, si) => (
         <React.Fragment key={section.labelKey}>
-          {si > 0 && <div className={cn("h-px mx-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />}
-          <div className={cn("text-[10px] font-semibold tracking-wider px-0.5", isDarkMode ? "text-zinc-400" : "text-zinc-500")}>
-            {t(section.labelKey)}
-          </div>
-          <div className="grid grid-cols-7 gap-1">
+          {!TOUCH && si > 0 && <div className={sepCls} />}
+          <div className={cn(sectionLabelCls, sectionTone)}>{t(section.labelKey)}</div>
+          <div className={gridCls} style={gridStyle}>
             {section.ops.map(({ op, icon: Icon, textKey, nameKey, syntax, swatch }) => (
               <button
                 key={nameKey}
-                onClick={() => onApply(op)}
+                onClick={run(() => onApply(op))}
                 title={`${t(nameKey)}${syntax ? ` ${syntax}` : ''}`}
-                className={cn(
-                  itemBase,
-                  itemTone
-                )}
+                className={cn(itemBase, itemTone)}
               >
                 {swatch ? (
                   <span
-                    className="w-4 h-4 rounded-full shrink-0"
+                    className={swatchCls}
                     style={{
                       backgroundColor: swatch,
                       boxShadow: isDarkMode
@@ -393,14 +411,47 @@ export const FormatMenu = React.memo<{
                     }}
                   />
                 ) : (
-                  <Icon size={16} />
+                  <Icon size={iconSize} />
                 )}
-                <span className="text-[11px] leading-none whitespace-nowrap">{t(textKey)}</span>
+                <span className={labelCls}>{t(textKey)}</span>
               </button>
             ))}
           </div>
         </React.Fragment>
       ))}
+    </>
+  );
+
+  /* 视口内夹紧。桌面沿用原有的固定估算（560），行为不变。
+     触屏不行：格子高度随系统字号变化（实测同一份内容 1.0 时面板 730、1.3 时 792），
+     任何固定估算都会估小，把底部几行顶到屏幕外——面板自身 maxHeight 只到
+     100dvh-8，超出部分连内部滚动都滚不到。所以先按触发点放，再用真实渲染
+     尺寸在 layout 阶段校正一次（useLayoutEffect 在绘制前跑，不会闪）。 */
+  const [touchPos, setTouchPos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!TOUCH) return;
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const nextTop = Math.max(4, Math.min(menu.y, window.innerHeight - r.height - 8));
+    const nextLeft = Math.max(4, Math.min(menu.x, window.innerWidth - r.width - 8));
+    setTouchPos(p => (p && p.top === nextTop && p.left === nextLeft ? p : { top: nextTop, left: nextLeft }));
+  }, [menu.x, menu.y]);
+
+  const left = touchPos?.left ?? Math.max(4, Math.min(menu.x, window.innerWidth - PANEL_W - 8));
+  const top = touchPos?.top ?? Math.max(4, Math.min(menu.y, window.innerHeight - 560 - 8));
+
+  return (
+    <div
+      ref={ref}
+      className={cn(
+        "fixed z-[90] rounded-xl border shadow-xl backdrop-blur-md p-2 flex flex-col gap-1.5 select-none overflow-y-auto",
+        isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
+      )}
+      style={{ left, top, width: PANEL_W, maxHeight: 'calc(100dvh - 8px)' }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {sections}
     </div>
   );
 });

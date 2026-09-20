@@ -13,8 +13,11 @@ import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers,
 import { renderMermaidSvg } from '../lib/mermaid';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
-import { useLongPress } from '../hooks/useLongPress';
+import { useLongPress, type LongPressPos } from '../hooks/useLongPress';
 import { FormatMenu, INLINE_WRAPS, transformSlice, footnoteEdit, findInSlice, type MdOp, type MenuState } from './MarkdownTools';
+import { SelectionActionBar, type SelectionAnchor } from './SelectionActionBar';
+import { loadLastMdOp, recordMdOp } from '../lib/mdRecentOps';
+import { writeClipboardText } from '../lib/fileOps';
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { MermaidEditModal } from './MermaidEditModal';
 import { PreviewFindBar } from './PreviewFindBar';
@@ -373,11 +376,11 @@ function ImageContextMenu({ x, y, canEdit, isDarkMode, onClose, onCopy, onCut, o
   }, [onClose]);
 
   const left = Math.min(x, window.innerWidth - (IS_TOUCH_PRIMARY ? 216 : 158));
-  const top = Math.min(y, window.innerHeight - (canEdit ? (IS_TOUCH_PRIMARY ? 196 : 158) : (IS_TOUCH_PRIMARY ? 132 : 52)));
+  const top = Math.min(y, window.innerHeight - (canEdit ? (IS_TOUCH_PRIMARY ? 204 : 158) : (IS_TOUCH_PRIMARY ? 60 : 52)));
 
   const item = cn(
     IS_TOUCH_PRIMARY
-      ? 'flex items-center gap-2.5 w-full min-h-[44px] px-3 rounded-md text-sm transition-colors text-left'
+      ? 'flex items-center gap-2.5 w-full min-h-[48px] px-3 rounded-md text-sm transition-colors text-left'
       : 'flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-xs transition-colors text-left',
     isDarkMode ? 'hover:bg-zinc-700/70 text-zinc-200' : 'hover:bg-zinc-100 text-zinc-700',
   );
@@ -429,10 +432,10 @@ function MermaidContextMenu({ x, y, isDarkMode, onClose, onEdit, onDelete }: {
   }, [onClose]);
 
   const left = Math.min(x, window.innerWidth - (IS_TOUCH_PRIMARY ? 216 : 158));
-  const top = Math.min(y, window.innerHeight - (IS_TOUCH_PRIMARY ? 116 : 84));
+  const top = Math.min(y, window.innerHeight - (IS_TOUCH_PRIMARY ? 108 : 84));
   const item = cn(
     IS_TOUCH_PRIMARY
-      ? 'flex items-center gap-2.5 w-full min-h-[44px] px-3 rounded-md text-sm transition-colors text-left'
+      ? 'flex items-center gap-2.5 w-full min-h-[48px] px-3 rounded-md text-sm transition-colors text-left'
       : 'flex items-center gap-2 w-full px-2.5 py-1.5 rounded-md text-xs transition-colors text-left',
     isDarkMode ? 'hover:bg-zinc-700/70 text-zinc-200' : 'hover:bg-zinc-100 text-zinc-700',
   );
@@ -682,7 +685,7 @@ const InsertMenu = React.memo<{
         onClick={onTable}
         className={cn(
           IS_TOUCH_PRIMARY
-            ? "mx-1 w-[calc(100%-8px)] min-h-[44px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
+            ? "mx-1 w-[calc(100%-8px)] min-h-[48px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
             : "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
         )}
@@ -695,7 +698,7 @@ const InsertMenu = React.memo<{
         onClick={onImage}
         className={cn(
           IS_TOUCH_PRIMARY
-            ? "mx-1 w-[calc(100%-8px)] min-h-[44px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
+            ? "mx-1 w-[calc(100%-8px)] min-h-[48px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
             : "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
         )}
@@ -707,7 +710,7 @@ const InsertMenu = React.memo<{
         onClick={onDiagram}
         className={cn(
           IS_TOUCH_PRIMARY
-            ? "mx-1 w-[calc(100%-8px)] min-h-[44px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
+            ? "mx-1 w-[calc(100%-8px)] min-h-[48px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
             : "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
         )}
@@ -723,7 +726,9 @@ const InsertMenu = React.memo<{
             disabled={!canLocalize}
             title={canLocalize ? t('md.localizeMenu') : t('md.localizeDisabled')}
             className={cn(
-              "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+              IS_TOUCH_PRIMARY
+                ? "mx-1 w-[calc(100%-8px)] min-h-[48px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                : "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
               isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
             )}
           >
@@ -817,6 +822,10 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   /* 触屏：长按空白区弹插入菜单（文本区让位系统长按选择） */
   const { bind: bindMenu } = useLongPress();
   const [blankMenu, setBlankMenu] = useState<{ x: number; y: number; insertAt: number } | null>(null);
+  /* 触屏：系统选字完成后浮出的选区工具条锚点（视口坐标） */
+  const [selBar, setSelBar] = useState<SelectionAnchor | null>(null);
+  /* 最近使用的格式化命令（工具条「最近使用」面板） */
+  const [lastMdOp, setLastMdOp] = useState<MdOp | null>(() => loadLastMdOp());
   const [imageModal, setImageModal] = useState<SourceSnippet | null>(null);
   const [tableAction, setTableAction] = useState<TableAction | null>(null);
   const [cellEdit, setCellEdit] = useState<CellEdit | null>(null);
@@ -1260,6 +1269,37 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     setBlankMenu({ x, y, insertAt });
   }, [content.length]);
 
+  /* ---- 格式菜单目标：当前选区映射回源码（桌面右键与触屏选区工具条共用） ---- */
+
+  /** 选区 → 菜单目标（源码块 + 选区快照）；无有效选区返回 null */
+  const collectSelectionMenu = useCallback((x: number, y: number): PreviewMenuState | null => {
+    const sel = window.getSelection();
+    const text = sel ? sel.toString().trim() : '';
+    if (!sel || sel.isCollapsed || !text) return null;
+    const root = contentRef.current;
+    if (!root) return null;
+    const range = sel.getRangeAt(0);
+    /* 收集与选区相交、且带源码位置的最内层块 */
+    const tagged = Array.from(root.querySelectorAll<HTMLElement>('[data-md-start]'));
+    const hits = tagged.filter(el => range.intersectsNode(el));
+    const innermost = hits.filter(el => !hits.some(o => o !== el && el.contains(o)));
+    const blocks = innermost
+      .map(el => ({ start: Number(el.dataset.mdStart), end: Number(el.dataset.mdEnd), el }))
+      .filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start)
+      .sort((a, b) => a.start - b.start);
+    if (blocks.length === 0) return null;
+    return { x, y, text, blocks, range: range.cloneRange() };
+  }, []);
+
+  const openFormatMenuForSelection = useCallback((x: number, y: number): boolean => {
+    const next = collectSelectionMenu(x, y);
+    if (!next) return false;
+    setTableAction(null);
+    setSelBar(null);
+    setMenu(next);
+    return true;
+  }, [collectSelectionMenu]);
+
   /* ---- 右键：有选区弹格式菜单；无选区弹插入菜单（表格/图片） ---- */
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -1269,47 +1309,78 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       e.preventDefault();
       return;
     }
-    const sel = window.getSelection();
-    const text = sel ? sel.toString().trim() : '';
-
-    if (sel && !sel.isCollapsed && text) {
-      const range = sel.getRangeAt(0);
-      const root = contentRef.current;
-      if (root) {
-        /* 收集与选区相交、且带源码位置的最内层块 */
-        const tagged = Array.from(root.querySelectorAll<HTMLElement>('[data-md-start]'));
-        const hits = tagged.filter(el => range.intersectsNode(el));
-        const innermost = hits.filter(el => !hits.some(o => o !== el && el.contains(o)));
-        const blocks = innermost
-          .map(el => ({ start: Number(el.dataset.mdStart), end: Number(el.dataset.mdEnd), el }))
-          .filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start)
-          .sort((a, b) => a.start - b.start);
-        if (blocks.length > 0) {
-          e.preventDefault();
-          setTableAction(null);
-          setMenu({ x: e.clientX, y: e.clientY, text, blocks, range: range.cloneRange() });
-          return;
-        }
-      }
+    if (openFormatMenuForSelection(e.clientX, e.clientY)) {
+      e.preventDefault();
+      return;
     }
-
     /* 空白处（无选区）：插入锚点 = 点中块的最外层末尾；未点中块（空隙/空白）→ 按指针 Y 就近取块边界 */
     openBlankMenuAt(e.clientX, e.clientY, e.target as HTMLElement);
-  }, [onChange, openBlankMenuAt]);
+  }, [onChange, openFormatMenuForSelection, openBlankMenuAt]);
+
+  /* ---- 触屏长按：只接管「没压在文字上」的地方 ----
+     压在正文上时一律让位给系统的长按选字（实测原生选字在 WebView 里可用），
+     选完之后由 SelectionActionBar 接手；自绘菜单若也响应同一个手势，会盖住
+     系统选择工具条和拖拽手柄（这正是之前「效果不对」的原因）。
+     判定用块内容的行矩形而不是块自身——块会拉满整行宽度，短行右侧那片空白
+     看着是「段落上」，其实没有字，那里仍该给插入菜单。 */
+  const handleLongPress = useCallback((pos: LongPressPos) => {
+    if (!onChangeRef.current) return;
+    /* 已有菜单浮层时，这次长按的落点是它的遮罩——只用于关闭，不要再切成另一个菜单 */
+    if (menu || blankMenu) return;
+    const el = document.elementFromPoint(pos.x, pos.y) as HTMLElement | null;
+    const blockEl = el?.closest?.('[data-md-start]') as HTMLElement | null;
+    if (blockEl) {
+      const r = document.createRange();
+      r.selectNodeContents(blockEl);
+      for (const rc of Array.from(r.getClientRects())) {
+        if (pos.x >= rc.left && pos.x <= rc.right && pos.y >= rc.top && pos.y <= rc.bottom) return;
+      }
+    }
+    openBlankMenuAt(pos.x, pos.y, el);
+  }, [menu, blankMenu, openBlankMenuAt]);
+
+  /* 系统选字（含拖拽手柄改选区）→ 在选区上方浮出工具条；容器滚动后按视口坐标重算。
+     触屏才需要：桌面选中文字不浮条（右键已经够用），也省掉每次选区的重渲染 */
+  useEffect(() => {
+    if (!onChange || !IS_TOUCH_PRIMARY) { setSelBar(null); return; }
+    const sync = () => {
+      const sel = window.getSelection();
+      const root = contentRef.current;
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !root) { setSelBar(null); return; }
+      const range = sel.getRangeAt(0);
+      /* 选区跑到预览区外（例如同时选中了状态栏文字）就不浮出 */
+      if (!root.contains(range.commonAncestorContainer)) { setSelBar(null); return; }
+      if (!sel.toString().trim()) { setSelBar(null); return; }
+      const r = range.getBoundingClientRect();
+      if (!r.width && !r.height) { setSelBar(null); return; }
+      setSelBar(prev => (prev && prev.left === r.left && prev.top === r.top && prev.bottom === r.bottom
+        ? prev
+        : { left: r.left, top: r.top, bottom: r.bottom }));
+    };
+    document.addEventListener('selectionchange', sync);
+    const el = contentRef.current;
+    el?.addEventListener('scroll', sync, { passive: true });
+    sync();
+    return () => {
+      document.removeEventListener('selectionchange', sync);
+      el?.removeEventListener('scroll', sync);
+    };
+  }, [onChange]);
 
   /* 选区格式化：从后往前替换，保证偏移量不失效 */
-  const handleApply = useCallback((op: MdOp) => {
-    if (!menu || !onChange) return;
+  const handleApply = useCallback((op: MdOp, at?: PreviewMenuState) => {
+    const m = at ?? menu;
+    if (!m || !onChange) return;
     withScrollRestore(() => {
       let next = content;
       if (op.kind === 'tabGroup') {
         /* 整个选区（首块到末块）包成一个页签；紧邻上一个已关闭的组时并排追加为新区块 */
-        const first = menu.blocks[0];
-        const last = menu.blocks[menu.blocks.length - 1];
+        const first = m.blocks[0];
+        const last = m.blocks[m.blocks.length - 1];
         next = applySelectionTab(content, first.start, last.end);
       } else if (op.kind === 'footnote') {
         /* 选中文本后插 [^n] 标记，文末生成定义行 */
-        const fe = footnoteEdit(content, menu.blocks[0], menu.text);
+        const fe = footnoteEdit(content, m.blocks[0], m.text);
         next = content.slice(0, fe.markerAt) + fe.marker
           + content.slice(fe.markerAt, fe.defAt) + fe.def + content.slice(fe.defAt);
       } else {
@@ -1317,9 +1388,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         /* 行内语法（==高亮==/**粗体** 等）不能跨块：跨块选区逐块取「该块包含的选区文本」
            分别包裹；某块的选区文本在源码里定位不到时跳过该块（宁可不生效也不整块误包）。
            单块选区保持原语义：定位失败时整块兜底 */
-        const multi = menu.blocks.length > 1;
-        const targets = menu.blocks
-          .map(b => ({ block: b, text: isInline && multi ? selectedTextWithin(b.el, menu.range) : menu.text }))
+        const multi = m.blocks.length > 1;
+        const targets = m.blocks
+          .map(b => ({ block: b, text: isInline && multi ? selectedTextWithin(b.el, m.range) : m.text }))
           .filter(t => !isInline || !multi
             || (t.text.trim() !== '' && findInSlice(content.slice(t.block.start, t.block.end), t.text)));
         const sorted = [...targets].sort((x, y) => y.block.start - x.block.start);
@@ -1333,9 +1404,23 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       onChangeRef.current!(next);
     });
     setMenu(null);
+    setLastMdOp(recordMdOp(op));
   }, [menu, content, onChange, withScrollRestore, t]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
+
+  /* 工具条「复制」：复制选中的渲染文本（与系统选择工具条的复制等价） */
+  const handleCopySelection = useCallback(() => {
+    const text = window.getSelection()?.toString() ?? '';
+    if (text) void writeClipboardText(text);
+  }, []);
+
+  /* 工具条「最近使用」：直接对当前选区套用该命令，不必再展开完整菜单 */
+  const handleApplyRecent = useCallback((op: MdOp) => {
+    if (!selBar) return;
+    const m = collectSelectionMenu(selBar.left, selBar.top);
+    if (m) handleApply(op, m);
+  }, [selBar, collectSelectionMenu, handleApply]);
   const closeBlankMenu = useCallback(() => setBlankMenu(null), []);
 
   /* ---- 插入：空白 3×3 表格 / 图片 ---- */
@@ -1579,10 +1664,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       onMouseMove={handleMouseMove}
       {...bindMenu({
         onClick: handleContainerClick,
-        onLongPress: (pos) => {
-          if (!onChangeRef.current) return;
-          openBlankMenuAt(pos.x, pos.y, document.elementFromPoint(pos.x, pos.y) as HTMLElement | null);
-        },
+        onLongPress: handleLongPress,
         onContextMenu: handleContextMenu,
       })}
     >
@@ -1708,6 +1790,19 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
             isDarkMode ? "bg-zinc-800 border-indigo-400 text-zinc-100" : "bg-white border-indigo-400 text-zinc-800"
           )}
           style={{ left: cellEdit.left, top: cellEdit.top, width: cellEdit.width, height: cellEdit.height }}
+        />
+      )}
+
+      {/* 触屏选区工具条：系统选字完成后浮出，菜单打开时让位 */}
+      {selBar && !menu && !blankMenu && (
+        <SelectionActionBar
+          anchor={selBar}
+          isDarkMode={isDarkMode}
+          canEdit={!!onChange}
+          lastOp={lastMdOp}
+          onCopy={handleCopySelection}
+          onApply={handleApplyRecent}
+          onMore={() => openFormatMenuForSelection(selBar.left, selBar.top)}
         />
       )}
 
