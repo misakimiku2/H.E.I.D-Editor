@@ -604,9 +604,10 @@ export function FileTreeSidebar({
       );
     }
     const active = tabs.some(tb => tb.id === activeTabId && tb.path === node.path);
-    /* 行样式与右键菜单项一致：左右留边距的圆角行，悬停同色调 */
+    /* 行样式与右键菜单项一致：左右留边距的圆角行，悬停同色调。
+       行高必须用 ROW_CLS_H（触屏 40px）——此前写死 h-7，选中底色比行距矮一截 */
     const rowClass = cn(
-      'heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 h-7 rounded-lg text-xs flex items-center gap-1.5 transition-colors text-left',
+      `heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 ${ROW_CLS_H} rounded-lg text-xs flex items-center gap-1.5 transition-colors text-left`,
       active
         ? (isDarkMode ? 'bg-zinc-700/80 text-zinc-100' : 'bg-zinc-200/80 text-zinc-900')
         : (isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700'),

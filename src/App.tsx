@@ -1601,19 +1601,7 @@ export default function App() {
                 <PanelLeft size={20} />
               </button>
             )}
-            {isTauri && treeRootPath && (
-              <button
-                onClick={() => handleTreeRootChange(null)}
-                title={t('tree.closeFolder')}
-                aria-label={t('tree.closeFolder')}
-                className={cn(
-                  "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0",
-                  isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
-                )}
-              >
-                <FolderX size={18} />
-              </button>
-            )}
+            {/* 关闭文件夹：仅保留文件树头部那一个（菜单栏不再重复放） */}
           </>
         ) : (
           <button
