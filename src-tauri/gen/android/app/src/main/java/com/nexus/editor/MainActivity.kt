@@ -288,6 +288,23 @@ class MainActivity : TauriActivity() {
       }
     }
 
+    /** 系统分享面板（平板菜单栏「分享」，替代桌面打印）：纯文本 + 主题。
+        内容超 Binder 限制时 intent 写入抛异常，前端已按字符数预拦截 */
+    @JavascriptInterface
+    fun shareText(title: String, content: String) {
+      runOnUiThread {
+        try {
+          val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, title)
+            putExtra(Intent.EXTRA_TEXT, content)
+          }
+          startActivity(Intent.createChooser(intent, title))
+        } catch (_: Exception) {
+        }
+      }
+    }
+
     /** 网址导入渲染兜底：离屏 WebView 加载页面，渲染稳定后经 heid-render 事件回传 HTML */
     @JavascriptInterface
     fun renderPage(url: String) {

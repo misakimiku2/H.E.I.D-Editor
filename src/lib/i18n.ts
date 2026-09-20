@@ -554,6 +554,8 @@ const zh = {
 
   'menu.print': '打印…',
   'print.errGeneric': '打印失败：{msg}',
+  'share.menu': '分享',
+  'share.tooLarge': '内容过大（>{size} KB），无法通过系统分享',
   'theme.modeAria': '主题模式',
   'theme.tipLight': '主题：浅色',
   'theme.tipSystem': '主题：跟随系统',
@@ -1225,6 +1227,8 @@ const en: Record<MessageKey, string> = {
 
   'menu.print': 'Print…',
   'print.errGeneric': 'Print failed: {msg}',
+  'share.menu': 'Share',
+  'share.tooLarge': 'Content too large (>{size} KB) for system share',
   'theme.modeAria': 'Theme mode',
   'theme.tipLight': 'Theme: Light',
   'theme.tipSystem': 'Theme: System',

@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  FileText, X, Plus, FolderOpen, Folder, Save, SaveAll, RotateCcw,
+  FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
   GitCompare, Columns2, History, ChevronRight, ChevronLeft, ChevronDown, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
-  Table, Code, Braces, Wand2, Printer, RefreshCw, AppWindow,
+  Table, Code, Braces, Wand2, Printer, RefreshCw, AppWindow, Share2,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -1015,6 +1015,20 @@ export default function App() {
     }
   }, [editor.activeTab, isDarkMode, t]);
 
+  /* ---- 分享（平板菜单栏按钮，替代桌面的打印）：系统分享面板送出当前内容。
+      Intent extra 走 Binder（约 1MB 上限），超限前端预拦截并提示 ---- */
+  const SHARE_MAX_CHARS = 300_000;
+  const handleShareTab = useCallback(() => {
+    const tab = editor.activeTab;
+    const bridge = (window as any).HeidBridge;
+    if (!tab || tab.binary || !bridge?.shareText) return;
+    if (tab.content.length > SHARE_MAX_CHARS) {
+      appAlert(t('share.tooLarge', { size: Math.round(SHARE_MAX_CHARS / 1000) }));
+      return;
+    }
+    bridge.shareText(tab.title, tab.content);
+  }, [editor.activeTab, t]);
+
   /* ---- 状态栏弹出菜单（编码 / 换行符）---- */
   type StatusMenu = null | 'encoding-root' | 'encoding-reopen' | 'encoding-save' | 'eol';
   const [statusMenu, setStatusMenu] = useState<StatusMenu>(null);
@@ -1583,7 +1597,8 @@ export default function App() {
                     : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
                 )}
               >
-                {treeRootPath && treeOpen ? <Folder size={18} /> : <FolderOpen size={18} />}
+                {/* PanelLeft=侧栏开关语义，把 FolderOpen 让给「打开文件」 */}
+                <PanelLeft size={18} />
               </button>
             )}
             {isTauri && treeRootPath && (
@@ -1613,6 +1628,97 @@ export default function App() {
           >
             <PanelLeft size={15} />
           </button>
+        )}
+
+        {/* 平板：高频文件/编辑操作从主菜单拆分为菜单栏常驻图标按钮（用户反馈：平板
+            菜单栏空间富余，逐个开菜单太慢）；低频项（最近/另存为/导出/快捷键/关于）
+            仍留在主菜单。打印在安卓无入口，平板以「分享」（系统分享面板）替代 */}
+        {IS_TOUCH_PRIMARY && (
+          <>
+            <button
+              onClick={file.handleOpenFile}
+              aria-label={t('menu.openFile')}
+              title={showKbdHints ? `${t('menu.openFile')} (Ctrl+O)` : t('menu.openFile')}
+              className={cn(
+                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+              )}
+            >
+              <FolderOpen size={18} />
+            </button>
+            <button
+              onClick={file.handleSave}
+              disabled={!activeTab || activeTab.readOnly || file.saving}
+              aria-label={t('menu.save')}
+              title={showKbdHints ? `${t('menu.save')} (Ctrl+S)` : t('menu.save')}
+              className={cn(
+                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+              )}
+            >
+              <Save size={18} />
+            </button>
+            <button
+              onClick={() => editor.handleUndo()}
+              disabled={!editor.canUndo}
+              aria-label={t('menu.undo')}
+              title={showKbdHints ? `${t('menu.undo')} (Ctrl+Z)` : t('menu.undo')}
+              className={cn(
+                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+              )}
+            >
+              <Undo2 size={18} />
+            </button>
+            <button
+              onClick={() => editor.handleRedo()}
+              disabled={!editor.canRedo}
+              aria-label={t('menu.redo')}
+              title={showKbdHints ? `${t('menu.redo')} (Ctrl+Y)` : t('menu.redo')}
+              className={cn(
+                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+              )}
+            >
+              <Redo2 size={18} />
+            </button>
+            {isTauri && (
+              <button
+                onClick={() => setUrlImportOpen(true)}
+                aria-label={t('import.menu')}
+                title={t('import.menu')}
+                className={cn(
+                  "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                  isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+                )}
+              >
+                <Link2 size={17} />
+              </button>
+            )}
+            <button
+              onClick={handleShareTab}
+              disabled={!activeTab || !!activeTab.binary}
+              aria-label={t('share.menu')}
+              title={t('share.menu')}
+              className={cn(
+                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+              )}
+            >
+              <Share2 size={17} />
+            </button>
+            <button
+              onClick={() => setSettingsOpen(true)}
+              aria-label={t('menu.settings')}
+              title={t('menu.settings')}
+              className={cn(
+                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+              )}
+            >
+              <Settings size={18} />
+            </button>
+          </>
         )}
 
         <div className="flex-1" />
@@ -1800,6 +1906,8 @@ export default function App() {
             "absolute left-2 top-full -mt-px z-50 w-52 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col",
             isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
           )}>
+            {/* 以下高频项平板已拆分为菜单栏常驻图标按钮，仅桌面保留在菜单里 */}
+            {!IS_TOUCH_PRIMARY && (
             <button
               onClick={() => { setMenuOpen(false); file.handleOpenFile(); }}
               className={cn(
@@ -1811,6 +1919,7 @@ export default function App() {
               {t('menu.openFile')}
               {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+O</span>}
             </button>
+            )}
             {/* 打开/关闭文件夹：平板已提取为菜单栏常驻按钮，仅桌面保留在菜单里 */}
             {isTauri && !IS_TOUCH_PRIMARY && (
               <button
@@ -1896,6 +2005,7 @@ export default function App() {
               )}
             </div>
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+            {!IS_TOUCH_PRIMARY && (
             <button
               onClick={() => { setMenuOpen(false); file.handleSave(); }}
               disabled={!activeTab || activeTab.readOnly || file.saving}
@@ -1908,6 +2018,7 @@ export default function App() {
               {t('menu.save')}
               {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+S</span>}
             </button>
+            )}
             <button
               onClick={() => { setMenuOpen(false); file.handleSaveAs(); }}
               disabled={!activeTab || activeTab.readOnly || file.saving}
@@ -1945,7 +2056,7 @@ export default function App() {
                 {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+P</span>}
               </button>
             )}
-            {isTauri && (
+            {!IS_TOUCH_PRIMARY && isTauri && (
               <button
                 onClick={() => { setMenuOpen(false); setUrlImportOpen(true); }}
                 className={cn(
@@ -1957,7 +2068,8 @@ export default function App() {
                 {t('import.menu')}
               </button>
             )}
-            <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+            {!IS_TOUCH_PRIMARY && <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />}
+            {!IS_TOUCH_PRIMARY && (
             <button
               onClick={() => { setMenuOpen(false); editor.handleUndo(); }}
               disabled={!editor.canUndo}
@@ -1970,6 +2082,8 @@ export default function App() {
               {t('menu.undo')}
               {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+Z</span>}
             </button>
+            )}
+            {!IS_TOUCH_PRIMARY && (
             <button
               onClick={() => { setMenuOpen(false); editor.handleRedo(); }}
               disabled={!editor.canRedo}
@@ -1982,7 +2096,9 @@ export default function App() {
               {t('menu.redo')}
               {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+Y</span>}
             </button>
-            <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
+            )}
+            {!IS_TOUCH_PRIMARY && <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />}
+            {!IS_TOUCH_PRIMARY && (
             <button
               onClick={() => { setMenuOpen(false); setSettingsOpen(true); }}
               className={cn(
@@ -1993,6 +2109,7 @@ export default function App() {
               <Settings size={14} />
               {t('menu.settings')}
             </button>
+            )}
             <button
               onClick={() => { setMenuOpen(false); setShortcutsOpen(true); }}
               className={cn(
