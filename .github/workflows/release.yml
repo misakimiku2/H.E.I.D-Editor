@@ -88,7 +88,10 @@ jobs:
 
   android-release:
     # v1.4 起恢复发布，改用 release 签名 APK（密钥经 secrets 提供，见 docs/RELEASE.md 安卓签名节）
+    # needs：Release 正文（= latest.json 的应用内更新说明）由桌面任务用 --notes-file 建立，
+    # 并行时安卓若先跑完会自己创建一个「自动生成说明」正文的 Release，把正文占掉
     name: 安卓发布（签名侧载 APK）
+    needs: desktop-release
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -139,7 +142,16 @@ jobs:
       - name: tauri android build（arm64 release APK，签名）
         run: npx tauri android build --apk --target aarch64
 
-      - name: 附到 Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+      # 产物名带版本与 ABI：gradle 输出的 app-universal-release.apk 在 --target aarch64 下
+      # 其实只含 arm64 库，名字里的 universal 会误导下载者
+      - name: 附到 Release（重命名为 H.I.D.E_<版本>_arm64.apk）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SRC=$(ls src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk | head -n1)
+          APK="H.I.D.E_${VERSION}_arm64.apk"
+          cp "$SRC" "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/' || { echo "::error::APK 内无 arm64 库，检查 --target 构建"; exit 1; }
+          # gh release upload：只往已存在的 Release 追加资产（Release 由桌面任务建立）
+          gh release upload "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" --clobber "$APK"

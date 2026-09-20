@@ -45,8 +45,10 @@
 ```bash
 # 1. 准备当版发行说明文档 docs/RELEASE-NOTES-v{完整版本}.md（每版单独成文）
 #    （既是 Release 页面正文，也经 latest.json 的 notes 成为应用内更新说明）
-# 2. 更新四处版本号并提交：
-#    package.json / src-tauri/tauri.conf.json / src-tauri/Cargo.toml / src/lib/update.ts
+# 2. 更新版本号（六处，全部同步）：
+#    package.json / package-lock.json（根两处）/ src-tauri/tauri.conf.json /
+#    src-tauri/Cargo.toml / src-tauri/Cargo.lock / src/lib/update.ts 的 FALLBACK_APP_VERSION
+#    安卓 versionCode 由 tauri 按版本号自动推导（1.4.0 → 1004000），不用手改
 # 3. 打标签推送：
 git tag v1.0.1
 git push origin v1.0.1
@@ -72,6 +74,10 @@ git push origin v1.0.1
 - **安卓**：v1.4 起恢复发布并升级为 **release 签名 APK**（`android-release` 任务，arm64）。
   签名密钥经 secrets `HEID_ANDROID_KEYSTORE_B64` / `HEID_ANDROID_KEYSTORE_PASSWORD` 提供，
   缺失时任务以显式报错失败；详见「一次性准备 → 安卓 release 签名」。
+  产物上传前重命名为 `H.I.D.E_<版本>_arm64.apk`（gradle 原名 `app-universal-release.apk`
+  在 `--target aarch64` 下名不副实），并断言包内确有 `lib/arm64-v8a/`。
+  该任务 `needs: desktop-release`：Release 正文（= 应用内更新说明）由桌面任务用
+  `--notes-file` 建立，两任务并行时安卓先跑完会抢先用自动生成的说明建 Release、把正文占掉。
 
 日常 CI（`.github/workflows/ci.yml`，push/PR 触发）运行 vitest + tsc + 前端构建、
 Windows NSIS 构建（**关闭** `createUpdaterArtifacts`，无需 secrets）、安卓 arm64 debug APK 构建。
