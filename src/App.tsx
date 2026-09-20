@@ -1561,7 +1561,7 @@ export default function App() {
         ref={menuRef}
         className={cn(
           "border-b flex items-center px-2 shrink-0 relative select-none",
-          IS_TOUCH_PRIMARY ? "h-12" : "h-9",
+          IS_TOUCH_PRIMARY ? "h-14" : "h-9",
           isDarkMode ? "border-zinc-700 bg-zinc-800/60" : "border-zinc-200 bg-zinc-100/60"
         )}
       >
@@ -1591,14 +1591,14 @@ export default function App() {
                 aria-label={treeRootPath ? t('tree.toggle') : t('tree.openFolder')}
                 title={treeRootPath ? t('tree.toggle') : t('tree.openFolder')}
                 className={cn(
-                  "ml-1 w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                  "ml-1 w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0",
                   treeOpen
                     ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
                     : (isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500")
                 )}
               >
                 {/* PanelLeft=侧栏开关语义，把 FolderOpen 让给「打开文件」 */}
-                <PanelLeft size={18} />
+                <PanelLeft size={20} />
               </button>
             )}
             {isTauri && treeRootPath && (
@@ -1607,11 +1607,11 @@ export default function App() {
                 title={t('tree.closeFolder')}
                 aria-label={t('tree.closeFolder')}
                 className={cn(
-                  "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                  "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
                 )}
               >
-                <FolderX size={16} />
+                <FolderX size={18} />
               </button>
             )}
           </>
@@ -1640,11 +1640,11 @@ export default function App() {
               aria-label={t('menu.openFile')}
               title={showKbdHints ? `${t('menu.openFile')} (Ctrl+O)` : t('menu.openFile')}
               className={cn(
-                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0",
                 isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
               )}
             >
-              <FolderOpen size={18} />
+              <FolderOpen size={20} />
             </button>
             <button
               onClick={file.handleSave}
@@ -1652,11 +1652,11 @@ export default function App() {
               aria-label={t('menu.save')}
               title={showKbdHints ? `${t('menu.save')} (Ctrl+S)` : t('menu.save')}
               className={cn(
-                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
                 isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
               )}
             >
-              <Save size={18} />
+              <Save size={20} />
             </button>
             <button
               onClick={() => editor.handleUndo()}
@@ -1664,11 +1664,11 @@ export default function App() {
               aria-label={t('menu.undo')}
               title={showKbdHints ? `${t('menu.undo')} (Ctrl+Z)` : t('menu.undo')}
               className={cn(
-                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
                 isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
               )}
             >
-              <Undo2 size={18} />
+              <Undo2 size={20} />
             </button>
             <button
               onClick={() => editor.handleRedo()}
@@ -1676,11 +1676,11 @@ export default function App() {
               aria-label={t('menu.redo')}
               title={showKbdHints ? `${t('menu.redo')} (Ctrl+Y)` : t('menu.redo')}
               className={cn(
-                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
                 isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
               )}
             >
-              <Redo2 size={18} />
+              <Redo2 size={20} />
             </button>
             {isTauri && (
               <button
@@ -1688,11 +1688,11 @@ export default function App() {
                 aria-label={t('import.menu')}
                 title={t('import.menu')}
                 className={cn(
-                  "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                  "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
                 )}
               >
-                <Link2 size={17} />
+                <Link2 size={19} />
               </button>
             )}
             <button
@@ -1701,22 +1701,22 @@ export default function App() {
               aria-label={t('share.menu')}
               title={t('share.menu')}
               className={cn(
-                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
                 isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
               )}
             >
-              <Share2 size={17} />
+              <Share2 size={19} />
             </button>
             <button
               onClick={() => setSettingsOpen(true)}
               aria-label={t('menu.settings')}
               title={t('menu.settings')}
               className={cn(
-                "w-11 h-11 rounded-md flex items-center justify-center transition-colors shrink-0",
+                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0",
                 isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
               )}
             >
-              <Settings size={18} />
+              <Settings size={20} />
             </button>
           </>
         )}
@@ -1730,12 +1730,12 @@ export default function App() {
           onClick={() => setDiffModalOpen(true)}
           className={cn(
             "relative mr-2 rounded-md transition-colors shrink-0",
-            IS_TOUCH_PRIMARY ? "w-11 h-11 flex items-center justify-center" : "p-1.5",
+            IS_TOUCH_PRIMARY ? "w-12 h-12 flex items-center justify-center" : "p-1.5",
             isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
           )}
           title={activeTab ? t('diff.entryTitle', { name: activeTab.title }) : t('diff.menuTitle')}
         >
-          <GitCompare size={IS_TOUCH_PRIMARY ? 17 : 15} />
+          <GitCompare size={IS_TOUCH_PRIMARY ? 19 : 15} />
           {activePendingDiffs > 0 && (
             <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-orange-500 text-white text-[9px] font-bold flex items-center justify-center leading-none">
               {activePendingDiffs > 99 ? '99+' : activePendingDiffs}
@@ -1767,14 +1767,14 @@ export default function App() {
                   onClick={() => editor.setMdView(m)}
                   title={title}
                   className={cn(
-                    IS_TOUCH_PRIMARY ? "w-10 h-9" : "w-7 h-6",
+                    IS_TOUCH_PRIMARY ? "w-11 h-10" : "w-7 h-6",
                     "rounded-full flex items-center justify-center transition-all",
                     active
                       ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
                       : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
                   )}
                 >
-                  <Icon size={13} />
+                  <Icon size={IS_TOUCH_PRIMARY ? 15 : 13} />
                 </button>
               );
             })}
@@ -1803,14 +1803,14 @@ export default function App() {
                   onClick={() => editor.setCsvState({ csvView: m })}
                   title={title}
                   className={cn(
-                    IS_TOUCH_PRIMARY ? "w-10 h-9" : "w-7 h-6",
+                    IS_TOUCH_PRIMARY ? "w-11 h-10" : "w-7 h-6",
                     "rounded-full flex items-center justify-center transition-all",
                     active
                       ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
                       : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
                   )}
                 >
-                  <Icon size={13} />
+                  <Icon size={IS_TOUCH_PRIMARY ? 15 : 13} />
                 </button>
               );
             })}
@@ -1840,13 +1840,13 @@ export default function App() {
                     onClick={() => editor.setJsonView(m)}
                     title={title}
                     className={cn(
-                      "w-7 h-6 rounded-full flex items-center justify-center transition-all",
+                      cn(IS_TOUCH_PRIMARY ? "w-11 h-10" : "w-7 h-6", "rounded-full flex items-center justify-center transition-all"),
                       active
                         ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
                         : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
                     )}
                   >
-                    <Icon size={13} />
+                    <Icon size={IS_TOUCH_PRIMARY ? 15 : 13} />
                   </button>
                 );
               })}
@@ -1855,13 +1855,13 @@ export default function App() {
               onClick={() => void handleFormatStruct()}
               disabled={!!activeTab.readOnly}
               className={cn(
-                IS_TOUCH_PRIMARY ? "w-10 h-9 flex items-center justify-center" : "p-1.5",
+                IS_TOUCH_PRIMARY ? "w-11 h-10 flex items-center justify-center" : "p-1.5",
                 "rounded-md transition-colors shrink-0 disabled:opacity-40",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
               )}
               title={t('json.format')}
             >
-              <Wand2 size={IS_TOUCH_PRIMARY ? 16 : 14} />
+              <Wand2 size={IS_TOUCH_PRIMARY ? 18 : 14} />
             </button>
           </div>
         )}
@@ -1888,13 +1888,13 @@ export default function App() {
                 onClick={() => setThemeMode(m)}
                 title={title}
                 className={cn(
-                  "w-7 h-6 rounded-full flex items-center justify-center transition-all",
+                  cn(IS_TOUCH_PRIMARY ? "w-11 h-10" : "w-7 h-6", "rounded-full flex items-center justify-center transition-all"),
                   active
                     ? cn("shadow-sm", isDarkMode ? "bg-zinc-600" : "bg-white", activeColor)
                     : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
                 )}
               >
-                <Icon size={13} />
+                <Icon size={IS_TOUCH_PRIMARY ? 15 : 13} />
               </button>
             );
           })}
@@ -2141,7 +2141,8 @@ export default function App() {
           <FileTreeSidebar
             rootPath={treeRootPath}
             open={treeOpen}
-            overlay={IS_ANDROID_APP}
+            /* 平板与桌面同为推拉式（挤压编辑区+可拖宽）；仅手机用覆盖抽屉 */
+            overlay={isPhone}
             isDarkMode={isDarkMode}
             activeTabId={editor.activeTabId}
             tabs={editor.tabs}

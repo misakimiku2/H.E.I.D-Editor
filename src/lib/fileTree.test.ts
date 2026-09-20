@@ -31,9 +31,19 @@ describe('树状态（懒加载）', () => {
     expect(root.expanded).toBe(true);
   });
 
-  it('makeRoot 兼容 SAF tree URI', () => {
+  it('makeRoot 兼容 SAF tree URI：解码 docId 并去掉存储卷前缀', () => {
     const root = makeRoot('content://com.android/tree/primary%3ADocuments');
-    expect(root.name).toBe('primary%3ADocuments');
+    expect(root.name).toBe('Documents');
+  });
+
+  it('makeRoot SAF 子目录树根：解码为相对路径', () => {
+    const root = makeRoot('content://com.android/tree/primary%3ADownload%2Fnotes');
+    expect(root.name).toBe('Download/notes');
+  });
+
+  it('makeRoot 桌面路径保持原样', () => {
+    expect(makeRoot('C:\\Users\\me\\notes').name).toBe('notes');
+    expect(makeRoot('/home/me/notes').name).toBe('notes');
   });
 
   it('withChildren：填充已排序子节点，目录 children 为 null', () => {

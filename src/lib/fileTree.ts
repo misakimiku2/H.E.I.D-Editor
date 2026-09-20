@@ -110,7 +110,15 @@ export function isSvgPath(path: string): boolean {
 }
 
 export function makeRoot(rootPath: string): TreeNode {
-  return { path: rootPath, name: pathTail(rootPath), isDir: true, expanded: true, children: null, error: null };
+  /* SAF tree URI 的尾段是 URL 编码的 docId（primary%3ADownload%2Fnotes）：
+     解码并去掉存储卷前缀，与 safDirLister.displayName 同规则，否则根行显示乱码 */
+  let name = pathTail(rootPath);
+  if (rootPath.startsWith('content://')) {
+    try {
+      name = decodeURIComponent(name).replace(/^primary:/, '').replace(/^[^:]+:/, '') || name;
+    } catch { /* 含孤立 % 时按原文显示 */ }
+  }
+  return { path: rootPath, name, isDir: true, expanded: true, children: null, error: null };
 }
 
 /** 不可变更新：按 path 定位目录节点并应用变换（找不到返回原树） */

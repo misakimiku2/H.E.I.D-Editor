@@ -807,7 +807,11 @@ export function FileTreeSidebar({
             onPointerMove={moveResize}
             onPointerUp={endResize}
             onPointerCancel={endResize}
-            className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize touch-none transition-colors hover:bg-blue-500/30"
+            className={cn(
+              'absolute inset-y-0 right-0 z-10 cursor-col-resize touch-none transition-colors hover:bg-blue-500/30',
+              /* 触屏把手加宽（6px 手指抓不住）；桌面保持窄把手不遮内容 */
+              IS_TOUCH_PRIMARY ? 'w-3' : 'w-1.5',
+            )}
           />
         )}
         {/* 头部：文件夹名 + 搜索 + 刷新 + 关闭文件夹 + 收起 */}
