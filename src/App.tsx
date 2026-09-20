@@ -1696,15 +1696,16 @@ export default function App() {
               <Share2 size={19} />
             </button>
             <button
-              onClick={() => setSettingsOpen(true)}
-              aria-label={t('menu.settings')}
-              title={t('menu.settings')}
+              onClick={() => void handleExportHtml()}
+              disabled={!isMarkdown || !!activeTab?.binary}
+              aria-label={t('export.htmlMenu')}
+              title={t('export.htmlMenu')}
               className={cn(
-                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0",
+                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
                 isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
               )}
             >
-              <Settings size={20} />
+              <FileDown size={19} />
             </button>
           </>
         )}
@@ -2019,6 +2020,8 @@ export default function App() {
               {t('menu.saveAs')}
               {showKbdHints && <span className="ml-auto text-[10px] opacity-50">Ctrl+Shift+S</span>}
             </button>
+            {/* 导出 HTML：平板已提取为菜单栏按钮（仅 markdown 可用），仅桌面保留在菜单里 */}
+            {!IS_TOUCH_PRIMARY && (
             <button
               onClick={() => { setMenuOpen(false); void handleExportHtml(); }}
               disabled={!isMarkdown || !!activeTab?.binary}
@@ -2030,6 +2033,7 @@ export default function App() {
               <FileDown size={14} />
               {t('export.htmlMenu')}
             </button>
+            )}
             {canPrint && (
               <button
                 onClick={() => { setMenuOpen(false); void handlePrint(); }}
@@ -2086,7 +2090,7 @@ export default function App() {
             </button>
             )}
             {!IS_TOUCH_PRIMARY && <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />}
-            {!IS_TOUCH_PRIMARY && (
+            {/* 设置：用户反馈收回菜单（此前曾在平板菜单栏） */}
             <button
               onClick={() => { setMenuOpen(false); setSettingsOpen(true); }}
               className={cn(
@@ -2097,7 +2101,6 @@ export default function App() {
               <Settings size={14} />
               {t('menu.settings')}
             </button>
-            )}
             <button
               onClick={() => { setMenuOpen(false); setShortcutsOpen(true); }}
               className={cn(
@@ -2506,7 +2509,7 @@ export default function App() {
               onClick={() => setAboutOpen(false)}
             />
             <div className={cn(
-              "relative w-80 rounded-2xl border shadow-2xl p-6 flex flex-col items-center text-center",
+              "relative w-80 rounded-2xl border shadow-2xl p-6 flex flex-col items-center text-center pointer-coarse:w-[min(26rem,90vw)] pointer-coarse:p-7",
               isDarkMode ? "border-zinc-700 bg-zinc-800/95 text-zinc-100" : "border-zinc-200 bg-white/95 text-zinc-800"
             )}>
               <button
@@ -2522,20 +2525,20 @@ export default function App() {
               <img
                 src={isDarkMode ? heidIconLight : heidIconDark} /* 资源名按图标自身配色命名：dark=深色底图标（适合浅色界面），故深色主题用 light */
                 alt="H.I.D.E"
-                className="w-20 h-20 drop-shadow-md"
+                className="w-20 h-20 drop-shadow-md pointer-coarse:w-24 pointer-coarse:h-24"
               />
               <h2 className="mt-4 text-lg font-bold tracking-widest">H.I.D.E</h2>
-              <p className="mt-1 text-[11px] text-zinc-500 tracking-wide">
+              <p className="mt-1 text-[11px] text-zinc-500 tracking-wide pointer-coarse:text-sm">
                 Highlighting Intelligent Document Editor
               </p>
               <div className={cn(
-                "mt-3 px-2.5 py-0.5 rounded-full text-[10px] font-medium border",
+                "mt-3 px-2.5 py-0.5 rounded-full text-[10px] font-medium border pointer-coarse:text-xs pointer-coarse:px-3 pointer-coarse:py-1",
                 isDarkMode ? "border-zinc-600 text-zinc-400" : "border-zinc-300 text-zinc-500"
               )}>
                 {t('about.version', { v: appVersion })}
               </div>
               <p className={cn(
-                "mt-4 text-xs leading-relaxed",
+                "mt-4 text-xs leading-relaxed pointer-coarse:text-sm",
                 isDarkMode ? "text-zinc-400" : "text-zinc-500"
               )}>
                 {t('about.desc')}
@@ -2544,23 +2547,23 @@ export default function App() {
               {isTauri && (
                 <div className="mt-3 flex flex-col items-center gap-1.5">
                   {updater.phase === 'checking' && (
-                    <span className="text-[10px] text-zinc-500">{t('update.checking')}</span>
+                    <span className="text-[10px] text-zinc-500 pointer-coarse:text-xs">{t('update.checking')}</span>
                   )}
                   {updater.phase === 'upToDate' && (
-                    <span className="text-[10px] text-emerald-500">{t('update.upToDate')}</span>
+                    <span className="text-[10px] text-emerald-500 pointer-coarse:text-xs">{t('update.upToDate')}</span>
                   )}
                   {updater.phase === 'error' && (
-                    <span className="text-[10px] text-red-400 truncate max-w-[15rem]" title={updater.errorMessage ?? ''}>
+                    <span className="text-[10px] text-red-400 truncate max-w-[15rem] pointer-coarse:text-xs" title={updater.errorMessage ?? ''}>
                       {t('update.errGeneric', { msg: updater.errorMessage ?? '' })}
                     </span>
                   )}
                   {updater.phase === 'downloading' && (
-                    <span className="text-[10px] text-zinc-500">{t('update.downloading')}</span>
+                    <span className="text-[10px] text-zinc-500 pointer-coarse:text-xs">{t('update.downloading')}</span>
                   )}
                   {updater.phase === 'available' && updater.source === 'manual' && (
                     <button
                       onClick={() => { IS_ANDROID_APP ? updater.goDownload() : void updater.install(); }}
-                      className="px-3 py-1 rounded-md text-[10px] font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500"
+                      className="px-3 py-1 rounded-md text-[10px] font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500 pointer-coarse:text-xs pointer-coarse:px-3.5 pointer-coarse:py-1.5"
                     >
                       {t('update.newVersion', { v: updater.latestVersion ?? '' })} ·
                       {IS_ANDROID_APP ? t('update.goDownload') : t('update.installNow')}
@@ -2570,7 +2573,7 @@ export default function App() {
                     <button
                       onClick={updater.checkManually}
                       className={cn(
-                        "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1",
+                        "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-xs pointer-coarse:px-2.5 pointer-coarse:py-1",
                         isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
                       )}
                     >
@@ -2587,7 +2590,7 @@ export default function App() {
                         <button
                           onClick={() => { setAboutOpen(false); openReleaseNotesTab(latestNotes); }}
                           className={cn(
-                            "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1",
+                            "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-xs pointer-coarse:px-2.5 pointer-coarse:py-1",
                             isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
                           )}
                         >

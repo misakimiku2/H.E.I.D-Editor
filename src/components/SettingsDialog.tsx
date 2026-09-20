@@ -102,7 +102,7 @@ function ThemeCard({ theme, selected, isDarkMode, onSelect }: {
       </div>
       <div
         className={cn(
-          'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium pointer-coarse:min-h-[40px] pointer-coarse:px-3 pointer-coarse:text-xs',
+          'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium pointer-coarse:min-h-[44px] pointer-coarse:px-3 pointer-coarse:text-sm',
           isDarkMode ? 'bg-zinc-900/60 text-zinc-200' : 'bg-zinc-50 text-zinc-700'
         )}
       >
@@ -133,14 +133,14 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
 
   const dark = isDarkMode;
   const panelCls = cn(
-    "relative w-[min(560px,94vw)] max-h-[85vh] flex flex-col rounded-2xl border shadow-2xl overflow-hidden heid-pop-in",
+    "relative w-[min(560px,94vw)] max-h-[85vh] flex flex-col rounded-2xl border shadow-2xl overflow-hidden heid-pop-in pointer-coarse:w-[min(760px,94vw)]",
     dark ? "border-zinc-700 bg-zinc-800/85 backdrop-blur-xl text-zinc-100" : "border-zinc-200/90 bg-white/85 backdrop-blur-xl text-zinc-800"
   );
   const rowCls = cn(
-    "flex items-center justify-between gap-3 mx-2.5 px-2.5 py-2 rounded-lg transition-colors",
+    "flex items-center justify-between gap-3 mx-2.5 px-2.5 py-2 rounded-lg transition-colors pointer-coarse:py-2.5",
     dark ? "hover:bg-zinc-700/30" : "hover:bg-zinc-100/70"
   );
-  const labelCls = "text-xs font-medium";
+  const labelCls = "text-xs font-medium pointer-coarse:text-sm";
 
   /** 分段开关：横排互斥选项（缩进用） */
   const segmentedNode = (value: string, onPick: (v: string) => void, options: Array<{ value: string; label: string }>) => (
@@ -154,7 +154,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
           onClick={() => onPick(o.value)}
           aria-pressed={value === o.value}
           className={cn(
-            "px-3 py-0.5 rounded-md text-xs font-medium transition-all",
+            "px-3 py-0.5 rounded-md text-xs font-medium transition-all pointer-coarse:px-3.5 pointer-coarse:py-1 pointer-coarse:text-sm",
             value === o.value
               ? dark
                 ? "bg-zinc-700 text-[#A3B3FF] shadow-sm"
@@ -170,13 +170,13 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
     </span>
   );
 
-  const sectionNode = (icon: React.ComponentType<{ size?: number | string }>, title: string, children: React.ReactNode) => (
+  const sectionNode = (icon: React.ComponentType<{ size?: number | string; className?: string }>, title: string, children: React.ReactNode) => (
     <section>
       <div className="flex items-center gap-2 px-5 pt-4 pb-1.5">
         <span className="text-[#A3B3FF] shrink-0">
-          {(() => { const Icon = icon; return <Icon size={12} />; })()}
+          {(() => { const Icon = icon; return <Icon size={12} className="pointer-coarse:w-3.5 pointer-coarse:h-3.5" />; })()}
         </span>
-        <span className={cn("text-[11px] font-semibold tracking-wider", dark ? "text-zinc-400" : "text-zinc-500")}>{title}</span>
+        <span className={cn("text-[11px] font-semibold tracking-wider pointer-coarse:text-sm", dark ? "text-zinc-400" : "text-zinc-500")}>{title}</span>
         <span className={cn("flex-1 h-px", dark ? "bg-zinc-700/60" : "bg-zinc-200")} />
       </div>
       {children}
@@ -186,11 +186,11 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
   /** 主题分组：组内单选（radio 语义），应用到对应界面模式的槽位 */
   const themeGroup = (ids: { themes: CodeTheme[]; slot: 'codeThemeDark' | 'codeThemeLight'; label: string; icon: React.ComponentType<{ size?: number | string }>; appliesNow: boolean }) => (
     <div>
-      <div className={cn("flex items-center gap-1.5 px-5 pt-2 pb-1 text-[10px] font-semibold", dark ? "text-zinc-500" : "text-zinc-400")}>
+      <div className={cn("flex items-center gap-1.5 px-5 pt-2 pb-1 text-[10px] font-semibold pointer-coarse:text-xs", dark ? "text-zinc-500" : "text-zinc-400")}>
         {(() => { const Icon = ids.icon; return <Icon size={11} />; })()}
         {ids.label}
         {ids.appliesNow && (
-          <span className={cn("px-1.5 py-px rounded-full text-[9px] font-medium", dark ? "bg-[#A3B3FF]/15 text-[#A3B3FF]" : "bg-[#A3B3FF]/10 text-[#A3B3FF]")}>
+          <span className={cn("px-1.5 py-px rounded-full text-[9px] font-medium pointer-coarse:text-[11px]", dark ? "bg-[#A3B3FF]/15 text-[#A3B3FF]" : "bg-[#A3B3FF]/10 text-[#A3B3FF]")}>
             {t('settings.themeInUse')}
           </span>
         )}
@@ -221,11 +221,11 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
           <span className="text-[#A3B3FF] shrink-0">
             <Settings size={16} />
           </span>
-          <h2 className="text-base font-bold flex-1">{t('settings.title')}</h2>
+          <h2 className="text-base font-bold flex-1 pointer-coarse:text-lg">{t('settings.title')}</h2>
           <button
             onClick={onClose}
             className={cn(
-              "p-1 rounded-md transition-colors",
+              "p-1 rounded-md transition-colors pointer-coarse:p-1.5",
               dark ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
             )}
             title={t('common.close')}
@@ -256,7 +256,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
 
           {sectionNode(Sparkles, t('settings.codeTheme'), (
             <>
-              <p className={cn("px-5 pb-1 text-[10px]", dark ? "text-zinc-500" : "text-zinc-400")}>
+              <p className={cn("px-5 pb-1 text-[10px] pointer-coarse:text-xs", dark ? "text-zinc-500" : "text-zinc-400")}>
                 {t('settings.codeThemeHint')}
               </p>
               {themeGroup({
@@ -299,7 +299,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
                     aria-label={t('settings.fontSize')}
                     className="w-24 accent-[#A3B3FF] cursor-pointer"
                   />
-                  <span className={cn("text-[11px] tabular-nums w-8 text-right", dark ? "text-zinc-400" : "text-zinc-500")}>
+                  <span className={cn("text-[11px] tabular-nums w-8 text-right pointer-coarse:text-sm", dark ? "text-zinc-400" : "text-zinc-500")}>
                     {settings.fontSize}px
                   </span>
                   <span
@@ -379,7 +379,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
                 <div key={key} className={rowCls}>
                   <span className={labelCls}>
                     {label}
-                    {hint && <span className={cn("ml-2 text-[10px]", dark ? "text-zinc-500" : "text-zinc-400")}>{hint}</span>}
+                    {hint && <span className={cn("ml-2 text-[10px] pointer-coarse:text-xs", dark ? "text-zinc-500" : "text-zinc-400")}>{hint}</span>}
                   </span>
                   <Toggle
                     checked={settings[key] as boolean}
@@ -418,7 +418,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
                   />
                 </div>
               )}
-              <p className={cn("px-5 pb-2 pt-1 text-[10px] leading-relaxed", dark ? "text-zinc-500" : "text-zinc-400")}>
+              <p className={cn("px-5 pb-2 pt-1 text-[10px] leading-relaxed pointer-coarse:text-xs", dark ? "text-zinc-500" : "text-zinc-400")}>
                 {t('settings.draftNote')}
               </p>
             </>
@@ -430,7 +430,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
           <button
             onClick={() => onChange({ ...DEFAULT_SETTINGS })}
             className={cn(
-              "px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors",
+              "px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors pointer-coarse:text-sm",
               dark ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-100 text-zinc-500"
             )}
           >
