@@ -224,8 +224,9 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
           <h2 className="text-base font-bold flex-1 pointer-coarse:text-lg">{t('settings.title')}</h2>
           <button
             onClick={onClose}
+            /* 触屏：不显示顶部小关闭钮（命中区太小）——点外部/完成/系统返回关闭 */
             className={cn(
-              "p-1 rounded-md transition-colors pointer-coarse:p-1.5",
+              "p-1 rounded-md transition-colors pointer-coarse:hidden",
               dark ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
             )}
             title={t('common.close')}
@@ -234,7 +235,8 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose }: Sett
           </button>
         </div>
 
-        <div className="overflow-auto heid-scroll min-h-0 pb-2">
+        {/* 触屏：滚动条隐藏（内容仍可滚，滚动条原生即窄，heid-scroll 的 10px 常驻条不需要） */}
+        <div className="overflow-auto heid-scroll heid-scroll-none min-h-0 pb-2">
           {sectionNode(Palette, t('settings.section.interface'), (
             <div className={rowCls}>
               <span className={labelCls}>{t('settings.language')}</span>

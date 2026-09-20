@@ -2545,7 +2545,7 @@ export default function App() {
               </p>
               {/* 更新检查（仅 Tauri：桌面安装更新 / 安卓跳转下载页） */}
               {isTauri && (
-                <div className="mt-3 flex flex-col items-center gap-1.5">
+                <div className="mt-3 flex flex-col items-center gap-1.5 pointer-coarse:gap-2.5">
                   {updater.phase === 'checking' && (
                     <span className="text-[10px] text-zinc-500 pointer-coarse:text-xs">{t('update.checking')}</span>
                   )}
@@ -2563,7 +2563,7 @@ export default function App() {
                   {updater.phase === 'available' && updater.source === 'manual' && (
                     <button
                       onClick={() => { IS_ANDROID_APP ? updater.goDownload() : void updater.install(); }}
-                      className="px-3 py-1 rounded-md text-[10px] font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500 pointer-coarse:text-xs pointer-coarse:px-3.5 pointer-coarse:py-1.5"
+                      className="px-3 py-1 rounded-md text-[10px] font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px] pointer-coarse:py-2"
                     >
                       {t('update.newVersion', { v: updater.latestVersion ?? '' })} ·
                       {IS_ANDROID_APP ? t('update.goDownload') : t('update.installNow')}
@@ -2573,11 +2573,11 @@ export default function App() {
                     <button
                       onClick={updater.checkManually}
                       className={cn(
-                        "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-xs pointer-coarse:px-2.5 pointer-coarse:py-1",
+                        "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px] pointer-coarse:gap-2",
                         isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
                       )}
                     >
-                      <RefreshCw size={10} />
+                      <RefreshCw size={10} className="pointer-coarse:w-3.5 pointer-coarse:h-3.5" />
                       {t('update.check')}
                     </button>
                   )}
@@ -2590,11 +2590,11 @@ export default function App() {
                         <button
                           onClick={() => { setAboutOpen(false); openReleaseNotesTab(latestNotes); }}
                           className={cn(
-                            "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-xs pointer-coarse:px-2.5 pointer-coarse:py-1",
+                            "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px] pointer-coarse:gap-2",
                             isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
                           )}
                         >
-                          <FileText size={10} />
+                          <FileText size={10} className="pointer-coarse:w-3.5 pointer-coarse:h-3.5" />
                           {t('update.viewNotes')}
                         </button>
                         {pastNotes.length > 0 && (
@@ -2603,7 +2603,7 @@ export default function App() {
                             aria-expanded={pastNotesOpen}
                             title={t('update.pastNotes')}
                             className={cn(
-                              "absolute left-full top-1/2 -translate-y-1/2 ml-2 p-1 rounded-md transition-colors",
+                              "absolute left-full top-1/2 -translate-y-1/2 ml-2 p-1 rounded-md transition-colors pointer-coarse:p-2.5 pointer-coarse:ml-3",
                               isDarkMode ? "text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300" : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600"
                             )}
                           >

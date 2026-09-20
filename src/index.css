@@ -176,3 +176,15 @@ body {
   background-color: #f59e0b;
   color: #18181b;
 }
+
+/* ---- 触屏为主的设备：弹窗内容隐藏滚动条 ----
+   heid-scroll 的 10px 常驻滚动条是桌面样式；触屏滚动本身即可见回弹，
+   常驻条只占宽度（需放在 heid-scroll 规则之后以同优先级覆盖） */
+@media (pointer: coarse) {
+  .heid-scroll-none {
+    scrollbar-width: none;
+  }
+  .heid-scroll-none::-webkit-scrollbar {
+    display: none;
+  }
+}
