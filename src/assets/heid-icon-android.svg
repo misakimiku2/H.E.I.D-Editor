@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" fill="#111827"/>
+  <!-- 桌面原稿 heid-icon-dark.svg 的 >_< 几何 ×2，整体落在自适应图标安全圆（中心 512,512 半径 341）内 -->
+  <g fill="none" stroke="#10B981" stroke-width="48" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 240 480 L 380 560 L 240 640"/>
+    <line x1="460" y1="620" x2="580" y2="620"/>
+    <path d="M 780 480 L 640 560 L 780 640"/>
+  </g>
+</svg>

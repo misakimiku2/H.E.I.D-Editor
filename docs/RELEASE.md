@@ -118,3 +118,29 @@ NSIS 向导配置在 `tauri.conf.json` 的 `bundle.windows.nsis`：`languages: [
 （简体中文向导，卸载向导同步生效），`headerImage`（150×57）/ `sidebarImage`（164×314）
 为品牌图 BMP，源文件 `src-tauri/icons/installer-header.bmp` / `installer-sidebar.bmp`
 （由 `icon.png` 经脚本生成：取主体深色为底、居中/左置粘贴品牌图标）。
+
+## 安卓桌面图标（v1.4.0 起）
+
+安卓图标与桌面图标**分开维护**，源图在 `src/assets/`：
+
+- `heid-icon-dark.svg` / `heid-icon-light.svg`：应用内与桌面用的圆角窗口标（含顶部栏与三个圆点）。
+- `heid-icon-android.svg`：安卓启动图标专用——满幅 `#111827` 底 + 居中 `>_<`，几何取自桌面稿 ×2。
+  **刻意不含顶部栏与圆点**：自适应图标（adaptive icon）的圆形/方形遮罩只保留中心 66 % 安全区，
+  那条栏会被切掉大半，48 dp 下三个点也糊成一团。
+
+改了 `heid-icon-android.svg` 之后重新生成：
+
+```bash
+# 1) SVG 光栅化成 1024×1024 PNG —— tauri icon 只吃位图不吃 SVG。
+#    无依赖做法：chrome --headless=new --window-size=1024,1024 --screenshot=<png> file:///<svg>
+# 2) 生成全密度位图 + 自适应图层
+npx tauri icon <png>
+# 3) 关键：tauri icon 会顺手重写 src-tauri/icons/ 整套桌面与 Windows 图标，
+#    必须还原、只留 gen/android 的改动，否则已发布的桌面图标被安卓构图覆盖
+git checkout -- src-tauri/icons && rm -rf src-tauri/icons/ios src-tauri/icons/64x64.png
+```
+
+生成物落在 `src-tauri/gen/android/app/src/main/res/`：`mipmap-{m,h,xh,xxh,xxxh}dpi/` 下的
+`ic_launcher.png` / `ic_launcher_round.png` / `ic_launcher_foreground.png`，自适应定义
+`mipmap-anydpi-v26/ic_launcher{,_round}.xml`，背景色 `values/ic_launcher_background.xml`
+（模板默认 `#fff`，已改品牌深色 `#111827`）。
