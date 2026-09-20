@@ -41,6 +41,7 @@ const zh = {
   'svg.copyPng': '复制为 PNG（2×）',
   'svg.resizeHint': '拖拽调整编辑区宽度',
   'svg.panHint': '中键拖动平移画布',
+  'svg.panHintTouch': '单指拖动平移画布，双指捏合缩放',
 
   'menu.save': '保存',
   'menu.saveAs': '另存为',
@@ -714,6 +715,7 @@ const en: Record<MessageKey, string> = {
   'svg.copyPng': 'Copy as PNG (2×)',
   'svg.resizeHint': 'Drag to resize editor pane',
   'svg.panHint': 'Middle-drag to pan the canvas',
+  'svg.panHintTouch': 'Drag with one finger to pan, pinch to zoom',
 
   'menu.save': 'Save',
   'menu.saveAs': 'Save As',

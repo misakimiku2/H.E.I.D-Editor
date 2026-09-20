@@ -10,6 +10,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ImageOff } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import { getIntrinsicSize, parseSvg, type SvgParseResult } from '../lib/svgParse';
 import { createRenderCopy, HED_IDX_ATTR } from '../lib/svgSanitize';
 import { applyTranslate } from '../lib/svgWrite';
@@ -291,7 +292,7 @@ export const SvgCanvas = React.memo<{
   }), [isDarkMode]);
 
   const btn = cn(
-    'px-1.5 py-0.5 rounded-md text-[11px] transition-colors',
+    'px-1.5 py-0.5 rounded-md text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
     isDarkMode ? 'bg-zinc-800/90 text-zinc-300 hover:bg-zinc-700' : 'bg-white/90 text-zinc-600 hover:bg-zinc-100',
   );
 
@@ -300,7 +301,7 @@ export const SvgCanvas = React.memo<{
       ref={paneRef}
       tabIndex={0}
       data-svg-canvas
-      title={t('svg.panHint')}
+      title={IS_TOUCH_PRIMARY ? t('svg.panHintTouch') : t('svg.panHint')}
       className={cn('relative flex min-w-0 flex-1 items-center justify-center overflow-hidden p-3 select-none outline-none')}
       style={{ ...checker, cursor: panning ? 'grabbing' : 'default', touchAction: 'none' }}
       onContextMenu={(e) => e.preventDefault()}

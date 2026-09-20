@@ -82,13 +82,13 @@ export const SvgInspector = React.memo<{
     if (ok && copy) flash();
   };
 
-  const label = cn('text-[11px] shrink-0', isDarkMode ? 'text-zinc-500' : 'text-zinc-400');
+  const label = cn('text-[11px] shrink-0 pointer-coarse:text-sm', isDarkMode ? 'text-zinc-500' : 'text-zinc-400');
   const inputCls = cn(
-    'w-full min-w-0 rounded-md border px-2 py-1 text-xs outline-none transition-colors',
+    'w-full min-w-0 rounded-md border px-2 py-1 text-xs outline-none transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3 pointer-coarse:text-sm',
     isDarkMode ? 'border-zinc-600 bg-zinc-800 text-zinc-200 focus:border-sky-500' : 'border-zinc-300 bg-white text-zinc-700 focus:border-sky-500',
   );
   const btnCls = cn(
-    'shrink-0 rounded-md px-2 py-1 text-[11px] transition-colors',
+    'shrink-0 rounded-md px-2 py-1 text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
     isDarkMode ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200',
   );
 
@@ -101,7 +101,7 @@ export const SvgInspector = React.memo<{
       <div className="flex items-center gap-1.5">
         <button
           type="button"
-          className={cn('h-6 w-6 shrink-0 rounded-md border', isDarkMode ? 'border-zinc-600' : 'border-zinc-300')}
+          className={cn('h-6 w-6 shrink-0 rounded-md border pointer-coarse:h-11 pointer-coarse:w-11', isDarkMode ? 'border-zinc-600' : 'border-zinc-300')}
           style={{ background: lit ? rgbaToHex(lit) : undefined }}
           title={t('svg.pickColor')}
           onClick={(e) => {
@@ -142,7 +142,7 @@ export const SvgInspector = React.memo<{
         <button
           type="button"
           data-outline={idx}
-          className={cn('flex w-full items-center gap-1 rounded px-1.5 py-0.5 text-left text-[11px] truncate',
+          className={cn('flex w-full items-center gap-1 rounded px-1.5 py-0.5 text-left text-[11px] truncate pointer-coarse:min-h-[44px] pointer-coarse:py-2 pointer-coarse:text-sm',
             idx === selectedIdx
               ? 'bg-sky-500/20 text-sky-500'
               : isDarkMode ? 'text-zinc-400 hover:bg-zinc-800' : 'text-zinc-600 hover:bg-zinc-100')}
@@ -181,7 +181,7 @@ export const SvgInspector = React.memo<{
           <button
             key={key}
             type="button"
-            className={cn('flex-1 px-2 py-1.5 text-[11px] transition-colors',
+            className={cn('flex-1 px-2 py-1.5 text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:text-sm',
               tab === key
                 ? isDarkMode ? 'text-sky-400 border-b-2 border-sky-400' : 'text-sky-600 border-b-2 border-sky-500'
                 : isDarkMode ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600')}
@@ -207,7 +207,7 @@ export const SvgInspector = React.memo<{
               {selectedIdx! > 0 && (
                 <button
                   type="button"
-                  className={cn('flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors',
+                  className={cn('flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
                     'text-red-400 hover:bg-red-500/10')}
                   onClick={() => onDelete(selectedIdx!)}
                   title={t('svg.delete')}
@@ -253,7 +253,7 @@ export const SvgInspector = React.memo<{
                 />
               </div>
             )}
-            <p className={cn('text-[10px] leading-4', isDarkMode ? 'text-zinc-600' : 'text-zinc-400')}>{t('svg.writeBackHint')}</p>
+            <p className={cn('text-[10px] leading-4 pointer-coarse:text-sm', isDarkMode ? 'text-zinc-600' : 'text-zinc-400')}>{t('svg.writeBackHint')}</p>
           </div>
         ))}
 
@@ -276,7 +276,7 @@ export const SvgInspector = React.memo<{
               <button
                 key={entry.color}
                 type="button"
-                className={cn('flex items-center gap-2 rounded-md px-1.5 py-1 text-left text-[11px] transition-colors',
+                className={cn('flex items-center gap-2 rounded-md px-1.5 py-1 text-left text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:py-2 pointer-coarse:text-sm',
                   replaceFrom === entry.color
                     ? 'bg-sky-500/20 text-sky-500'
                     : isDarkMode ? 'text-zinc-400 hover:bg-zinc-800' : 'text-zinc-600 hover:bg-zinc-100')}
@@ -302,7 +302,7 @@ export const SvgInspector = React.memo<{
           </span>
           <input
             type="color"
-            className="h-6 w-8 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0"
+            className="h-6 w-8 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0 pointer-coarse:min-h-[44px] pointer-coarse:w-12"
             value={/^#[0-9a-fA-F]{6}$/.test(replaceTo) ? replaceTo : '#38bdf8'}
             onChange={(e) => setReplaceTo(e.target.value)}
           />

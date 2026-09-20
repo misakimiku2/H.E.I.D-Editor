@@ -8,10 +8,13 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { hsvToRgb, rgbToHsv, cssColor, clamp01, type Hsv, type Rgba } from '../lib/colorMath';
 import { parseColorLiteral } from '../lib/colorLiteral';
 import { useT } from '../lib/i18nContext';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import { cn } from '../lib/utils';
 
-const POPOVER_WIDTH = 232;
-const POPOVER_HEIGHT = 252;
+/* 触屏档：色块与两条滑条加大、宽度放宽一档，命中区才够手指。
+   高度为估算值（仅用于量得真实尺寸前的首帧定位，翻转钳制以实测为准） */
+const POPOVER_WIDTH = IS_TOUCH_PRIMARY ? 264 : 232;
+const POPOVER_HEIGHT = IS_TOUCH_PRIMARY ? 330 : 252;
 
 const hex2 = (v: number) => v.toString(16).padStart(2, '0');
 
@@ -43,9 +46,11 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
   const rgb = hsvToRgb(hsv);
   const current: Rgba = { ...rgb, a: alpha };
 
-  /* 锚点变化（滚动/编辑导致圆点移动）时重新贴靠，并做屏幕内翻转钳制 */
+  /* 锚点变化（滚动/编辑导致圆点移动）时重新贴靠，并做屏幕内翻转钳制。
+     量真实尺寸而非用常量：触屏档加大后估算会偏小、底部翻转判定失准 */
   useLayoutEffect(() => {
-    setPos(clampPosition(anchor));
+    const r = rootRef.current?.getBoundingClientRect();
+    setPos(clampPosition(anchor, r?.width ? { w: r.width, h: r.height } : undefined));
   }, [anchor.x, anchor.y]);
 
   const emit = (h: Hsv, a: number) => onChange({ ...hsvToRgb(h), a });
@@ -125,7 +130,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
     emit(nextHsv, parsed.rgba.a);
   };
 
-  const thumbCls = 'absolute w-3.5 h-3.5 rounded-full border-2 border-white shadow-[0_0_2px_rgba(0,0,0,0.6)] -translate-x-1/2 -translate-y-1/2 pointer-events-none';
+  const thumbCls = 'absolute w-3.5 h-3.5 pointer-coarse:w-5 pointer-coarse:h-5 rounded-full border-2 border-white shadow-[0_0_2px_rgba(0,0,0,0.6)] -translate-x-1/2 -translate-y-1/2 pointer-events-none';
 
   return (
     <div
@@ -143,7 +148,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
         role="slider"
         aria-label={t('colorDot.sv')}
         aria-valuenow={Math.round(hsv.s * 100)}
-        className="relative h-[130px] rounded cursor-crosshair touch-none"
+        className="relative h-[130px] rounded cursor-crosshair touch-none pointer-coarse:h-[176px]"
         style={{
           background: `linear-gradient(to top, #000, rgba(0,0,0,0)), linear-gradient(to right, #fff, rgba(255,255,255,0)), ${hueCss}`,
         }}
@@ -169,7 +174,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
         aria-valuemin={0}
         aria-valuemax={360}
         aria-valuenow={Math.round(hsv.h)}
-        className="relative h-3 rounded-full mt-2.5 cursor-pointer touch-none"
+        className="relative h-3 rounded-full mt-2.5 cursor-pointer touch-none pointer-coarse:h-7"
         style={{ background: 'linear-gradient(to right, #f00 0%, #ff0 17%, #0f0 33%, #0ff 50%, #00f 67%, #f0f 83%, #f00 100%)' }}
         onPointerDown={e => startDrag(e, 'hue', applyHue)}
         onPointerMove={e => moveDrag(e, applyHue)}
@@ -186,7 +191,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(alpha * 100)}
-        className="relative h-3 rounded-full mt-2.5 cursor-pointer touch-none"
+        className="relative h-3 rounded-full mt-2.5 cursor-pointer touch-none pointer-coarse:h-7"
         style={{
           backgroundColor: '#fff',
           backgroundImage: 'linear-gradient(45deg, #ccc 25%, transparent 25%), linear-gradient(-45deg, #ccc 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ccc 75%), linear-gradient(-45deg, transparent 75%, #ccc 75%)',
@@ -208,7 +213,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
       {/* 当前色预览 + Hex 输入 */}
       <div className="flex items-center gap-2 mt-2.5">
         <div
-          className="w-8 h-8 rounded border shrink-0"
+          className="w-8 h-8 rounded border shrink-0 pointer-coarse:h-11 pointer-coarse:w-11"
           style={{
             borderColor: isDarkMode ? '#52525b' : '#d4d4d8',
             backgroundColor: '#fff',
@@ -227,7 +232,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
           aria-label={t('colorDot.hex')}
           spellCheck={false}
           className={cn(
-            'flex-1 min-w-0 h-8 px-2 rounded border text-xs font-mono outline-none',
+            'flex-1 min-w-0 h-8 px-2 rounded border text-xs font-mono outline-none pointer-coarse:h-11 pointer-coarse:px-3 pointer-coarse:text-sm',
             isDarkMode ? 'border-zinc-600 bg-zinc-900 text-zinc-200 focus:border-blue-500' : 'border-zinc-300 bg-white text-zinc-800 focus:border-blue-500',
           )}
         />
@@ -237,13 +242,15 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
 };
 
 /** 视口内钳制 + 边缘翻转：默认出现在锚点（圆点左下角）下方，放不下就翻到上方 */
-function clampPosition(anchor: { x: number; y: number }): { x: number; y: number } {
+function clampPosition(anchor: { x: number; y: number }, size?: { w: number; h: number }): { x: number; y: number } {
   const margin = 8;
+  const w = size?.w ?? POPOVER_WIDTH;
+  const h = size?.h ?? POPOVER_HEIGHT;
   let x = anchor.x - 4;
   let y = anchor.y + 6;
-  if (x + POPOVER_WIDTH > window.innerWidth - margin) x = window.innerWidth - margin - POPOVER_WIDTH;
+  if (x + w > window.innerWidth - margin) x = window.innerWidth - margin - w;
   if (x < margin) x = margin;
-  if (y + POPOVER_HEIGHT > window.innerHeight - margin) y = anchor.y - POPOVER_HEIGHT - 18;
+  if (y + h > window.innerHeight - margin) y = anchor.y - h - 18;
   if (y < margin) y = margin;
   return { x: Math.round(x), y: Math.round(y) };
 }

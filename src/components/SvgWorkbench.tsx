@@ -2,18 +2,21 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ImageOff, MousePointerClick } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
+import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import { parseSvg, type SvgParseResult } from '../lib/svgParse';
 import { createRenderCopy } from '../lib/svgSanitize';
 import { applyPatches, applyTranslate, deletePatch, elementPatch } from '../lib/svgWrite';
 import { replaceColor } from '../lib/svgPalette';
 import { loadSvgSplitRatio, saveSvgSplitRatio, splitRatioFromClientX } from '../lib/svgLayout';
+import { usePinchZoom } from '../hooks/usePinchZoom';
 import { SvgCanvas } from './SvgCanvas';
 import { SvgInspector } from './SvgInspector';
 
 /**
  * SVG 可视化工作台：左侧源码编辑器（由 App 传入），右侧预览或编辑画布。
  * - 预览（svgEdit=false）：现状不变——blob URL 以 <img> 渲染（脚本不执行，天然安全），
- *   滚轮缩放（光标锚）、拖拽平移、双击适应/原始尺寸；源码停顿 180ms 后刷新；
+ *   滚轮以光标为锚缩放、中键拖动平移；触屏改为单指平移 + 双指捏合（锚点=双指中点），
+ *   复位走右下角工具条；源码停顿 180ms 后刷新；
  * - 编辑（svgEdit=true）：sanitize 后的内联画布（SvgCanvas）+ 检查面板（SvgInspector）。
  *   编辑统一走「最新源码重新解析 → 权威树变更 → 单元素区间补丁」的手术式写回，
  *   撤销/保存/外部变更检测与手敲源码完全同链路；窄屏（手机）自动上下堆叠。
@@ -148,6 +151,32 @@ export const SvgWorkbench = React.memo<{
     };
   }, [dragging]);
 
+  const setScaleAndRef = useCallback((v: number) => { setScale(v); scaleRef.current = v; }, []);
+
+  /* 触屏：单指平移 + 双指捏合缩放替代中键平移与滚轮缩放（锚点数学与滚轮同源，
+     只是锚点取双指中点而非光标） */
+  const { bind: bindPinch } = usePinchZoom();
+  const pinchBind = bindPinch({
+    onPan: (dx, dy) => setOffset(o => ({ x: o.x + dx, y: o.y + dy })),
+    onPinch: (ratio, mx, my, mdx, mdy) => {
+      const rect = paneRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const from = scaleRef.current || fitScale;
+      const next = Math.min(16, Math.max(0.02, from * ratio));
+      const f = next / from;
+      /* 以上一事件的中点为锚缩放，再并入中点位移（双指整体拖动即纯平移） */
+      const ax = mx - mdx;
+      const ay = my - mdy;
+      setOffset(o => ({
+        x: (ax - cx) - (ax - cx - o.x) * f + mdx,
+        y: (ay - cy) - (ay - cy - o.y) * f + mdy,
+      }));
+      setScaleAndRef(next);
+    },
+  });
+
   /* ---- 编辑模式：解析（防抖后）+ 手术式提交管线 ---- */
   const parsed = useMemo<SvgParseResult | null>(() => (svgEdit ? parseSvg(rendered) : null), [rendered, svgEdit]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -195,19 +224,21 @@ export const SvgWorkbench = React.memo<{
   }), [isDarkMode]);
 
   const btn = cn(
-    'px-1.5 py-0.5 rounded-md text-[11px] transition-colors',
+    'px-1.5 py-0.5 rounded-md text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
     isDarkMode ? 'bg-zinc-800/90 text-zinc-300 hover:bg-zinc-700' : 'bg-white/90 text-zinc-600 hover:bg-zinc-100',
   );
 
-  /* 编辑/预览切换按钮（右上角悬浮） */
+  /* 编辑/预览切换按钮（右上角悬浮）。触屏下它落在画布内，必须挡下 pointerdown，
+     否则画布的捏合/平移会捕获指针、把这一下点击吞掉 */
   const toggleBtn = onToggleEdit && (
     <button
       type="button"
-      className={cn('absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border px-1.5 py-1 text-[11px] shadow-sm transition-colors',
+      className={cn('absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border px-1.5 py-1 text-[11px] shadow-sm transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3 pointer-coarse:text-sm',
         svgEdit
           ? 'border-sky-500/60 bg-sky-500/15 text-sky-500 hover:bg-sky-500/25'
           : isDarkMode ? 'border-zinc-600/60 bg-zinc-800/90 text-zinc-400 hover:bg-zinc-700' : 'border-zinc-200 bg-white/90 text-zinc-500 hover:bg-zinc-100')}
       onClick={onToggleEdit}
+      onPointerDown={(e) => { if (e.pointerType !== 'mouse') e.stopPropagation(); }}
       title={svgEdit ? t('common.preview') : t('svg.editMode')}
     >
       <MousePointerClick size={12} />
@@ -237,7 +268,7 @@ export const SvgWorkbench = React.memo<{
           onPointerMove={moveSplitResize}
           onPointerUp={endSplitResize}
           onPointerCancel={endSplitResize}
-          className="group relative w-1.5 shrink-0 cursor-col-resize touch-none"
+          className="group relative w-1.5 shrink-0 cursor-col-resize touch-none pointer-coarse:w-3"
         >
           <div
             className={cn(
@@ -284,10 +315,12 @@ export const SvgWorkbench = React.memo<{
         <div
           ref={paneRef}
           data-svg-preview
-          className="relative flex min-w-0 flex-1 items-center justify-center overflow-hidden p-3 select-none"
+          className={cn('relative flex min-w-0 flex-1 items-center justify-center overflow-hidden p-3 select-none', IS_TOUCH_PRIMARY && 'touch-none')}
           style={{ ...checker, cursor: dragging ? 'grabbing' : 'default' }}
+          title={IS_TOUCH_PRIMARY ? t('svg.panHintTouch') : t('svg.panHint')}
           onContextMenu={(e) => e.preventDefault()}
           onMouseDown={startDrag}
+          {...pinchBind}
         >
           {toggleBtn}
           {url && !invalid ? (
@@ -321,6 +354,7 @@ export const SvgWorkbench = React.memo<{
               className={cn('absolute bottom-2 right-2 flex items-center gap-1 rounded-lg border p-1 shadow-lg',
                 isDarkMode ? 'border-zinc-600/60 bg-zinc-800/90' : 'border-zinc-200 bg-white/90')}
               onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+              onPointerDown={(e) => { if (e.pointerType !== 'mouse') e.stopPropagation(); }}
             >
               <span className={cn('px-1 text-[11px] tabular-nums', isDarkMode ? 'text-zinc-400' : 'text-zinc-500')}>
                 {Math.round(eff * 100)}%
