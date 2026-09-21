@@ -86,10 +86,10 @@ export const ContextMenu = React.memo<{
     <div
       ref={ref}
       className={cn(
-        "fixed z-[95] rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col select-none overflow-y-auto heid-scroll",
+        "fixed z-[95] rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col select-none overflow-y-auto heid-scroll heid-panel-fit",
         isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
       )}
-      style={{ left, top, width: PANEL_W, maxHeight: 'calc(100dvh - 8px)' }}
+      style={{ left, top, width: PANEL_W }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {menu.items.map((item, i) => (

@@ -103,6 +103,20 @@ body {
   padding-bottom: var(--heid-safe-bottom, env(safe-area-inset-bottom, 0px));
 }
 
+/* 根容器高度：不用 100dvh。dvh 要 Chromium 108+，老内核（华为自带 WebView）会整条丢弃
+   声明，根 flex 列退化成内容高度——flex-1 编辑区不再撑开，信息栏贴到半屏、下面全是空白
+   （v1.4 手机端反馈）。WebView 没有浏览器工具栏，vh 与 dvh 等价，且 vh 到处都支持。
+   也不要写成 vh+dvh 两条做兜底：Tailwind 内置 Lightning CSS 的目标写死 chrome 111，
+   会把「目标已支持」的前一条当冗余删掉。 */
+.heid-app-root {
+  height: 100vh;
+}
+
+/* 弹层最大高度同上：fixed 元素的 vh 就是布局视口，与被删的 dvh 写法等价 */
+.heid-panel-fit {
+  max-height: calc(100vh - 8px);
+}
+
 /* 键盘弹出时：底栏按钮脱离文档流沉到屏幕底（被键盘覆盖），
    信息栏成为流内最后一项直接贴住键盘上沿——不留空槽 */
 .heid-kb-open .heid-bottom-toolbar {

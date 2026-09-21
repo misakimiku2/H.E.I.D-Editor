@@ -425,7 +425,7 @@ export const FormatMenu = React.memo<{
   /* 视口内夹紧。桌面沿用原有的固定估算（560），行为不变。
      触屏不行：格子高度随系统字号变化（实测同一份内容 1.0 时面板 730、1.3 时 792），
      任何固定估算都会估小，把底部几行顶到屏幕外——面板自身 maxHeight 只到
-     100dvh-8，超出部分连内部滚动都滚不到。所以先按触发点放，再用真实渲染
+     视口高减 8（.heid-panel-fit），超出部分连内部滚动都滚不到。所以先按触发点放，再用真实渲染
      尺寸在 layout 阶段校正一次（useLayoutEffect 在绘制前跑，不会闪）。 */
   const [touchPos, setTouchPos] = useState<{ left: number; top: number } | null>(null);
   useLayoutEffect(() => {
@@ -445,10 +445,10 @@ export const FormatMenu = React.memo<{
     <div
       ref={ref}
       className={cn(
-        "fixed z-[90] rounded-xl border shadow-xl backdrop-blur-md p-2 flex flex-col gap-1.5 select-none overflow-y-auto",
+        "fixed z-[90] rounded-xl border shadow-xl backdrop-blur-md p-2 flex flex-col gap-1.5 select-none overflow-y-auto heid-panel-fit",
         isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
       )}
-      style={{ left, top, width: PANEL_W, maxHeight: 'calc(100dvh - 8px)' }}
+      style={{ left, top, width: PANEL_W }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {sections}

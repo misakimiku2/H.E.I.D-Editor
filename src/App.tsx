@@ -1473,7 +1473,7 @@ export default function App() {
     <I18nProvider lang={lang}>
     <div
       className={cn(
-        "h-dvh flex flex-col overflow-hidden relative",
+        "heid-app-root flex flex-col overflow-hidden relative",
         isDarkMode ? "bg-zinc-900 text-zinc-200" : "bg-zinc-50 text-zinc-800"
       )}
       /* 安卓键盘弹出时整列收缩（--heid-kb 由 MainActivity 经 IME insets 注入），
