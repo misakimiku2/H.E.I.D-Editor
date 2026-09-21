@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { renderMarkdownToHtml } from './markdownHtml';
 
+/* 预热：Prism 高亮是 renderMarkdownToHtml 内部的动态 import（刻意不进主包），冷启动时
+   首次加载 + vite 转译要好几秒。全量跑 71 个测试文件各起一个 worker 抢 CPU 时，
+   第一个用例就会撞上 5s 默认超时（v1.4.1 触屏批次实测复现过一次，单跑永远绿）。
+   先在这里把这条 import 链跑一遍，测的是同一份产物、只是不赶时间 */
+await renderMarkdownToHtml('```js\n0\n```', { title: 'warmup', dark: false });
+
 describe('renderMarkdownToHtml', () => {
   it('产出单文件 HTML：doctype / charset / title / 标题与行内格式', async () => {
     const html = await renderMarkdownToHtml('# 标题\n\n**bold** text', { title: 'T1', dark: false });
