@@ -1,8 +1,9 @@
 /**
  * SVG 检查面板：属性 / 图层 / 颜色 三个 tab + PNG 导出。
  * 所有编辑都经回调上抛（Workbench 统一手术式提交），面板自身不碰源码：
- * - 属性：fill/stroke 取色复用 ColorPickerPopover（拖动实时写入，连续变化合并进一条撤销）；
- *   数值/文本字段本地草稿，失焦/回车提交，避免每键一补丁；
+ * - 属性：位移 X/Y（前导 translate）+ fill/stroke 取色复用 ColorPickerPopover（拖动实时写入，
+ *   连续变化合并进一条撤销）；数值/文本字段本地草稿，失焦/回车提交，避免每键一补丁；
+ *   X/Y 两侧配 ± 步进，触屏没有方向键也能微调；
  * - 图层：权威树只读大纲，与画布选中双向联动；
  * - 颜色：调色板（fill/stroke/stop-color 聚合），点选颜色后全局替换。
  */
@@ -14,10 +15,14 @@ import type { SvgParseResult } from '../lib/svgParse';
 import { collectPalette } from '../lib/svgPalette';
 import { parseColorLiteral } from '../lib/colorLiteral';
 import { type Rgba } from '../lib/colorMath';
+import { readTranslate, setTranslate } from '../lib/svgWrite';
 import { ColorPickerPopover } from './ColorPickerPopover';
 import { copyBlobPng, pngFileName, renderSvgPng, saveBlob } from '../lib/svgExport';
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+
+/** ± 步进一步多少 SVG 用户单位：与画布方向键的默认档同值（SvgCanvas 的 ArrowLeft 等） */
+const NUDGE_STEP = 1;
 
 const rgbaToHex = ({ r, g, b, a }: Rgba): string => {
   const h = (v: number) => Math.round(v).toString(16).padStart(2, '0');
@@ -32,6 +37,10 @@ export const SvgInspector = React.memo<{
   selectedIdx: number | null;
   isDarkMode: boolean;
   onSetAttr: (idx: number, name: string, value: string | null) => void;
+  /** 按增量挪动元素（± 步进：与画布拖拽/方向键同一条合成路径） */
+  onNudge: (idx: number, dx: number, dy: number) => void;
+  /** 绝对设置前导位移（X/Y 输入框，失焦/回车提交） */
+  onSetPos: (idx: number, x: number, y: number) => void;
   onSetText: (idx: number, text: string) => void;
   onDelete: (idx: number) => void;
   onSelect: (idx: number | null) => void;
@@ -40,7 +49,7 @@ export const SvgInspector = React.memo<{
   exportText: string;
   /** 导出文件名基础（标签页标题） */
   exportBase: string;
-}>(({ parsed, selectedIdx, isDarkMode, onSetAttr, onSetText, onDelete, onSelect, onReplaceColor, exportText, exportBase }) => {
+}>(({ parsed, selectedIdx, isDarkMode, onSetAttr, onNudge, onSetPos, onSetText, onDelete, onSelect, onReplaceColor, exportText, exportBase }) => {
   const t = useT();
   const [tab, setTab] = useState<Tab>('props');
 
@@ -49,13 +58,16 @@ export const SvgInspector = React.memo<{
     : null;
 
   /* 本地草稿：切换选中/重解析时从节点重新播种 */
-  const [numDraft, setNumDraft] = useState<{ width: string; opacity: string }>({ width: '', opacity: '' });
+  const [numDraft, setNumDraft] = useState<{ width: string; opacity: string; x: string; y: string }>({ width: '', opacity: '', x: '', y: '' });
   const [textDraft, setTextDraft] = useState<string | null>(null);
   useEffect(() => {
     if (!selected) return;
+    const pos = readTranslate(selected.node.getAttribute('transform'));
     setNumDraft({
       width: selected.node.getAttribute('stroke-width') ?? '',
       opacity: selected.node.getAttribute('opacity') ?? '',
+      x: pos ? String(pos.x) : '',
+      y: pos ? String(pos.y) : '',
     });
     setTextDraft(null);
   }, [selected?.node, selectedIdx]);
@@ -89,6 +101,11 @@ export const SvgInspector = React.memo<{
   );
   const btnCls = cn(
     'shrink-0 rounded-md px-2 py-1 text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
+    isDarkMode ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200',
+  );
+  /* ± 步进退到输入框两侧，桌面紧凑、触屏撑到 44×44 */
+  const stepCls = cn(
+    'h-6 w-6 shrink-0 rounded-md text-sm leading-none transition-colors pointer-coarse:h-11 pointer-coarse:w-11 pointer-coarse:text-base',
     isDarkMode ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200',
   );
 
@@ -126,6 +143,49 @@ export const SvgInspector = React.memo<{
             onClose={() => setPickAttr(null)}
           />
         )}
+      </div>
+    );
+  };
+
+  /* ---- 位移行：X/Y 读写元素前导 translate（拖拽与方向键改的正是这一段）。
+     ± 步进是触屏出口——没有物理键盘就没有方向键微调 ---- */
+  const commitAxis = (axis: 'x' | 'y') => {
+    if (!selected || selectedIdx === null) return;
+    const cur = readTranslate(selected.node.getAttribute('transform')) ?? { x: 0, y: 0 };
+    const raw = numDraft[axis].trim();
+    const v = Number(raw);
+    if (raw === '' || !Number.isFinite(v)) {
+      /* 空/垃圾输入不动源码，草稿收回节点现值 */
+      setNumDraft(d => ({ ...d, [axis]: String(cur[axis]) }));
+      return;
+    }
+    /* 整对交给 onSetPos（与其余编辑一样落在按最新源码重解析的权威树上），
+       本面板自己拼 transform 字符串会绕过那条链路 */
+    onSetPos(selectedIdx, axis === 'x' ? v : cur.x, axis === 'y' ? v : cur.y);
+  };
+
+  const axisRow = (axis: 'x' | 'y') => {
+    const name = axis === 'x' ? t('svg.offsetX') : t('svg.offsetY');
+    const step = (sign: number) => onNudge(
+      selectedIdx!,
+      axis === 'x' ? sign * NUDGE_STEP : 0,
+      axis === 'y' ? sign * NUDGE_STEP : 0,
+    );
+    return (
+      <div className="flex items-center gap-2" data-axis={axis}>
+        <span className={cn('w-16', label)}>{name}</span>
+        <button type="button" className={stepCls} onClick={() => step(-1)} title="−">−</button>
+        <input
+          type="number" step="any"
+          aria-label={name}
+          className={inputCls}
+          value={numDraft[axis]}
+          placeholder={t('svg.notSet')}
+          onChange={(e) => setNumDraft(d => ({ ...d, [axis]: e.target.value }))}
+          onBlur={() => commitAxis(axis)}
+          onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+        />
+        <button type="button" className={stepCls} onClick={() => step(1)} title="+">+</button>
       </div>
     );
   };
@@ -216,6 +276,8 @@ export const SvgInspector = React.memo<{
                 </button>
               )}
             </div>
+            {/* 根元素不可挪（画布上的点选同样排除 0 号） */}
+            {selectedIdx! > 0 && <>{axisRow('x')}{axisRow('y')}</>}
             <div className="flex items-center gap-2"><span className={cn('w-16', label)}>fill</span><div className="min-w-0 flex-1">{colorField('fill')}</div></div>
             <div className="flex items-center gap-2"><span className={cn('w-16', label)}>stroke</span><div className="min-w-0 flex-1">{colorField('stroke')}</div></div>
             <div className="flex items-center gap-2">

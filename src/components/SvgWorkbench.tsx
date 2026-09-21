@@ -5,7 +5,7 @@ import { useT } from '../lib/i18nContext';
 import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import { parseSvg, type SvgParseResult } from '../lib/svgParse';
 import { createRenderCopy } from '../lib/svgSanitize';
-import { applyPatches, applyTranslate, deletePatch, elementPatch } from '../lib/svgWrite';
+import { applyPatches, applyTranslate, deletePatch, elementPatch, setTranslate } from '../lib/svgWrite';
 import { replaceColor } from '../lib/svgPalette';
 import { loadSvgSplitRatio, saveSvgSplitRatio, splitRatioFromClientX } from '../lib/svgLayout';
 import { usePinchZoom } from '../hooks/usePinchZoom';
@@ -301,6 +301,12 @@ export const SvgWorkbench = React.memo<{
               onSetAttr={(idx, name, value) => commitMutate(idx, n => {
                 if (value === null || value === '') n.removeAttribute(name);
                 else n.setAttribute(name, value);
+              })}
+              onNudge={(idx, dx, dy) => commitMutate(idx, n => applyTranslate(n, dx, dy))}
+              onSetPos={(idx, x, y) => commitMutate(idx, n => {
+                const v = setTranslate(n.getAttribute('transform'), x, y);
+                if (v === null) n.removeAttribute('transform');
+                else n.setAttribute('transform', v);
               })}
               onSetText={(idx, text) => commitMutate(idx, n => { n.textContent = text; })}
               onDelete={commitDelete}

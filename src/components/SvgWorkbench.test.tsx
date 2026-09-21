@@ -3,7 +3,8 @@
  * SVG 工作台组件冒烟：
  * ① 编辑模式挂载——sanitize 副本带 data-hed-idx 内联渲染；
  * ② 命中选中与拖拽提交——pointer 事件链走通、松手才提交一次补丁；
- * ③ 面板联动——图层树列出元素、调色板收集颜色并触发全局换色、fill 输入直改属性。
+ * ③ 面板联动——图层树列出元素、调色板收集颜色并触发全局换色、fill 输入直改属性；
+ * ④ 属性页的位移 X/Y——读前导 translate 播种、± 步进与绝对输入各自怎么写回源码。
  * （视觉细节不在 jsdom 断言范围：getBoundingClientRect 恒为 0，覆盖层不参与断言）
  */
 import { describe, expect, it, vi } from 'vitest';
@@ -11,6 +12,8 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+/* jsdom 不实现 scrollIntoView：图层页签里「选中行滚进视野」的副作用会抛 */
+Element.prototype.scrollIntoView = () => {};
 
 vi.mock('../lib/i18nContext', () => ({
   useT: () => (key: string, vars?: Record<string, string>) =>
@@ -162,5 +165,102 @@ describe('SvgWorkbench 编辑模式', () => {
   it('畸形 XML：画布显示无效占位，面板可切换但不崩', () => {
     const h = mount({ content: '<svg><rect></svg>' });
     expect(h.textContent).toContain('svg.invalid');
+  });
+
+  /* ---- 位移 X/Y：触屏没有方向键，微调要靠输入框 + ± 步进（v1.4.1） ---- */
+  const POS_SRC = [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">',
+    '  <rect fill="#ff0000" width="40" height="40" transform="translate(4 2)"/>',
+    '</svg>',
+  ].join('\n');
+
+  const selectRect = (h: HTMLElement) => {
+    act(() => { fire(h.querySelector('rect[data-hed-idx="1"]')!, 'pointerdown'); });
+  };
+  const axisInput = (h: HTMLElement, axis: 'x' | 'y') =>
+    h.querySelector(`[data-axis="${axis}"] input`) as HTMLInputElement;
+  const stepBtn = (h: HTMLElement, axis: 'x' | 'y', sign: -1 | 1) =>
+    Array.from(h.querySelectorAll<HTMLElement>(`[data-axis="${axis}"] button`))
+      .find(b => b.textContent === (sign < 0 ? '−' : '+'))!;
+  /** 走原生 value setter：直接赋 .value 会被 React 判为「值没变」而跳过 onChange */
+  const typeInto = (input: HTMLInputElement, v: string) => {
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    act(() => {
+      setValue.call(input, v);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  const blur = (input: HTMLInputElement) => {
+    act(() => { input.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+  };
+
+  it('选中元素后播种出位移 X/Y（读前导 translate 的两个数）', () => {
+    const h = mount({ content: POS_SRC });
+    expect(h.querySelector('[data-axis="x"]')).toBeNull();
+    selectRect(h);
+    expect(axisInput(h, 'x').value).toBe('4');
+    expect(axisInput(h, 'y').value).toBe('2');
+  });
+
+  it('± 一步 = 1 个 SVG 用户单位（与画布方向键同档），另一轴不动', () => {
+    const onContentChange = vi.fn();
+    const h = mount({ content: POS_SRC, onContentChange });
+    selectRect(h);
+    act(() => { stepBtn(h, 'x', 1).click(); });
+    expect(onContentChange.mock.calls[0][0]).toContain('transform="translate(5 2)"');
+    act(() => { stepBtn(h, 'y', -1).click(); });
+    expect(onContentChange.mock.calls[1][0]).toContain('transform="translate(4 1)"');
+  });
+
+  it('输入框失焦提交绝对值，Enter 同样提交', () => {
+    const onContentChange = vi.fn();
+    const h = mount({ content: POS_SRC, onContentChange });
+    selectRect(h);
+    typeInto(axisInput(h, 'x'), '30');
+    blur(axisInput(h, 'x'));
+    expect(onContentChange.mock.calls[0][0]).toContain('transform="translate(30 2)"');
+    axisInput(h, 'y').focus();
+    typeInto(axisInput(h, 'y'), '-6');
+    act(() => { axisInput(h, 'y').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    expect(onContentChange.mock.calls[1][0]).toContain('transform="translate(4 -6)"');
+  });
+
+  it('空输入不写源码，草稿收回节点现值', () => {
+    const onContentChange = vi.fn();
+    const h = mount({ content: POS_SRC, onContentChange });
+    selectRect(h);
+    typeInto(axisInput(h, 'x'), '');
+    blur(axisInput(h, 'x'));
+    expect(onContentChange).not.toHaveBeenCalled();
+    expect(axisInput(h, 'x').value).toBe('4');
+  });
+
+  it('两轴归零时删掉 transform 属性，源码里不留 translate(0 0)', () => {
+    const onContentChange = vi.fn();
+    const h = mount({
+      content: '<svg xmlns="http://www.w3.org/2000/svg"><rect fill="#ff0000" transform="translate(4 0)"/></svg>',
+      onContentChange,
+    });
+    selectRect(h);
+    typeInto(axisInput(h, 'x'), '0');
+    blur(axisInput(h, 'x'));
+    expect(onContentChange.mock.calls[0][0]).not.toContain('transform=');
+  });
+
+  it('触屏档 ± 按钮撑到 44×44（桌面保持紧凑）', () => {
+    const h = mount({ content: POS_SRC });
+    selectRect(h);
+    const btn = stepBtn(h, 'x', 1);
+    expect(btn.className).toContain('pointer-coarse:h-11');
+    expect(btn.className).toContain('pointer-coarse:w-11');
+    expect(btn.className).toContain('h-6');
+  });
+
+  it('根元素没有位移行（与画布一致：0 号不可挪）', () => {
+    const h = mount({ content: POS_SRC });
+    const tabs = Array.from(h.querySelectorAll('button')).filter(b => b.textContent === 'svg.tabLayers');
+    act(() => { tabs[0].click(); });
+    act(() => { (h.querySelector('[data-outline="0"]') as HTMLElement).click(); });
+    expect(h.querySelector('[data-axis="x"]')).toBeNull();
   });
 });

@@ -84,6 +84,33 @@ export function deletePatch(source: string, el: SvgElementInfo): SourcePatch | n
 /** 数值格式化：收敛浮点尘埃（两位小数），整数不带小数点，-0 归 0 */
 const fmtNum = (n: number): string => String(Math.round(n * 100) / 100);
 
+/** 前导 translate（与 composeTranslate 认的同一条），捕获组 3 为其后的其余变换 */
+const LEADING_TRANSLATE = /^\s*translate\s*\(\s*([^,()\s]+)\s*(?:,?\s*([^,()\s]+)\s*)?\)\s*(.*)$/;
+
+/**
+ * 读出前导 translate 的位移；没有前导 translate（或数值不合法）返回 null。
+ * 只认前导那一段：非前导的 translate 不在移动语义的作用域内，读了会和
+ * composeTranslate / setTranslate 的写入位置不一致。
+ */
+export function readTranslate(transform: string | null): { x: number; y: number } | null {
+  const m = transform?.match(LEADING_TRANSLATE);
+  if (!m) return null;
+  const x = parseFloat(m[1]);
+  const y = m[2] !== undefined ? parseFloat(m[2]) : 0;
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
+/**
+ * 绝对设置前导位移（检查面板 X/Y 输入框走这一条），其余变换原样跟在后面。
+ * 归零且没有其余变换时返回 null，交调用方移除属性——源码里不留 translate(0 0) 噪声。
+ */
+export function setTranslate(existing: string | null, x: number, y: number): string | null {
+  const m = existing?.match(LEADING_TRANSLATE);
+  const rest = (m ? m[3] : existing ?? '').trim();
+  if (x === 0 && y === 0) return rest || null;
+  return `translate(${fmtNum(x)} ${fmtNum(y)})${rest ? ` ${rest}` : ''}`;
+}
+
 /**
  * 把增量位移合成进 transform 字符串：已有前导 translate 则数值相加（反复拖拽不堆积），
  * 否则前插一个新的 translate，原有变换原样跟在后面。
@@ -91,7 +118,7 @@ const fmtNum = (n: number): string => String(Math.round(n * 100) / 100);
 export function composeTranslate(existing: string | null, dx: number, dy: number): string {
   const fresh = `translate(${fmtNum(dx)} ${fmtNum(dy)})`;
   if (!existing || !existing.trim()) return fresh;
-  const m = existing.match(/^\s*translate\s*\(\s*([^,()\s]+)\s*(?:,?\s*([^,()\s]+)\s*)?\)\s*(.*)$/);
+  const m = existing.match(LEADING_TRANSLATE);
   if (!m) return `${fresh} ${existing.trim()}`;
   const x = parseFloat(m[1]) + dx;
   const y = (m[2] !== undefined ? parseFloat(m[2]) : 0) + dy;
