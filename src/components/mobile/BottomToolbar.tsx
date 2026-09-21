@@ -25,12 +25,15 @@ export function BottomToolbar({
 }: BottomToolbarProps) {
   const t = useT();
   const btnCls = (disabled?: boolean) => cn(
-    'flex-1 min-h-[52px] rounded-lg flex flex-col items-center justify-center gap-0.5 transition-colors',
+    'flex-1 rounded-lg flex flex-col items-center justify-center gap-0.5 transition-colors',
     'text-[10px] font-medium',
     disabled
       ? (isDarkMode ? 'text-zinc-600' : 'text-zinc-300')
       : (isDarkMode ? 'text-zinc-300 active:bg-zinc-700/70' : 'text-zinc-600 active:bg-zinc-200/70')
   );
+
+  /* 按钮高度是查找栏停靠位置的输入之一，与 --heid-phone-toolbar 同源（见 index.css） */
+  const btnStyle = { minHeight: 'var(--heid-phone-toolbar)' };
 
   return (
     <div
@@ -40,11 +43,11 @@ export function BottomToolbar({
         isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
       )}
     >
-      <button onClick={onOpen} className={btnCls()} aria-label={t('menu.openFile')}>
+      <button onClick={onOpen} className={btnCls()} style={btnStyle} aria-label={t('menu.openFile')}>
         <FolderOpen size={19} />
         {t('common.open')}
       </button>
-      <button onClick={onUndo} disabled={!canUndo} className={btnCls(!canUndo)} aria-label={t('menu.undo')}>
+      <button onClick={onUndo} disabled={!canUndo} className={btnCls(!canUndo)} style={btnStyle} aria-label={t('menu.undo')}>
         <Undo2 size={19} />
         {t('menu.undo')}
       </button>
@@ -53,6 +56,7 @@ export function BottomToolbar({
         onClick={onSave}
         disabled={saving}
         className={cn(btnCls(saving), 'relative')}
+        style={btnStyle}
         aria-label={t('menu.save')}
       >
         <span className="relative">
@@ -63,12 +67,12 @@ export function BottomToolbar({
         </span>
         {t('menu.save')}
       </button>
-      <button onClick={onRedo} disabled={!canRedo} className={btnCls(!canRedo)} aria-label={t('menu.redo')}>
+      <button onClick={onRedo} disabled={!canRedo} className={btnCls(!canRedo)} style={btnStyle} aria-label={t('menu.redo')}>
         <Redo2 size={19} />
         {t('menu.redo')}
       </button>
       {/* 编辑/预览态都可用：预览态自动路由到预览查找（只搜渲染文本） */}
-      <button onClick={onFind} className={btnCls()} aria-label={t('find.replaceTitle')}>
+      <button onClick={onFind} className={btnCls()} style={btnStyle} aria-label={t('find.replaceTitle')}>
         <Search size={19} />
         {t('common.find')}
       </button>

@@ -1837,7 +1837,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         />
       )}
 
-      {/* 预览查找浮层：只搜索渲染后的文本（portal 渲染到 body，弹出在指针位置） */}
+      {/* 预览查找浮层：只搜索渲染后的文本（组件内部 portal 到 body，桌面/平板按指针位置浮出，
+          手机端贴窗口底缘停靠） */}
       {findOpen && (
         <PreviewFindBar
           getContainer={() => contentRef.current}

@@ -134,6 +134,28 @@ body {
   padding-bottom: 0 !important;
 }
 
+/* 手机端底部两栏的高度。查找栏的停靠位置由这两个值推导，
+   StatusStrip / BottomToolbar 也读它们——改尺寸只需改这里 */
+:root {
+  --heid-phone-strip: 48px;
+  --heid-phone-toolbar: 52px;
+}
+
+/* 手机端查找栏：贴窗口底缘，而不是贴编辑窗格底缘。
+   窗格开着 2/3 屏的文件树时只剩 137dp，装不下输入框加四个 48dp 按钮（会溢出屏幕）；
+   查找是窗口级的工具，本来就该占满整幅。
+   键盘让位用 --heid-kb：本应用的 WebView 不因输入法收缩布局视口
+   （Chrome 99 与 124 实测 innerHeight 都不变），所以它是键盘高度的唯一来源 */
+.heid-find-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--heid-phone-strip) + var(--heid-phone-toolbar) + var(--heid-safe-bottom, 0px));
+}
+.heid-kb-open .heid-find-dock {
+  bottom: calc(var(--heid-kb, 0px) + var(--heid-phone-strip));
+}
+
 /* 底部抽屉动画 */
 @keyframes heid-sheet-up {
   from { transform: translateY(100%); }

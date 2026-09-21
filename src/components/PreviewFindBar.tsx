@@ -4,6 +4,8 @@ import {
   ArrowDown, ArrowUp, CaseSensitive, Regex, WholeWord, X,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY } from '../lib/platform';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { clampBarPosition } from '../lib/position';
 import { findMatches, type MatchRange, type SearchOptions } from '../lib/searchCore';
 import type { PointerPos } from '../hooks/useLastPointer';
@@ -105,9 +107,12 @@ function rangeForMatch(spans: TextSpan[], m: MatchRange): Range | null {
  * Markdown 预览查找浮层：只搜索最终渲染出来的字符（markdown 语法标记不在渲染树中），
  * 匹配项经 CSS Custom Highlight API 高亮，导航循环回绕并滚动到当前项。
  * 不提供替换/跳行（渲染文本无法可靠映射回源码偏移）。
+ * 手机端为贴窗口底缘的停靠条，控件分两行排布；桌面与平板仍是指针定位浮层。
  */
 export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, onClose }: PreviewFindBarProps) {
   const t = useT();
+  /* 手机端停靠形态：贴窗口底缘、按 --heid-kb 让位键盘（定位见 index.css 的 .heid-find-dock） */
+  const docked = IS_ANDROID_APP && useMediaQuery(NARROW_QUERY);
   const [query, setQuery] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [regexp, setRegexp] = useState(false);
@@ -126,12 +131,13 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
   getPointerRef.current = getPointer;
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   useLayoutEffect(() => {
+    if (docked) return;
     const el = rootRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     const p = getPointerRef.current?.() ?? { x: -1, y: -1 };
     setPos(clampBarPosition(p.x, p.y, r.width, r.height));
-  }, []);
+  }, [docked]);
 
   const clearHighlights = useCallback(() => {
     if (!supportsHighlightApi()) return;
@@ -228,18 +234,21 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
   };
 
   const optBtn = (active: boolean) => cn(
-    'w-7 h-7 rounded-md flex items-center justify-center transition-colors',
+    IS_TOUCH_PRIMARY ? 'w-12 h-12' : 'w-7 h-7',
+    'rounded-md flex items-center justify-center transition-colors shrink-0',
     active
       ? (isDarkMode ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-300 text-zinc-800')
       : (isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200')
   );
 
-  const navBtn = 'w-7 h-7 rounded-md flex items-center justify-center transition-colors shrink-0 ' + (
+  const navBtn = (IS_TOUCH_PRIMARY ? 'w-12 h-12 ' : 'w-7 h-7 ') + 'rounded-md flex items-center justify-center transition-colors shrink-0 ' + (
     isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200'
   );
 
+  /* 触屏字号 16px：低于 16px 会让 WebView 在聚焦时自动放大整页 */
   const inputCls = cn(
-    'h-7 px-2 rounded-md border text-xs outline-none transition-colors w-full',
+    IS_TOUCH_PRIMARY ? 'h-12 px-3 text-base' : 'h-7 px-2 text-xs',
+    'rounded-md border outline-none transition-colors w-full min-w-0',
     isDarkMode
       ? 'border-zinc-600 bg-zinc-900 text-zinc-200 focus:border-blue-500 placeholder:text-zinc-600'
       : 'border-zinc-300 bg-white text-zinc-800 focus:border-blue-500 placeholder:text-zinc-400'
@@ -249,34 +258,11 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
     ? (query ? t('find.noResults') : '')
     : current < 0 ? `${count.total}${count.capped ? '+' : ''}` : `${current + 1}/${count.total}${count.capped ? '+' : ''}`;
 
-  return createPortal(
-    <div
-      ref={rootRef}
-      className={cn(
-        'fixed z-[70] w-[min(440px,92vw)] rounded-lg border shadow-xl p-1.5 flex items-center gap-1.5',
-        isDarkMode ? 'border-zinc-600 bg-zinc-800/95 backdrop-blur-sm' : 'border-zinc-300 bg-white/95 backdrop-blur-sm'
-      )}
-      style={pos ?? { visibility: 'hidden', left: -9999, top: 0 }}
-      role="search"
-    >
-      <div className="relative flex-1 min-w-0">
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={t('find.placeholderPreview')}
-          className={cn(inputCls, 'pr-16')}
-        />
-        <span
-          className={cn(
-            'absolute right-2 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none tabular-nums',
-            isDarkMode ? 'text-zinc-500' : 'text-zinc-400'
-          )}
-        >
-          {countLabel}
-        </span>
-      </div>
+  /* 行容器：触屏相邻按钮之间留足 8dp，避免命中区互相偷走 */
+  const row = cn('flex items-center', IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5');
+
+  const optionButtons = (
+    <>
       <button onClick={() => setCaseSensitive(v => !v)} className={optBtn(caseSensitive)} title={t('find.caseSensitive')} aria-label={t('find.caseSensitive')}>
         <CaseSensitive size={15} />
       </button>
@@ -286,7 +272,11 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
       <button onClick={() => setRegexp(v => !v)} className={optBtn(regexp)} title={t('find.useRegex')} aria-label={t('find.useRegex')}>
         <Regex size={15} />
       </button>
-      <div className={cn('w-px h-5 shrink-0', isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')} />
+    </>
+  );
+
+  const navButtons = (
+    <>
       <button onClick={() => step(-1)} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
         <ArrowUp size={14} />
       </button>
@@ -296,7 +286,73 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
       <button onClick={onClose} className={navBtn} title={t('find.closeTip')} aria-label={t('find.closeFind')}>
         <X size={14} />
       </button>
-    </div>,
-    document.body,
+    </>
   );
+
+  const findInput = (countInside: boolean) => (
+    <div className="relative flex-1 min-w-0">
+      <input
+        ref={inputRef}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={onKeyDown}
+        placeholder={t('find.placeholderPreview')}
+        className={cn(inputCls, countInside && 'pr-16')}
+      />
+      {countInside && (
+        <span
+          className={cn(
+            'absolute right-2 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none tabular-nums',
+            isDarkMode ? 'text-zinc-500' : 'text-zinc-400'
+          )}
+        >
+          {countLabel}
+        </span>
+      )}
+    </div>
+  );
+
+  const panel = (
+    <div
+      ref={rootRef}
+      className={cn(
+        'border shadow-xl',
+        isDarkMode ? 'border-zinc-600 bg-zinc-800/95 backdrop-blur-sm' : 'border-zinc-300 bg-white/95 backdrop-blur-sm',
+        docked
+          ? 'heid-find-dock z-[70] rounded-none border-x-0 border-b-0 p-2 flex flex-col gap-2'
+          : cn('fixed z-[70] w-[min(440px,92vw)] rounded-lg p-1.5 flex items-center', IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5')
+      )}
+      style={docked ? undefined : (pos ?? { visibility: 'hidden', left: -9999, top: 0 })}
+      role="search"
+    >
+      {docked ? (
+        <>
+          <div className={row}>
+            {findInput(false)}
+            {navButtons}
+          </div>
+          <div className={row}>
+            {optionButtons}
+            <span
+              className={cn(
+                'flex-1 min-w-0 truncate text-right text-xs tabular-nums',
+                isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+              )}
+            >
+              {countLabel}
+            </span>
+          </div>
+        </>
+      ) : (
+        <>
+          {findInput(true)}
+          {optionButtons}
+          <div className={cn('w-px h-5 shrink-0', isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')} />
+          {navButtons}
+        </>
+      )}
+    </div>
+  );
+
+  return createPortal(panel, document.body);
 }

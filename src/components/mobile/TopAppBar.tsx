@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  FileText, FolderOpen, Folder, Save, SaveAll, Plus, MoreVertical,
-  Info, X, Table, Image as ImageIcon, Settings, Keyboard, Link2, GitCompare,
-  Eye, Pencil, Code,
+  FileText, Folder, FolderOpen,
+  Info, SaveAll, Plus, MoreVertical,
+  Keyboard, Link2, GitCompare,
+  Eye, Pencil, Code, Table, Image as ImageIcon, Settings,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useT } from '../../lib/i18nContext';
@@ -16,8 +17,7 @@ interface TopAppBarProps {
   tabCount: number;
   onOpenTabs: () => void;
   onNew: () => void;
-  onOpen: () => void;
-  onSave: () => void;
+  /** 另存为（底栏的「保存」在无名文档上也会走系统另存为，但这里保留显式入口） */
   onSaveAs: () => void;
   onInsertTable: () => void;
   onInsertImage: () => void;
@@ -25,7 +25,6 @@ interface TopAppBarProps {
   onImportUrl?: () => void;
   /** Diff 时间线（外部修改 / 软件内编辑） */
   onOpenDiff?: () => void;
-  onCloseTab: () => void;
   onSettings: () => void;
   onShortcuts: () => void;
   onAbout: () => void;
@@ -46,12 +45,14 @@ interface TopAppBarProps {
 /**
  * 手机端顶栏：标签数入口 + 当前文件名（脏点）+ 溢出菜单。
  * 取代桌面端自绘标题栏与菜单栏（安卓没有窗口按钮的概念）。
- * P2 计划：溢出菜单按 isMarkdown 增加「插入图片/插入表格」入口。
+ * 溢出菜单只放底栏没有的：新建 / 另存为 / 导入网址 / Diff / markdown 插入 / 设置等。
+ * 打开文件、保存、关闭当前标签页已移除（v1.4.1 反馈）——前两项底部工具栏已有，
+ * 关标签在标签页抽屉里做，不该藏进二级菜单。
  */
 export function TopAppBar({
   isDarkMode, title, isDirty, isMarkdown, saving, tabCount,
-  onOpenTabs, onNew, onOpen, onSave, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
-  onCloseTab, onSettings, onShortcuts, onAbout,
+  onOpenTabs, onNew, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
+  onSettings, onShortcuts, onAbout,
   treeOpen, hasTreeRoot, onToggleTree,
   canToggleView, view, onToggleView,
   csvView, onToggleCsvView,
@@ -81,7 +82,7 @@ export function TopAppBar({
   }, [menuOpen]);
 
   const itemCls = cn(
-    'mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 min-h-[44px] text-sm font-medium flex items-center gap-3 transition-colors',
+    'mx-1.5 w-[calc(100%-12px)] rounded-lg px-3 min-h-[48px] text-sm font-medium flex items-center gap-3 transition-colors',
     isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700'
   );
 
@@ -114,7 +115,7 @@ export function TopAppBar({
       <button
         onClick={onOpenTabs}
         className={cn(
-          'flex items-center gap-1 px-2.5 h-11 rounded-md shrink-0 transition-colors',
+          'flex items-center gap-1 px-2.5 h-12 rounded-md shrink-0 transition-colors',
           isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600'
         )}
         aria-label={t('mobile.openTabs')}
@@ -147,7 +148,7 @@ export function TopAppBar({
         <button
           onClick={onToggleView}
           className={cn(
-            'w-11 h-11 rounded-md flex items-center justify-center shrink-0 transition-colors',
+            'w-12 h-12 rounded-md flex items-center justify-center shrink-0 transition-colors',
             isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500'
           )}
           aria-label={view === 'preview' ? t('mobile.switchToEdit') : t('mobile.switchToPreview')}
@@ -161,7 +162,7 @@ export function TopAppBar({
         <button
           onClick={onToggleCsvView}
           className={cn(
-            'w-11 h-11 rounded-md flex items-center justify-center shrink-0 transition-colors',
+            'w-12 h-12 rounded-md flex items-center justify-center shrink-0 transition-colors',
             isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500'
           )}
           aria-label={csvView === 'text' ? t('csv.grid') : t('csv.text')}
@@ -175,7 +176,7 @@ export function TopAppBar({
         <button
           onClick={onToggleTree}
           className={cn(
-            'w-11 h-11 rounded-md flex items-center justify-center shrink-0 transition-colors',
+            'w-12 h-12 rounded-md flex items-center justify-center shrink-0 transition-colors',
             treeOpen
               ? (isDarkMode ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-200 text-zinc-700')
               : (isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500')
@@ -190,7 +191,7 @@ export function TopAppBar({
         <button
           onClick={() => setMenuOpen(v => !v)}
           className={cn(
-            'w-11 h-11 rounded-md flex items-center justify-center transition-colors',
+            'w-12 h-12 rounded-md flex items-center justify-center transition-colors',
             menuOpen
               ? (isDarkMode ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-200 text-zinc-700')
               : (isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500')
@@ -208,10 +209,8 @@ export function TopAppBar({
               isDarkMode ? 'border-zinc-700/70 bg-zinc-800/70' : 'border-zinc-200/80 bg-white/70'
             )}
           >
-            {menuItem(<FolderOpen size={16} className="shrink-0" />, t('menu.openFile'), onOpen)}
-            {menuItem(<Save size={16} className="shrink-0" />, t('menu.save'), onSave, { disabled: saving })}
-            {menuItem(<SaveAll size={16} className="shrink-0" />, t('menu.saveAs'), onSaveAs, { disabled: saving })}
             {menuItem(<Plus size={16} className="shrink-0" />, t('menu.newFile'), onNew)}
+            {menuItem(<SaveAll size={16} className="shrink-0" />, t('menu.saveAs'), onSaveAs, { disabled: saving })}
             {onOpenDiff && menuItem(<GitCompare size={16} className="shrink-0" />, t('diff.menuTitle'), onOpenDiff)}
             {onImportUrl && menuItem(<Link2 size={16} className="shrink-0" />, t('import.menu'), onImportUrl)}
             {isMarkdown && (
@@ -221,7 +220,6 @@ export function TopAppBar({
               </>
             )}
             <div className={cn('h-px mx-3 my-1', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
-            {menuItem(<X size={16} className="shrink-0" />, t('menu.closeCurrentTab'), onCloseTab)}
             {menuItem(<Settings size={16} className="shrink-0" />, t('menu.settings'), onSettings)}
             {menuItem(<Keyboard size={16} className="shrink-0" />, t('menu.shortcuts'), onShortcuts)}
             {menuItem(<Info size={16} className="shrink-0" />, t('menu.about'), onAbout)}

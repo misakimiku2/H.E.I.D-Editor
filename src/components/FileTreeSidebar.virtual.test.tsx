@@ -69,7 +69,7 @@ function mount() {
   act(() => {
     root!.render(
       <mod.FileTreeSidebar
-        rootPath="C:/big" open overlay={false} isDarkMode={false} activeTabId="t1"
+        rootPath="C:/big" open isDarkMode={false} activeTabId="t1"
         tabs={[]} onOpenFile={() => {}} onRootChange={() => {}} onClose={() => {}}
         canManage={false} askDangerConfirm={() => Promise.resolve(false)}
         onTabsRenamed={() => {}} onFileDeleted={() => {}}

@@ -120,12 +120,12 @@ function HeidMark({ className }: { className?: string }) {
   );
 }
 
-/* 主菜单/弹层菜单条目统一类：触屏行高 ≥44、字号 sm（桌面保持桌面密度） */
+/* 主菜单/弹层菜单条目统一类：触屏行高 ≥48、字号 sm（桌面保持桌面密度） */
 const MENU_ITEM_CLS = IS_TOUCH_PRIMARY
-  ? 'mx-1.5 w-[calc(100%-12px)] min-h-[44px] rounded-lg px-3 text-sm font-medium flex items-center gap-2.5 transition-colors'
+  ? 'mx-1.5 w-[calc(100%-12px)] min-h-[48px] rounded-lg px-3 text-sm font-medium flex items-center gap-2.5 transition-colors'
   : 'mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 transition-colors';
 const MENU_ITEM_LIGHT_CLS = IS_TOUCH_PRIMARY
-  ? 'mx-1.5 w-[calc(100%-12px)] min-h-[44px] rounded-lg px-3 text-sm flex items-center gap-2.5 transition-colors'
+  ? 'mx-1.5 w-[calc(100%-12px)] min-h-[48px] rounded-lg px-3 text-sm flex items-center gap-2.5 transition-colors'
   : 'mx-1.5 w-[calc(100%-12px)] rounded-lg px-2.5 py-1.5 text-xs flex items-center gap-2 transition-colors';
 
 export default function App() {
@@ -1491,14 +1491,11 @@ export default function App() {
           tabCount={editor.tabs.length}
           onOpenTabs={() => setTabSheetOpen(true)}
           onNew={file.handleNewFile}
-          onOpen={file.handleOpenFile}
-          onSave={file.handleSave}
           onSaveAs={file.handleSaveAs}
           onImportUrl={isTauri ? () => setUrlImportOpen(true) : undefined}
           onOpenDiff={() => setDiffModalOpen(true)}
           onInsertTable={() => { if (isMarkdown) previewRef.current?.insertTable(); }}
           onInsertImage={() => { if (isMarkdown) previewRef.current?.openImageModal(); }}
-          onCloseTab={() => activeTab && void file.closeTab(activeTab.id)}
           onSettings={() => setSettingsOpen(true)}
           onShortcuts={() => setShortcutsOpen(true)}
           onAbout={() => setAboutOpen(true)}
@@ -2126,14 +2123,12 @@ export default function App() {
       </div>
       )}
 
-      {/* editor area（桌面/平板：文件树侧栏开启时编辑区让位；手机=覆盖抽屉不占布局） */}
+      {/* editor area（三端一致：文件树是推拉式侧栏，开启时编辑区让位） */}
       <div className="flex flex-1 overflow-hidden">
         {treeOpen && isTauri && treeRootPath && (
           <FileTreeSidebar
             rootPath={treeRootPath}
             open={treeOpen}
-            /* 平板与桌面同为推拉式（挤压编辑区+可拖宽）；仅手机用覆盖抽屉 */
-            overlay={isPhone}
             isDarkMode={isDarkMode}
             activeTabId={editor.activeTabId}
             tabs={editor.tabs}
@@ -2487,13 +2482,14 @@ export default function App() {
           />
         )}
 
-        {/* 设置弹窗 */}
+        {/* 设置：手机端整页，平板/桌面居中弹窗 */}
         {settingsOpen && (
           <SettingsDialog
             isDarkMode={isDarkMode}
             settings={settings}
             onChange={setSettings}
             onClose={() => setSettingsOpen(false)}
+            asPage={isPhone}
           />
         )}
 

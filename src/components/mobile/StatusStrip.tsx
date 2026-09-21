@@ -26,16 +26,20 @@ export function StatusStrip({
   isDarkMode, languageLabel, encodingLabel, eolLabel, cursorLabel,
   onEncoding, onEol, menuSlot,
 }: StatusStripProps) {
+  /* 「LF」「UTF-8」这类标签很短，只给 min-h 会让命中区退化成 36×48——
+     两个方向都要到 48dp，所以补 min-w 并让文字居中 */
   const chip = cn(
-    'min-h-[44px] px-2.5 rounded font-medium transition-colors flex items-center gap-1 shrink-0',
+    'min-h-[48px] min-w-[48px] px-2.5 rounded font-medium transition-colors flex items-center justify-center gap-1 shrink-0',
     isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-200 text-zinc-600'
   );
   return (
     <div
       className={cn(
-        'border-t relative flex items-center px-3 gap-1.5 text-[11px] shrink-0 h-11',
+        'border-t relative flex items-center px-3 gap-1.5 text-[11px] shrink-0',
         isDarkMode ? 'border-zinc-700 bg-zinc-800 text-zinc-500' : 'border-zinc-200 bg-zinc-100 text-zinc-500'
       )}
+      /* 高度是查找栏停靠位置的输入之一，与 --heid-phone-strip 同源（见 index.css） */
+      style={{ height: 'var(--heid-phone-strip)' }}
     >
       <span className="shrink-0">{languageLabel}</span>
       <span className="opacity-50 shrink-0">·</span>

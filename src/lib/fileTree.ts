@@ -311,7 +311,7 @@ export function saveTreeRoot(path: string | null, storage: Storage | null = defa
   } catch { /* 忽略持久化失败 */ }
 }
 
-/* ---------- 侧栏宽度记忆（localStorage）：桌面端拖拽调宽，重启后保留 ---------- */
+/* ---------- 侧栏宽度记忆（localStorage）：推拉式侧栏拖拽调宽，重启后保留 ---------- */
 
 const TREE_SIDEBAR_WIDTH_KEY = 'heid-tree-sidebar-width';
 
@@ -319,23 +319,54 @@ const TREE_SIDEBAR_WIDTH_KEY = 'heid-tree-sidebar-width';
 export const TREE_SIDEBAR_MIN_WIDTH = 256;
 export const TREE_SIDEBAR_MAX_WIDTH = 400;
 
-/** 收敛到 [256, 400] 并取整 */
-export function clampTreeSidebarWidth(width: number): number {
-  return Math.min(TREE_SIDEBAR_MAX_WIDTH, Math.max(TREE_SIDEBAR_MIN_WIDTH, Math.round(width)));
+/**
+ * 手机端不按 dp 定档，按视口比例算：整屏只有 ~411dp，桌面的 256dp 下限会把代码区压到
+ * 155dp，而手机上看文件树时本来也不指望同时读代码。默认占 2/3 屏，最宽 4/5。
+ */
+export const TREE_SIDEBAR_PHONE_RATIO = 2 / 3;
+export const TREE_SIDEBAR_PHONE_MAX_RATIO = 4 / 5;
+
+export interface TreeSidebarBounds { min: number; max: number }
+
+/** 宽屏（桌面 / 平板）档：稳定引用，可直接当 effect 依赖 */
+export const TREE_SIDEBAR_WIDE_BOUNDS: TreeSidebarBounds = {
+  min: TREE_SIDEBAR_MIN_WIDTH,
+  max: TREE_SIDEBAR_MAX_WIDTH,
+};
+
+/**
+ * 按形态取上下限。窄屏每次调用都读当前视口宽，所以旋转 / 折叠屏展开后重新收敛不会跑偏。
+ */
+export function treeSidebarBounds(narrow: boolean, viewportWidth: number): TreeSidebarBounds {
+  if (!narrow) return TREE_SIDEBAR_WIDE_BOUNDS;
+  const min = Math.round(viewportWidth * TREE_SIDEBAR_PHONE_RATIO);
+  return { min, max: Math.round(viewportWidth * TREE_SIDEBAR_PHONE_MAX_RATIO) };
 }
 
-export function loadTreeSidebarWidth(storage: Storage | null = defaultStorage()): number {
+/** 收敛到给定上下限（缺省桌面档）并取整 */
+export function clampTreeSidebarWidth(width: number, bounds: TreeSidebarBounds = TREE_SIDEBAR_WIDE_BOUNDS): number {
+  return Math.min(bounds.max, Math.max(bounds.min, Math.round(width)));
+}
+
+export function loadTreeSidebarWidth(
+  storage: Storage | null = defaultStorage(),
+  bounds: TreeSidebarBounds = TREE_SIDEBAR_WIDE_BOUNDS,
+): number {
   try {
     const raw = storage?.getItem(TREE_SIDEBAR_WIDTH_KEY) ?? null;
     const parsed = raw !== null ? Number(raw) : NaN;
-    if (Number.isFinite(parsed)) return clampTreeSidebarWidth(parsed);
+    if (Number.isFinite(parsed)) return clampTreeSidebarWidth(parsed, bounds);
   } catch { /* 忽略持久化失败 */ }
-  return TREE_SIDEBAR_MIN_WIDTH;
+  return bounds.min;
 }
 
-export function saveTreeSidebarWidth(width: number, storage: Storage | null = defaultStorage()): void {
+export function saveTreeSidebarWidth(
+  width: number,
+  storage: Storage | null = defaultStorage(),
+  bounds: TreeSidebarBounds = TREE_SIDEBAR_WIDE_BOUNDS,
+): void {
   try {
-    storage?.setItem(TREE_SIDEBAR_WIDTH_KEY, String(clampTreeSidebarWidth(width)));
+    storage?.setItem(TREE_SIDEBAR_WIDTH_KEY, String(clampTreeSidebarWidth(width, bounds)));
   } catch { /* 忽略持久化失败 */ }
 }
 

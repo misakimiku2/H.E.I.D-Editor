@@ -11,6 +11,7 @@ const zh = {
   'status.cursor': '行 {line}, 列 {col}',
 
   'common.close': '关闭',
+  'common.back': '返回',
   'common.done': '完成',
   'common.resetDefault': '恢复默认',
   'common.confirm': '确认',
@@ -687,6 +688,7 @@ const en: Record<MessageKey, string> = {
   'status.cursor': 'Ln {line}, Col {col}',
 
   'common.close': 'Close',
+  'common.back': 'Back',
   'common.done': 'Done',
   'common.resetDefault': 'Reset to Defaults',
   'common.confirm': 'Confirm',

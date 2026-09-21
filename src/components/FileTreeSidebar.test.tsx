@@ -40,7 +40,6 @@ function props() {
   return {
     rootPath: 'C:/proj',
     open: true,
-    overlay: false,
     isDarkMode: false,
     activeTabId: 't1',
     tabs: [{ id: 't1', path: null, isDirty: false }],

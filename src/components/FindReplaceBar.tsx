@@ -6,7 +6,8 @@ import {
   WholeWord, X, Hash,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { IS_TOUCH_PRIMARY } from '../lib/platform';
+import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY } from '../lib/platform';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { clampBarPosition } from '../lib/position';
 import { setFindMatchesEffect } from '../lib/editorSearch';
 import {
@@ -43,10 +44,14 @@ interface MatchState {
  * 查找 / 替换 / 跳转到行浮层（三端统一自绘，不使用 CodeMirror 官方面板）：
  * - 计数与高亮经 setFindMatchesEffect 下发给 editorSearch 扩展；
  * - 导航在匹配列表上循环回绕，替换支持正则 $1 引用；
- * - 手机端为近全宽紧凑布局，触控目标 ≥28px。
+ * - 手机端不用「指针位置浮层」：改成贴窗口底缘的停靠条（.heid-find-dock，见 index.css），
+ *   键盘弹出时按 --heid-kb 上移，控件按行重排保证每项完整可见，触控目标 48dp。
  */
 export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, canReplace, getPointer, subscribeViewUpdate, onClose }: FindReplaceBarProps) {
   const t = useT();
+  /* 手机端停靠形态：窄屏安卓才停靠。定位见 index.css 的 .heid-find-dock——
+     贴窗口底缘并按 --heid-kb 让位键盘，整幅宽度，不受文件树挤占窗格影响 */
+  const docked = IS_ANDROID_APP && useMediaQuery(NARROW_QUERY);
   const [query, setQuery] = useState('');
   const [replaceText, setReplaceText] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
@@ -60,18 +65,19 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   const matchStateRef = useRef<MatchState>({ matches: [], capped: false, error: null });
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const gotoInputRef = useRef<HTMLInputElement | null>(null);
-  /* 弹出定位：测量自身尺寸后按指针位置钳制（仅弹出时计算一次，不跟随） */
+  /* 弹出定位（仅浮层形态）：测量自身尺寸后按指针位置钳制（打开时算一次，不跟随） */
   const rootRef = useRef<HTMLDivElement | null>(null);
   const getPointerRef = useRef(getPointer);
   getPointerRef.current = getPointer;
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   useLayoutEffect(() => {
+    if (docked) return;
     const el = rootRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     const p = getPointerRef.current?.() ?? { x: -1, y: -1 };
     setPos(clampBarPosition(p.x, p.y, r.width, r.height));
-  }, []);
+  }, [docked]);
 
   const optionsRef = useRef<SearchOptions>({ query: '', caseSensitive: false, regexp: false, wholeWord: false });
   optionsRef.current = { query, caseSensitive, regexp, wholeWord };
@@ -111,14 +117,14 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   }, [query, caseSensitive, regexp, wholeWord, rescan]);
 
   /* 打开即聚焦查找输入（跳行模式聚焦行号输入）。
-     首帧浮层尚未测得位置时是 visibility:hidden，hidden 元素 focus() 静默无效，
-     因此等 pos 就绪（浮层可见）后再聚焦 */
+     浮层形态下首帧尚未测得位置时是 visibility:hidden，hidden 元素 focus() 静默无效，
+     因此等 pos 就绪（浮层可见）后再聚焦；停靠形态没有这一步，挂载即可聚焦 */
   useEffect(() => {
-    if (!pos) return;
+    if (!docked && !pos) return;
     (gotoOpen ? gotoInputRef : findInputRef).current?.focus();
     if (!gotoOpen) findInputRef.current?.select();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pos]);
+  }, [pos, docked]);
 
   /* 文档与选区变化跟随：文档变化重扫，纯选区移动仅更新当前下标。
      订阅经 CodeEditor 的视图更新分发（挂在根配置里）——早先用 StateEffect.appendConfig 追加监听器，
@@ -239,23 +245,24 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   };
 
   const optBtn = (active: boolean) => cn(
-    IS_TOUCH_PRIMARY ? 'w-10 h-10' : 'w-7 h-7',
-    'rounded-md flex items-center justify-center transition-colors',
+    IS_TOUCH_PRIMARY ? 'w-12 h-12' : 'w-7 h-7',
+    'rounded-md flex items-center justify-center transition-colors shrink-0',
     active
       ? (isDarkMode ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-300 text-zinc-800')
       : (isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200')
   );
 
-  /* 输入框毛玻璃：半透明底 + 背景模糊，聚焦时略微加深保证可读性 */
+  /* 输入框毛玻璃：半透明底 + 背景模糊，聚焦时略微加深保证可读性。
+     触屏字号 16px——低于 16px 会让 WebView 在聚焦时自动放大整页 */
   const inputCls = cn(
-    IS_TOUCH_PRIMARY ? 'h-10 px-3 text-sm' : 'h-7 px-2 text-xs',
-    'rounded-md border outline-none transition-colors w-full backdrop-blur-md',
+    IS_TOUCH_PRIMARY ? 'h-12 px-3 text-base' : 'h-7 px-2 text-xs',
+    'rounded-md border outline-none transition-colors w-full min-w-0 flex-1 backdrop-blur-md',
     isDarkMode
       ? 'border-zinc-600 bg-zinc-900/45 text-zinc-200 focus:border-blue-500 focus:bg-zinc-900/70 placeholder:text-zinc-600'
       : 'border-zinc-300 bg-white/55 text-zinc-800 focus:border-blue-500 focus:bg-white/85 placeholder:text-zinc-400'
   );
 
-  const navBtn = (IS_TOUCH_PRIMARY ? 'w-10 h-10 ' : 'w-7 h-7 ') + 'rounded-md flex items-center justify-center transition-colors shrink-0 ' + (
+  const navBtn = (IS_TOUCH_PRIMARY ? 'w-12 h-12 ' : 'w-7 h-7 ') + 'rounded-md flex items-center justify-center transition-colors shrink-0 ' + (
     isDarkMode ? 'text-zinc-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-200'
   );
 
@@ -267,111 +274,166 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
         ? `${current + 1}/${matchStateRef.current.matches.length} · ${t('find.matchTotal', { total: count.total })}`
         : `${current + 1}/${count.total}`;
 
-  return createPortal(
+  /* 行容器：触屏相邻按钮之间留足 8dp，避免命中区互相偷走 */
+  const row = cn('flex items-center', IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5');
+
+  const divider = <div className={cn('w-px h-5 shrink-0', isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')} />;
+
+  const expandBtn = canReplace && (
+    <button
+      onClick={() => setReplaceOpen(v => !v)}
+      className={navBtn}
+      title={replaceOpen ? t('find.collapseReplace') : t('find.expandReplace')}
+      aria-label={replaceOpen ? t('find.collapseReplace') : t('find.expandReplace')}
+    >
+      <ChevronDown size={14} className={cn('transition-transform', replaceOpen && 'rotate-180')} />
+    </button>
+  );
+
+  const optionButtons = (
+    <>
+      <button onClick={() => setCaseSensitive(v => !v)} className={optBtn(caseSensitive)} title={t('find.caseSensitive')} aria-label={t('find.caseSensitive')}>
+        <CaseSensitive size={15} />
+      </button>
+      <button onClick={() => setWholeWord(v => !v)} className={optBtn(wholeWord)} title={t('find.wholeWord')} aria-label={t('find.wholeWord')}>
+        <WholeWord size={15} />
+      </button>
+      <button onClick={() => setRegexp(v => !v)} className={optBtn(regexp)} title={t('find.useRegex')} aria-label={t('find.useRegex')}>
+        <Regex size={15} />
+      </button>
+    </>
+  );
+
+  const navButtons = (
+    <>
+      <button onClick={goPrev} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
+        <ArrowUp size={14} />
+      </button>
+      <button onClick={goNext} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.nextTip')} aria-label={t('find.nextMatch')}>
+        <ArrowDown size={14} />
+      </button>
+      <button onClick={close} className={navBtn} title={t('find.closeTip')} aria-label={t('find.closeFind')}>
+        <X size={14} />
+      </button>
+    </>
+  );
+
+  const findInput = (countInside: boolean) => (
+    <div className="relative flex-1 min-w-0">
+      <input
+        ref={findInputRef}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => onKeyDown(e, 'find')}
+        placeholder={t('find.placeholderFind')}
+        className={cn(inputCls, countInside && 'pr-16')}
+      />
+      {countInside && (
+        <span
+          className={cn(
+            'absolute right-2 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none tabular-nums',
+            matchStateRef.current.error ? 'text-red-500' : (isDarkMode ? 'text-zinc-500' : 'text-zinc-400')
+          )}
+        >
+          {countLabel}
+        </span>
+      )}
+    </div>
+  );
+
+  /** 替换行：行首/行尾的占位块只用于浮层形态与上一行的按钮对齐 */
+  const replaceRow = replaceOpen && (
+    <div className={row}>
+      {!docked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-12' : 'w-7')} />}
+      <input
+        value={replaceText}
+        onChange={(e) => setReplaceText(e.target.value)}
+        onKeyDown={(e) => onKeyDown(e, 'replace')}
+        placeholder={t('find.placeholderReplace')}
+        className={inputCls}
+      />
+      {divider}
+      <button onClick={replaceCurrent} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.replaceTip')} aria-label={t('find.replaceCurrent')}>
+        <Replace size={15} />
+      </button>
+      <button onClick={replaceAll} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.replaceAll')} aria-label={t('find.replaceAll')}>
+        <ReplaceAll size={15} />
+      </button>
+      {!docked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-[132px]' : 'w-14')} />}
+    </div>
+  );
+
+  const gotoRow = gotoOpen && (
+    <div className={row}>
+      <div className={cn('shrink-0 flex justify-center', IS_TOUCH_PRIMARY ? 'w-12' : 'w-7')}>
+        <Hash size={13} className={isDarkMode ? 'text-zinc-500' : 'text-zinc-400'} />
+      </div>
+      <input
+        ref={gotoInputRef}
+        value={gotoLineText}
+        onChange={(e) => setGotoLineText(e.target.value.replace(/[^\d]/g, ''))}
+        onKeyDown={(e) => onKeyDown(e, 'goto')}
+        placeholder={t('find.placeholderGoto')}
+        className={inputCls}
+        inputMode="numeric"
+      />
+      <button onClick={jumpToLine} disabled={!gotoLineText} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.gotoTip')} aria-label={t('find.gotoLine')}>
+        <ArrowDown size={14} />
+      </button>
+      {!docked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-[132px]' : 'w-[86px]')} />}
+    </div>
+  );
+
+  const panel = (
     <div
       ref={rootRef}
       className={cn(
-        'fixed z-[70] w-[min(540px,92vw)] rounded-lg border shadow-xl p-1.5 flex flex-col gap-1.5',
-        isDarkMode ? 'border-zinc-600 bg-zinc-800/95 backdrop-blur-sm' : 'border-zinc-300 bg-white/95 backdrop-blur-sm'
+        'border shadow-xl flex flex-col',
+        IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5',
+        isDarkMode ? 'border-zinc-600 bg-zinc-800/95 backdrop-blur-sm' : 'border-zinc-300 bg-white/95 backdrop-blur-sm',
+        docked
+          ? 'heid-find-dock z-[70] border-x-0 border-b-0 rounded-none p-2'
+          : 'fixed z-[70] w-[min(540px,92vw)] rounded-lg p-1.5'
       )}
-      style={pos ?? { visibility: 'hidden', left: -9999, top: 0 }}
+      style={docked ? undefined : (pos ?? { visibility: 'hidden', left: -9999, top: 0 })}
       role="search"
     >
-      {/* 查找行 */}
-      <div className="flex items-center gap-1.5">
-        {canReplace && (
-          <button
-            onClick={() => setReplaceOpen(v => !v)}
-            className={navBtn}
-            title={replaceOpen ? t('find.collapseReplace') : t('find.expandReplace')}
-            aria-label={replaceOpen ? t('find.collapseReplace') : t('find.expandReplace')}
-          >
-            <ChevronDown size={14} className={cn('transition-transform', replaceOpen && 'rotate-180')} />
-          </button>
-        )}
-        <div className="relative flex-1 min-w-0">
-          <input
-            ref={findInputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => onKeyDown(e, 'find')}
-            placeholder={t('find.placeholderFind')}
-            className={cn(inputCls, 'pr-16')}
-          />
-          <span
-            className={cn(
-              'absolute right-2 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none tabular-nums',
-              matchStateRef.current.error ? 'text-red-500' : (isDarkMode ? 'text-zinc-500' : 'text-zinc-400')
-            )}
-          >
-            {countLabel}
-          </span>
-        </div>
-        <button onClick={() => setCaseSensitive(v => !v)} className={optBtn(caseSensitive)} title={t('find.caseSensitive')} aria-label={t('find.caseSensitive')}>
-          <CaseSensitive size={15} />
-        </button>
-        <button onClick={() => setWholeWord(v => !v)} className={optBtn(wholeWord)} title={t('find.wholeWord')} aria-label={t('find.wholeWord')}>
-          <WholeWord size={15} />
-        </button>
-        <button onClick={() => setRegexp(v => !v)} className={optBtn(regexp)} title={t('find.useRegex')} aria-label={t('find.useRegex')}>
-          <Regex size={15} />
-        </button>
-        <div className={cn('w-px h-5 shrink-0', isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')} />
-        <button onClick={goPrev} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
-          <ArrowUp size={14} />
-        </button>
-        <button onClick={goNext} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.nextTip')} aria-label={t('find.nextMatch')}>
-          <ArrowDown size={14} />
-        </button>
-        <button onClick={close} className={navBtn} title={t('find.closeTip')} aria-label={t('find.closeFind')}>
-          <X size={14} />
-        </button>
-      </div>
-
-      {/* 替换行 */}
-      {replaceOpen && (
-        <div className="flex items-center gap-1.5">
-          <div className="w-7 shrink-0" />
-          <input
-            value={replaceText}
-            onChange={(e) => setReplaceText(e.target.value)}
-            onKeyDown={(e) => onKeyDown(e, 'replace')}
-            placeholder={t('find.placeholderReplace')}
-            className={inputCls}
-          />
-          <div className={cn('w-px h-5 shrink-0', isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')} />
-          <button onClick={replaceCurrent} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.replaceTip')} aria-label={t('find.replaceCurrent')}>
-            <Replace size={15} />
-          </button>
-          <button onClick={replaceAll} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.replaceAll')} aria-label={t('find.replaceAll')}>
-            <ReplaceAll size={15} />
-          </button>
-          <div className="w-14 shrink-0" />
-        </div>
-      )}
-
-      {/* 跳转到行 */}
-      {gotoOpen && (
-        <div className="flex items-center gap-1.5">
-          <div className="w-7 shrink-0 flex justify-center">
-            <Hash size={13} className={isDarkMode ? 'text-zinc-500' : 'text-zinc-400'} />
+      {docked ? (
+        <>
+          {/* 第一行：输入 + 上一个/下一个/关闭（拇指够得到的右侧） */}
+          <div className={row}>
+            {findInput(false)}
+            {navButtons}
           </div>
-          <input
-            ref={gotoInputRef}
-            value={gotoLineText}
-            onChange={(e) => setGotoLineText(e.target.value.replace(/[^\d]/g, ''))}
-            onKeyDown={(e) => onKeyDown(e, 'goto')}
-            placeholder={t('find.placeholderGoto')}
-            className={inputCls}
-            inputMode="numeric"
-          />
-          <button onClick={jumpToLine} disabled={!gotoLineText} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.gotoTip')} aria-label={t('find.gotoLine')}>
-            <ArrowDown size={14} />
-          </button>
-          <div className="w-[86px] shrink-0" />
+          {/* 第二行：三个匹配选项 + 替换展开 + 计数。
+              计数从输入框里挪到这里，窄屏上输入框才不会被挤没 */}
+          <div className={row}>
+            {optionButtons}
+            {expandBtn}
+            <span
+              className={cn(
+                'flex-1 min-w-0 truncate text-right text-xs tabular-nums',
+                matchStateRef.current.error ? 'text-red-500' : (isDarkMode ? 'text-zinc-400' : 'text-zinc-500')
+              )}
+            >
+              {countLabel}
+            </span>
+          </div>
+        </>
+      ) : (
+        /* 查找行（浮层形态：一行装下全部控件） */
+        <div className={row}>
+          {expandBtn}
+          {findInput(true)}
+          {optionButtons}
+          {divider}
+          {navButtons}
         </div>
       )}
-    </div>,
-    document.body,
+      {replaceRow}
+      {gotoRow}
+    </div>
   );
+
+  return createPortal(panel, document.body);
 }
