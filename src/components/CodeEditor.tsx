@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, highlightWhitespace, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, gutterLineClass, GutterMarker, type ViewUpdate } from '@codemirror/view';
-import { history as historyExtension, indentWithTab, toggleComment, selectAll, deleteLine, moveLineUp, moveLineDown, copyLineDown } from '@codemirror/commands';import { syntaxTree, indentUnit, foldGutter, bracketMatching, indentOnInput, syntaxHighlighting, foldKeymap, HighlightStyle, defaultHighlightStyle, foldAll, unfoldAll, language as languageFacet } from '@codemirror/language';
+import { history as historyExtension, indentWithTab, insertNewlineAndIndent, toggleComment, selectAll, deleteLine, moveLineUp, moveLineDown, copyLineDown } from '@codemirror/commands';import { syntaxTree, indentUnit, foldGutter, bracketMatching, indentOnInput, syntaxHighlighting, foldKeymap, HighlightStyle, defaultHighlightStyle, foldAll, unfoldAll, language as languageFacet } from '@codemirror/language';
 import { highlightSelectionMatches, selectSelectionMatches } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { Tag, tags as t, highlightTree, type Highlighter } from '@lezer/highlight';
@@ -1622,6 +1622,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       keymap.of([
         ...closeBracketsKeymap,
         indentWithTab,
+        /* 回车必须显式绑定：安卓 WebView ≥126 上 CodeMirror 走 EditContext 通路，
+           浏览器不再对 contenteditable 做任何默认编辑（退格/方向键仍由 Blink 写进
+           context，换行则完全交给页面）。此前没有绑定，桌面靠浏览器默认插入才显得
+           正常，真机上回车就成了空按键。Tab / Shift-Tab 之后、补全键位（Prec.highest）
+           之下，行为与 CodeMirror 默认键位表一致 */
+        { key: 'Enter', run: insertNewlineAndIndent, shift: insertNewlineAndIndent },
         { key: 'Mod-s', run: () => { onSaveRef.current?.(); return true; } },
         { key: 'Mod-/', run: toggleComment },
         { key: 'Escape', run: () => {
