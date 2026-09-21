@@ -1651,7 +1651,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     }
     setCellEdit(null);
     setTableAction(null);
-    onChange(content.slice(0, start) + seg + content.slice(end));
+    /* 无可删时（表头是唯一行 / 唯一列）不产生空改动：否则标签页白标脏 */
+    const next = content.slice(0, start) + seg + content.slice(end);
+    if (next !== content) onChange(next);
   }, [cellEdit, content, onChange]);
 
   return (
@@ -1741,38 +1743,6 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         );
       })()}
 
-      {/* 触屏表格结构工具条：点选单元格时浮出（取代悬停边线的 +/− 按钮） */}
-      {cellEdit && onChange && IS_ANDROID_APP && (() => {
-        const actions = [
-          { label: t('md.rowAdd'), kind: 'addRow' }, { label: t('md.rowDel'), kind: 'delRow' },
-          { label: t('md.colAdd'), kind: 'addCol' }, { label: t('md.colDel'), kind: 'delCol' },
-        ] as const;
-        return (
-          <div
-            data-md-table-tools
-            onPointerDown={(e) => e.preventDefault()}
-            className={cn(
-              'absolute z-[96] flex items-center rounded-lg border shadow-lg overflow-hidden',
-              isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
-            )}
-            style={{ left: Math.max(0, cellEdit.left), top: Math.max(0, cellEdit.top - 38) }}
-          >
-            {actions.map(({ label, kind }) => (
-              <button
-                key={kind}
-                onClick={() => handleTableBarAction(kind)}
-                className={cn(
-                  'px-2.5 h-8 text-[11px] font-medium transition-colors',
-                  isDarkMode ? 'text-zinc-300 active:bg-zinc-700' : 'text-zinc-600 active:bg-zinc-100'
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        );
-      })()}
-
       {/* 单元格编辑输入框 */}
       {cellEdit && onChange && (
         <input
@@ -1791,6 +1761,38 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           )}
           style={{ left: cellEdit.left, top: cellEdit.top, width: cellEdit.width, height: cellEdit.height }}
         />
+      )}
+
+      {/* 触屏表格结构工具条：点选单元格后浮出，改整张表的行列（桌面用悬停边线的 +/− 按钮，触屏没有 hover）。
+          钉在屏幕底缘、键盘之上，而不是浮在格子旁边：键盘高度由 IME insets 异步注入 --heid-kb，
+          任何按「点击那一刻的可视框」算出来的落点都会在键盘起来那一刻作废——平板实测被压到键盘底下，
+          等于按钮消失。fixed + calc(--heid-kb) 让浏览器负责跟随，无需测量与监听。 */}
+      {cellEdit && onChange && IS_ANDROID_APP && (
+        <div
+          data-md-table-tools
+          onPointerDown={(e) => e.preventDefault()}
+          className={cn(
+            'fixed left-1/2 z-[96] flex w-[240px] -translate-x-1/2 items-center rounded-lg border shadow-lg overflow-hidden',
+            isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white'
+          )}
+          style={{ bottom: 'calc(var(--heid-kb, 0px) + 12px)' }}
+        >
+          {([
+            { label: t('md.rowAdd'), kind: 'addRow' }, { label: t('md.rowDel'), kind: 'delRow' },
+            { label: t('md.colAdd'), kind: 'addCol' }, { label: t('md.colDel'), kind: 'delCol' },
+          ] as const).map(({ label, kind }) => (
+            <button
+              key={kind}
+              onClick={() => handleTableBarAction(kind)}
+              className={cn(
+                'h-11 flex-1 px-2 text-sm font-medium whitespace-nowrap transition-colors',
+                isDarkMode ? 'text-zinc-300 active:bg-zinc-700' : 'text-zinc-600 active:bg-zinc-100'
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       )}
 
       {/* 触屏选区工具条：系统选字完成后浮出，菜单打开时让位 */}
