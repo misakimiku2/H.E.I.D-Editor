@@ -124,6 +124,10 @@ VS Code 风格的编辑体验：Canvas 语法着色迷你地图（点击/拖拽�
 | `H.I.D.E_*_arm64.apk` | Android 侧载 APK（arm64，**release 签名**，Android 7.0+） |
 
 - **系统要求**：Windows 10/11（WebView2 系统默认自带）· Android 7.0（API 24）及以上
+- **支持平台只有这两个**：不做 macOS 版，也不做 Linux 版 —— 这是定下来的结论，不是「还没排上期」。
+  把「秒开、约 7 MB、够用」做深比多挂两条平台线更值钱：macOS 要付费开发者证书 + 公证才过得了
+  Gatekeeper，Linux 的 WebView 是 WebKitGTK 而非本项目全程验证所在的 Blink/Chromium 内核，
+  两条线各要一套发布链路加一整套界面重验。评估依据逐条记在 [docs/ROADMAP.md](docs/ROADMAP.md) 条目 40
 - **应用内更新**：桌面端启动后静默检查新版本（每次启动必检），发现新版会弹窗确认并自动完成更新；
   安卓端无静默更新通道，检测到新版会弹卡片跳 Releases 页手动安装 APK
 - **安卓 v1.3.x 老包升级**：v1.4.0 起 APK 改用 release 签名，与 v1.3.0 及更早的 debug 包签名
