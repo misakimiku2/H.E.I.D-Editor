@@ -14,6 +14,17 @@ export const RELEASES_PAGE = 'https://github.com/misakimiku2/H.E.I.D-Editor/rele
 export const MIRROR_RELEASES_PAGE = 'https://gitee.com/misakimiku2/heid-editor/releases';
 
 /**
+ * 安卓 APK 在镜像上的直链（桌面「关于」里的二维码编的就是它，见 OtherPlatformPanel）。
+ * 选镜像而不选 GitHub：扫码的手机大概率在国内网络里，github.com 到不了就等于没有二维码。
+ * 只能带版本号——Gitee 没有 `releases/latest/download/...` 那种「永远最新」的路径，
+ * 固定 tag `mirror-latest` 上只挂 latest.json，安装包按 `v<版本>` 挂（见 scripts/mirror-gitee.mjs）。
+ * 因此本版之后每个版本都必须走完 mirror-gitee 任务，否则扫码会 404（发版清单第 54 条）。
+ */
+export function apkMirrorDownloadUrl(version: string): string {
+  return `${MIRROR_RELEASES_PAGE}/download/v${version}/H.I.D.E_${version}_arm64.apk`;
+}
+
+/**
  * latest.json 的候选源，按顺序尝试、取第一个拿到的合法清单。
  * 桌面端由 tauri-plugin-updater 读 `tauri.conf.json` 的 `plugins.updater.endpoints`（同样是数组、
  * 按序回退），这里服务的是安卓侧载的版本检查与启动时的文档自愈补种。
@@ -29,7 +40,7 @@ export const LATEST_JSON_URLS = [
 ];
 
 /** 版本号兜底（浏览器模式无 getVersion API；与 package.json / tauri.conf.json 同步维护） */
-export const FALLBACK_APP_VERSION = '1.4.1';
+export const FALLBACK_APP_VERSION = '1.4.2';
 
 export interface LatestReleaseInfo {
   version: string;

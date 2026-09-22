@@ -131,12 +131,13 @@ export function TopAppBar({
         </span>
       </button>
 
-      {/* 当前文件名 + 脏状态点 */}
+      {/* 当前文件名 + 状态点：这一行显示的就是当前标签，所以干净时是「当前」的绿点
+          （与标签条 TabBar、标签页抽屉 TabSheet 同配色），只有未保存才换成琥珀 */}
       <div className="flex-1 min-w-0 flex items-center gap-1.5 px-1">
         <span
           className={cn(
             'w-1.5 h-1.5 rounded-full shrink-0',
-            isDirty ? 'bg-amber-500' : (isDarkMode ? 'bg-zinc-600' : 'bg-zinc-300')
+            isDirty ? 'bg-amber-500' : 'bg-emerald-500'
           )}
         />
         <span className="truncate text-sm font-medium">{title}</span>

@@ -51,12 +51,13 @@ interface Props {
   anchor: SelectionAnchor;
   isDarkMode: boolean;
   canEdit: boolean;
-  /** 上一次用过的格式化命令；null（从没用过）时不显示这个按钮 */
-  lastOp: MdOp | null;
+  /** 上一次用过的格式化命令；null（从没用过）时不显示这个按钮。
+      非 markdown 的编辑器没有格式命令，整个字段省略 */
+  lastOp?: MdOp | null;
   onCopy: () => void;
-  onApply: (op: MdOp) => void;
-  /** 打开与桌面同款的格式菜单 */
-  onMore: () => void;
+  onApply?: (op: MdOp) => void;
+  /** 打开与桌面同款的格式菜单；缺省时不显示「更多」按钮（代码编辑器没有格式菜单） */
+  onMore?: () => void;
   extraActions?: SelectionBarAction[];
 }
 
@@ -113,13 +114,13 @@ export const SelectionActionBar = React.memo<Props>(
             <span>{a.label}</span>
           </button>
         ))}
-        {lastItem && lastOp && LastIcon && (
+        {lastItem && lastOp && LastIcon && onApply && (
           <button className={btnCls} onClick={guard(() => onApply(lastOp))} title={t(lastItem.nameKey)}>
             <LastIcon size={18} />
             <span>{t(lastItem.textKey)}</span>
           </button>
         )}
-        {canEdit && (
+        {canEdit && onMore && (
           <button className={cn(btnCls, 'px-2.5')} onClick={guard(onMore)} title={t('mobile.moreMenu')}>
             <MoreHorizontal size={18} />
           </button>

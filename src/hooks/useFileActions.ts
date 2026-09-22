@@ -144,6 +144,25 @@ export function useFileActions({
     }
   }, [addRecent, setTabs, t]);
 
+  /** 外部应用交来的文件（安卓「打开方式」/「分享」）：同一文件已在标签里且有未保存改动时
+      只把它切到前台，不用磁盘内容盖掉用户的改动；干净的标签照常重读磁盘 */
+  const openPathFromExternal = useCallback(async (path: string) => {
+    const dirty = tabsRef.current.find(t => t.path === path && t.isDirty);
+    if (dirty) {
+      setActiveTabIdRef.current(dirty.id);
+      return;
+    }
+    await openPathIntoTab(path);
+  }, [openPathIntoTab, setActiveTabIdRef, tabsRef]);
+
+  /** 其他应用「分享 → H.I.D.E」送来的纯文本：落成一个新的未命名草稿标签，
+      与 Ctrl+N 同一条路（内容进草稿、退出走未保存确认），不假装没收到 */
+  const openSharedText = useCallback((text: string) => {
+    const newTab = makeNewUntitled(text);
+    setTabs(prev => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+  }, [setActiveTabId, setTabs]);
+
   /** 打开文件选择器（安卓 = 系统文档选择器，支持多选；桌面 = 先取路径再统一走分层路由） */
   const handleOpenFile = useCallback(async () => {
     /* 安卓：系统文档选择器（支持多选），逐个复用 openPathIntoTab */
@@ -446,6 +465,8 @@ export function useFileActions({
     saving, savingRef,
     recentFiles, setRecentFiles,
     openPathIntoTab,
+    openPathFromExternal,
+    openSharedText,
     openDroppedFiles,
     handleOpenFile, handleNewFile,
     persistTab,

@@ -97,16 +97,17 @@ export function makeWelcomeTab(id: string = nextTabId()): FileTab {
   };
 }
 
-export function makeUntitledTab(title: string): FileTab {
+export function makeUntitledTab(title: string, content = ''): FileTab {
   return {
     id: nextTabId(),
     title,
     path: null,
     handle: null,
-    content: '',
+    content,
     originalContent: '',
     language: 'plaintext',
-    isDirty: false,
+    /* 有内容即视为已编辑：走草稿保存与退出确认，不会被静默丢掉 */
+    isDirty: content !== '',
     readOnly: false,
     mdView: 'edit',
     encoding: 'utf-8',
@@ -152,7 +153,8 @@ export function makeReleaseNotesTab(title: string, content: string): FileTab {
   };
 }
 
-/** Ctrl+N 新建：标题序号取自计数器当前值（与 nextTabId 共用计数） */
-export function makeNewUntitled(): FileTab {
-  return makeUntitledTab(`untitled-${tabCounter + 1}.txt`);
+/** Ctrl+N 新建：标题序号取自计数器当前值（与 nextTabId 共用计数）；
+    content 用于「分享纯文本进来」——同样落成未命名草稿 */
+export function makeNewUntitled(content = ''): FileTab {
+  return makeUntitledTab(`untitled-${tabCounter + 1}.txt`, content);
 }

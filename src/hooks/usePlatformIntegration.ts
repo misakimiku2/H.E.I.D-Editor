@@ -1,6 +1,7 @@
 /**
  * 平台适配 effects（桌面 Tauri / 安卓 WebView / 浏览器三端差异全部收敛在此）：
  * - 拖拽文件入窗口打开（Tauri drag-drop 事件）
+ * - 外部应用交来的文件（桌面 argv / 二次实例转发，安卓「打开方式」/「分享」）
  * - 渲染内容 <a> 导航守卫（http(s) 交系统浏览器，其余拦截）
  * - 窗口关闭统一拦截（自定义按钮 / Alt+F4 / 任务栏关闭都走未保存确认）
  * - 安卓系统返回键逐层关闭弹层 + 安全区 insets 注入
@@ -39,8 +40,14 @@ export interface OverlayActions {
 
 export interface PlatformIntegrationOptions {
   openPathIntoTab: (path: string) => Promise<void>;
+  /** 外部应用交来的文件（安卓「打开方式」/「分享」）：脏标签只聚焦不覆盖 */
+  openPathFromExternal: (path: string) => Promise<void>;
+  /** 外部应用「分享」来的纯文本：落成新的未命名草稿 */
+  openSharedText: (text: string) => void;
   /** 拖入窗口的文件（File 对象，无磁盘路径） */
   onDropFiles?: (files: File[]) => void;
+  /** 会话恢复完成：外部交来的文件要等恢复流程落地再开，否则标签顺序与焦点会被抢走 */
+  hydrated: boolean;
   tabsRef: RefObject<{ isDirty: boolean }[]>;
   confirmWindowCloseRef: RefObject<() => Promise<boolean>>;
   overlayState: OverlayState;
@@ -48,10 +55,16 @@ export interface PlatformIntegrationOptions {
 }
 
 export function usePlatformIntegration({
-  openPathIntoTab, onDropFiles, tabsRef, confirmWindowCloseRef, overlayState, overlayActions,
+  openPathIntoTab, openPathFromExternal, openSharedText, onDropFiles, hydrated, tabsRef,
+  confirmWindowCloseRef, overlayState, overlayActions,
 }: PlatformIntegrationOptions) {
   const onDropFilesRef = useRef(onDropFiles);
   onDropFilesRef.current = onDropFiles;
+  const openExternalPathRef = useRef(openPathFromExternal);
+  openExternalPathRef.current = openPathFromExternal;
+  const openSharedTextRef = useRef(openSharedText);
+  openSharedTextRef.current = openSharedText;
+
   /* ---- 文件关联与单实例（桌面）：首实例启动路径经 take_launch_paths 取走；
      二次实例启动由 Rust 侧聚焦窗口并转发 heid-open-paths 事件 ---- */
   useEffect(() => {
@@ -83,6 +96,31 @@ export function usePlatformIntegration({
       unlisten?.();
     };
   }, [openPathIntoTab]);
+
+  /* ---- 文件关联（安卓）：其他应用「打开方式」/「分享」交来的 content URI。
+     原生侧收到就先入队——冷启动时页面还没加载完、派发的事件会丢；前端就绪后主动取一次，
+     应用已在前台时由 heid-view 事件催第二次。取走即清空队列，两条路径不会把同一文件开两遍。
+     等 hydrated：会话恢复会重排标签并抢焦点，外部文件要排在它之后 */
+  useEffect(() => {
+    if (!IS_ANDROID_APP || !hydrated) return;
+    const take = () => {
+      let items: { uri?: string; text?: string }[] = [];
+      try {
+        const raw = (window as any).HeidBridge?.takeLaunchFiles?.();
+        items = raw ? JSON.parse(raw) : [];
+      } catch (e) {
+        console.error('读取外部打开请求失败:', e);
+        items = [];
+      }
+      for (const it of items ?? []) {
+        if (it?.uri) void openExternalPathRef.current(it.uri);
+        else if (typeof it?.text === 'string') openSharedTextRef.current(it.text);
+      }
+    };
+    take();
+    window.addEventListener('heid-view', take);
+    return () => window.removeEventListener('heid-view', take);
+  }, [hydrated]);
 
   /* ---- 拖文件入窗口打开（HTML5 DnD）：窗口已禁用 tauri 拖放拦截
      （dragDropEnabled: false，为标签原生拖拽让路），文件经页面 drop 事件接收 ---- */

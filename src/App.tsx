@@ -24,6 +24,7 @@ import { DiffModal } from './components/DiffModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { AlertDialog } from './components/AlertDialog';
 import { NotificationStack } from './components/NotificationStack';
+import { OtherPlatformPanel } from './components/OtherPlatformPanel';
 import { ImageViewer } from './components/ImageViewer';
 import { SvgWorkbench } from './components/SvgWorkbench';
 import { resolveImageSrc, ImageForbiddenError } from './lib/imageSrc';
@@ -794,13 +795,16 @@ export default function App() {
     editor.setActiveTabId(RELEASE_NOTES_TAB_ID);
   }, [editor.setTabs, editor.setActiveTabId, t]);
 
-  /* ---- 平台适配（拖拽 / 链接守卫 / 关闭拦截 / 安卓返回键与安全区 / 浏览器兜底）---- */
+  /* ---- 平台适配（拖拽 / 外部交来的文件 / 链接守卫 / 关闭拦截 / 安卓返回键与安全区 / 浏览器兜底）---- */
   const overlayState = {
     tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
+    openPathFromExternal: file.openPathFromExternal,
+    openSharedText: file.openSharedText,
     onDropFiles: (files) => void file.openDroppedFiles(files),
+    hydrated,
     tabsRef: editor.tabsRef,
     confirmWindowCloseRef,
     overlayState,
@@ -2530,6 +2534,7 @@ export default function App() {
             />
             <div className={cn(
               "relative w-80 rounded-2xl border shadow-2xl p-6 flex flex-col items-center text-center pointer-coarse:w-[min(26rem,90vw)] pointer-coarse:p-7",
+              "max-h-[calc(100vh-1.5rem)] overflow-y-auto",
               isDarkMode ? "border-zinc-700 bg-zinc-800/95 text-zinc-100" : "border-zinc-200 bg-white/95 text-zinc-800"
             )}>
               <button
@@ -2682,6 +2687,12 @@ export default function App() {
                   )}
                 </div>
               )}
+              {/* 获取另一版：桌面 ↔ 安卓互相引流（v1.5 设备互联的「扫码连接」将来长在同一块位置） */}
+              <OtherPlatformPanel
+                version={updater.latestVersion ?? appVersion}
+                downloadPage={updater.downloadPage}
+                isDarkMode={isDarkMode}
+              />
               <div className={cn(
                 "mt-4 pt-3 w-full text-[10px] border-t",
                 isDarkMode ? "border-zinc-700 text-zinc-500" : "border-zinc-200 text-zinc-400"

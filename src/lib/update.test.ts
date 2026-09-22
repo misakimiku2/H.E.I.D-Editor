@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  apkMirrorDownloadUrl,
   compareVersions, consumeStartupReleaseNotes, downloadPageFor, fetchLatestJson,
   getIgnoredVersion, isNewerVersion, LATEST_JSON_URLS, loadReleaseNotesList,
   maybeSeedCurrentVersionNotes, MAX_RELEASE_NOTES, MIRROR_RELEASES_PAGE, parseLatestJson,
@@ -140,6 +141,17 @@ describe('downloadPageFor（下载页跟随命中的源）', () => {
     expect(downloadPageFor(LATEST_JSON_URLS[0])).toBe(RELEASES_PAGE);
     expect(downloadPageFor(null)).toBe(RELEASES_PAGE);
     expect(downloadPageFor('不是个 URL')).toBe(RELEASES_PAGE);
+  });
+});
+
+describe('apkMirrorDownloadUrl（桌面「关于」里二维码指向的 APK 直链）', () => {
+  it('指向 Gitee 镜像按版本号建的 tag，文件名与 CI 产物名一致', () => {
+    expect(apkMirrorDownloadUrl('1.4.2'))
+      .toBe('https://gitee.com/misakimiku2/heid-editor/releases/download/v1.4.2/H.I.D.E_1.4.2_arm64.apk');
+  });
+
+  it('与镜像下载页同源，换仓库时不会只改一处', () => {
+    expect(apkMirrorDownloadUrl('9.9.9').startsWith(`${MIRROR_RELEASES_PAGE}/`)).toBe(true);
   });
 });
 

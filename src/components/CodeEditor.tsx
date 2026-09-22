@@ -9,7 +9,7 @@ import { EditorState, Extension, StateEffect, StateField, RangeSet } from '@code
 import {
   Undo2, Redo2, Scissors, Copy, ClipboardPaste, TextSelect, Search, MessageSquareQuote, ImagePlus,
   CaseUpper, CaseLower, ArrowUpNarrowWide, ArrowDownWideNarrow, ListX, Eraser,
-  CopyPlus, ArrowUp, ArrowDown, Trash2, Regex, FoldVertical, UnfoldVertical,
+  CopyPlus, ArrowUp, ArrowDown, Trash2, Regex, FoldVertical, UnfoldVertical, Pipette,
 } from 'lucide-react';
 import { useT } from '../lib/i18nContext';
 import { cn } from '../lib/utils';
@@ -23,7 +23,7 @@ import { clipboardHasImage as detectClipboardHasImage, imageFileFromClipboard } 
 import { loadLanguageExtension } from '../lib/codemirror';
 import { parseColorLiteral, serializeColorLiteral } from '../lib/colorLiteral';
 import type { Rgba } from '../lib/colorMath';
-import { colorDotExtension } from './colorDotExtension';
+import { colorDotExtension, colorLiteralCovering } from './colorDotExtension';
 import { ColorPickerPopover } from './ColorPickerPopover';
 import { DEFAULT_SETTINGS, type EditorSettings } from '../lib/settings';
 import {
@@ -467,7 +467,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const lastCursorRef = useRef<{ line: number; col: number; selChars: number } | null>(null);
   /* 触屏：选区非空时在其上方浮出选区工具条（长按 contextmenu 在安卓上不可靠）。
      left/top/bottom 为选区的视口矩形，工具条据此定位并避让系统选择手柄 */
-  const [touchFmtBtn, setTouchFmtBtn] = useState<{ left: number; top: number; bottom: number; from: number; to: number } | null>(null);
+  const [touchFmtBtn, setTouchFmtBtn] = useState<{
+    left: number; top: number; bottom: number; from: number; to: number;
+    /** 选区压在某条颜色字面量上时为其完整区间，否则 null（触屏取色入口） */
+    colorRange: { from: number; to: number } | null;
+  } | null>(null);
   /* 最近使用的格式化命令（工具条「最近使用」面板） */
   const [lastMdOp, setLastMdOp] = useState<MdOp | null>(() => loadLastMdOp());
   /* 颜色取色会话：seq 为会话 id（key），from/to 随文档编辑重映射；anchor 是圆点视口坐标。
@@ -1685,7 +1689,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       if (sel.empty) { setTouchFmtBtn(null); return; }
       const rect = selRect(u.view, sel.from, sel.to);
       if (!rect) { setTouchFmtBtn(null); return; }
-      setTouchFmtBtn({ ...rect, from: sel.from, to: sel.to });
+      setTouchFmtBtn({ ...rect, from: sel.from, to: sel.to, colorRange: colorLiteralCovering(u.state, sel.from, sel.to) });
     }));
     /* 光标/选区变化上报（状态栏 行:列 / 选中字符数）；值未变化时跳过 */
     exts.push(EditorView.updateListener.of((u) => {
@@ -1827,14 +1831,16 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           onClose={() => setCtxMenu(null)}
         />
       )}
-      {/* 触屏选区工具条：与预览区同一套（复制 / 粘贴 / 全选 / 最近使用 / 更多→桌面同款菜单）。
-          系统选区弹窗在这里被屏蔽，剪贴板动作改由本条提供，不能因为屏蔽就丢掉能力 */}
-      {IS_ANDROID_APP && markdownMenu && touchFmtBtn && !mdMenu && (
+      {/* 触屏选区工具条：复制 / 粘贴 / 全选 +（代码里选中色值时）取色 + 「更多」→ 桌面同款菜单。
+          系统那个选区弹窗在触屏上被统一屏蔽（见 handleEditorContextMenu），所以本条必须在
+          **所有**编辑器类型下都出现——以前只挂在 markdown 上，代码文件里选中文字后
+          既没有系统弹窗也没有本条，等于复制/粘贴/全选全没了 */}
+      {IS_ANDROID_APP && touchFmtBtn && !mdMenu && (
         <SelectionActionBar
           anchor={{ left: touchFmtBtn.left, top: touchFmtBtn.top, bottom: touchFmtBtn.bottom }}
           isDarkMode={isDarkMode}
           canEdit
-          lastOp={lastMdOp}
+          lastOp={markdownMenu ? lastMdOp : null}
           extraActions={[
             ...(pasteAvailable ? [{
               label: tr('ctx.paste'),
@@ -1852,22 +1858,36 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 if (view) { selectAll(view); view.focus(); }
               },
             },
+            /* 取色器的触屏入口：行内圆点只有 11.9dp（一行才 19.6dp，撑不到 48dp 还不能吃掉
+               邻字），所以长按选中色值后在这里给一个 48dp 的按钮 */
+            ...(settings.colorDecorations && touchFmtBtn.colorRange ? [{
+              label: tr('svg.pickColor'),
+              icon: <Pipette size={18} />,
+              onSelect: () => {
+                const view = viewReadyRef.current;
+                const range = touchFmtBtn.colorRange;
+                if (view && range) openColorPickerRef.current(view, range);
+              },
+            }] : []),
           ]}
           onCopy={() => {
             const view = viewReadyRef.current;
             if (view) void copySelectionText(view);
           }}
-          onApply={(op) => {
+          onApply={markdownMenu ? (op) => {
             const view = viewReadyRef.current;
             if (!view) return;
             const { from, to } = touchFmtBtn;
             applyEditorMdOp(op, { from, to, text: view.state.sliceDoc(from, to) });
-          }}
+          } : undefined}
           onMore={() => {
             const view = viewReadyRef.current;
             if (!view) return;
             const { from, to, left, bottom } = touchFmtBtn;
-            setMdMenu({ x: left, y: bottom, from, to, text: view.state.sliceDoc(from, to) });
+            /* 与桌面右键完全同一套逻辑：markdown 开格式菜单，其余编辑器开通用编辑菜单
+               （撤销/重做、剪切/复制/粘贴、复制行/移行/删行、选中相同、折叠展开） */
+            if (markdownMenu) setMdMenu({ x: left, y: bottom, from, to, text: view.state.sliceDoc(from, to) });
+            else setCtxMenu({ x: left, y: bottom });
             setTouchFmtBtn(null);
           }}
         />

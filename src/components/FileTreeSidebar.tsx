@@ -972,7 +972,9 @@ export function FileTreeSidebar({
           {(() => {
             const buttons = (
               <>
-                {canManage && (
+                {/* 跨文件搜索要按真实路径递归读目录，安卓 SAF 的树内路径（treeUri\0相对路径）
+                    喂不进去、什么都搜不到，所以安卓不放这个入口 */}
+                {canManage && !IS_ANDROID_APP && (
                   <button
                     onClick={() => (searching ? exitSearch() : setSearching(true))}
                     title={t('tree.searchInFiles')}

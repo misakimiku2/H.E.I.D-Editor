@@ -80,6 +80,15 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun displayName(uri: String): String? = queryDisplayName(Uri.parse(uri))
 
+    /** 取走并清空外部应用送来的内容（JSON 数组，元素为 {uri,name} 或 {text}；无则 "[]"）。
+        冷启动时页面还没加载完、事件会丢，故队列是唯一事实源，前端就绪后主动来取 */
+    @JavascriptInterface
+    fun takeLaunchFiles(): String = synchronized(launchFiles) {
+      val json = if (launchFiles.isEmpty()) "[]" else "[${launchFiles.joinToString(",")}]"
+      launchFiles.clear()
+      json
+    }
+
     /** 系统文档选择器（支持多选）。结果经 heid-saf 事件回传。 */
     @JavascriptInterface
     fun openDocs(mimesJson: String) {
@@ -489,6 +498,60 @@ class MainActivity : TauriActivity() {
     renderWebView = null
   }
 
+  /* ---- 外部应用送来的文件：「打开方式」(ACTION_VIEW) 与「分享」(ACTION_SEND/_MULTIPLE) ----
+     manifest 的 intent-filter 只负责让应用出现在系统列表里，URI 要自己取。
+     冷启动时 WebView 里的页面还没加载完、派发的事件会丢，所以收到的文件先入队：
+     前端就绪后调 takeLaunchFiles() 一次取空；应用已在前台时（热启动）再催一次 heid-view。
+     队列是唯一事实源、取走即清，事件只负责唤醒——重复投递不会把同一个文件打开两次。 */
+  private val launchFiles = ArrayList<String>()
+
+  /** 收下一个入向 intent 里的可打开内容并入队（无关 action、或没有能读的 URI 时什么都不做） */
+  private fun collectInbound(intent: Intent?) {
+    if (intent == null) return
+    val items: List<String> = when (intent.action) {
+      Intent.ACTION_VIEW ->
+        listOfNotNull(intent.data).filter(::openable).map { launchFileForUri(it, intent.flags) }
+      Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE -> {
+        val streams = sendStreamUris(intent).filterNotNull()
+          .filter(::openable).map { launchFileForUri(it, intent.flags) }
+        /* 分享面板上「分享文本」没有附件、只有 EXTRA_TEXT：也接住，前端落成一个新的未命名草稿。
+           不接的话我们在分享列表里出现却什么都不做——和没实现一样 */
+        streams.ifEmpty { listOfNotNull(sharedTextItem(intent)) }
+      }
+      else -> return
+    }
+    if (items.isEmpty()) return
+    synchronized(launchFiles) { launchFiles.addAll(items) }
+    evalJs("window.dispatchEvent(new CustomEvent('heid-view'))")
+  }
+
+  /** 只接 content://（文档提供器给授权）与 file://（管理器直连自带可读）；http(s) 之类交给浏览器 */
+  private fun openable(uri: Uri?): Boolean =
+    uri != null && (uri.scheme == "content" || uri.scheme == "file")
+
+  /** 文件条目：顺手持久化授权（提供器只给临时授权时抛异常，忽略即可），并解析显示名 */
+  private fun launchFileForUri(uri: Uri, flags: Int): String {
+    takePersistable(uri, flags)
+    val name = queryDisplayName(uri) ?: ""
+    return "{\"uri\":\"${jsonEscape(uri.toString())}\",\"name\":\"${jsonEscape(name)}\"}"
+  }
+
+  private fun sharedTextItem(intent: Intent): String? {
+    val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+    return if (text.isNullOrEmpty()) null else "{\"text\":\"${jsonEscape(text)}\"}"
+  }
+
+  /** 分享送来的附件在 EXTRA_STREAM：单个 Uri 或 Uri 列表（SEND_MULTIPLE） */
+  private fun sendStreamUris(intent: Intent): List<Uri?> = try {
+    when (val raw = intent.extras?.get(Intent.EXTRA_STREAM)) {
+      is ArrayList<*> -> raw.filterIsInstance<Uri>()
+      is Uri -> listOf(raw)
+      else -> emptyList()
+    }
+  } catch (_: Exception) {
+    emptyList()
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
@@ -547,6 +610,12 @@ class MainActivity : TauriActivity() {
         )
       }
     })
+
+    /* 外部文件打开：冷启动读 launch intent；应用已在前台时由新 intent 触发。
+       热启动不能靠覆写 onNewIntent——生成的 TauriActivity.onNewIntent 是 final 的，
+       改挂 androidx 的监听器（链上各级都调了 super，回调一定会到） */
+    addOnNewIntentListener { collectInbound(it) }
+    collectInbound(intent)
   }
 
     /* uiMode 在 configChanges 中：系统深浅色切换不重建 Activity，WebView 的

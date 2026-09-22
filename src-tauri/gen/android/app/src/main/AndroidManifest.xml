@@ -129,7 +129,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="application/xml" />
+                <data android:mimeType="application/json" />
                 <data android:pathPattern=".*\\.txt" />
                 <data android:pathPattern=".*\\.log" />
                 <data android:pathPattern=".*\\.md" />
@@ -229,7 +229,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="application/json" />
+                <data android:mimeType="application/xml" />
                 <data android:pathPattern=".*\\.txt" />
                 <data android:pathPattern=".*\\.log" />
                 <data android:pathPattern=".*\\.md" />
@@ -275,6 +275,19 @@
             </intent-filter>
             
             <!-- tauri-file-associations. AUTO-GENERATED. DO NOT REMOVE. -->
+
+            <!-- 上面自动生成的块只声明了 Tauri 认得的那 5 个 MIME，而匹配只看提供方报出的 MIME
+                 （实测：Files 里 .md 报 text/markdown、.py 报 text/x-python、.csv 报 text/csv，
+                 整条不匹配 → 「打开方式」里根本不出现 H.I.D.E，点文件也没反应）。
+                 补一条 text/* 通配兜住所有文本与代码文件。
+                 本块在自动生成标记之外，构建不会覆盖 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+            </intent-filter>
         </activity>
 
         <provider

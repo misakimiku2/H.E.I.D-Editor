@@ -4,7 +4,7 @@
  * 扫描只覆盖可见视口，成本与文档大小无关；文档/视口变化经 rAF 去重后重扫。
  */
 import { EditorView, ViewPlugin, Decoration, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
-import { type Extension, type Range } from '@codemirror/state';
+import { type EditorState, type Extension, type Range } from '@codemirror/state';
 import { findColorLiterals } from '../lib/colorLiteral';
 import { cssColor, type Rgba } from '../lib/colorMath';
 
@@ -96,4 +96,24 @@ export function colorDotExtension(options: ColorDotOptions): Extension {
     },
   });
   return plugin;
+}
+
+/**
+ * 选区 [from,to) 压在哪个颜色字面量上，就返回**整条**字面量的区间。
+ * 触屏长按只会选中 `ff6a00` 这样的词（不含 `#`），所以按重叠找、按整条回——
+ * 取色器要改写的是完整字面量，不是选中的那截。
+ */
+export function colorLiteralCovering(
+  state: EditorState, from: number, to: number,
+): { from: number; to: number } | null {
+  const lastLine = state.doc.lineAt(Math.max(from, to - 1)).number;
+  for (let n = state.doc.lineAt(from).number; n <= lastLine; n++) {
+    const ln = state.doc.line(n);
+    for (const lit of findColorLiterals(ln.text)) {
+      const l = ln.from + lit.from;
+      const r = ln.from + lit.to;
+      if (l < to && r > from) return { from: l, to: r };
+    }
+  }
+  return null;
 }
