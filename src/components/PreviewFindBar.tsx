@@ -329,6 +329,11 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
           : cn('fixed z-[70] w-[min(440px,92vw)] rounded-lg p-1.5 flex items-center', IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5')
       )}
       style={docked ? undefined : (pos ?? { visibility: 'hidden', left: -9999, top: 0 })}
+      /* 触屏：同 FindReplaceBar——栏里除输入框外任何东西都不该抢走焦点，
+         否则输入法收掉就不再自己弹回来；拦的是 tap 补发的 mousedown，click 照常派发 */
+      onMouseDown={IS_TOUCH_PRIMARY ? (e) => {
+        if (!(e.target as HTMLElement | null)?.closest('input')) e.preventDefault();
+      } : undefined}
       role="search"
     >
       {stacked ? (

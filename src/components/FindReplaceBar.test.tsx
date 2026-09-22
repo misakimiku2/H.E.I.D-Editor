@@ -120,4 +120,57 @@ describe('FindReplaceBar 三端形态', () => {
     expect(rows[0].querySelectorAll('button')).toHaveLength(3);
     expect(rows[1].querySelectorAll('button')).toHaveLength(5);
   });
+
+  it('触屏：按钮不抢焦点，展开替换后焦点交给替换框', async () => {
+    const panel = await renderForm(true, false);
+    const findBox = () => [...document.querySelectorAll<HTMLElement>('[role=search] input')];
+    expect(document.activeElement).toBe(findBox()[0]);
+
+    const expand = [...panel.querySelectorAll('button')].find(
+      (b) => b.getAttribute('aria-label') === 'find.expandReplace'
+    ) as HTMLButtonElement;
+    // tap 补发的 mousedown 若不改焦点，WebView 就不会把输入法收掉（用户反馈的那条）
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    expand.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+
+    // 禁用态的按钮同样拦：按到没反应的钮不该把键盘弄没
+    const next = [...panel.querySelectorAll('button')].find(
+      (b) => b.getAttribute('aria-label') === 'find.nextMatch'
+    ) as HTMLButtonElement;
+    expect(next.disabled).toBe(true);
+    const downNext = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    next.dispatchEvent(downNext);
+    expect(downNext.defaultPrevented).toBe(true);
+
+    // 输入框自己不拦：光标定位与选字要靠它
+    const downInput = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    findBox()[0].dispatchEvent(downInput);
+    expect(downInput.defaultPrevented).toBe(false);
+
+    act(() => { expand.click(); });
+    const boxes = findBox();
+    expect(boxes).toHaveLength(2);
+    expect(document.activeElement).toBe(boxes[1]);
+
+    // 收起时交还查找框，否则焦点停在刚消失的那格上
+    const collapse = [...document.querySelectorAll('button')].find(
+      (b) => b.getAttribute('aria-label') === 'find.collapseReplace'
+    ) as HTMLButtonElement;
+    act(() => { collapse.click(); });
+    expect(document.activeElement).toBe(findBox()[0]);
+  });
+
+  it('桌面：不拦 mousedown、也不接管焦点', async () => {
+    const panel = await renderForm(false, false);
+    const expand = [...panel.querySelectorAll('button')].find(
+      (b) => b.getAttribute('aria-label') === 'find.expandReplace'
+    ) as HTMLButtonElement;
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    expand.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(false);
+    act(() => { expand.click(); });
+    expect(document.querySelectorAll('input')).toHaveLength(2);
+    expect(document.activeElement).not.toBe(document.querySelectorAll('input')[1]);
+  });
 });

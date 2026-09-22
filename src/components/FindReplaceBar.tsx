@@ -69,6 +69,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   const [current, setCurrent] = useState(0);
   const matchStateRef = useRef<MatchState>({ matches: [], capped: false, error: null });
   const findInputRef = useRef<HTMLInputElement | null>(null);
+  const replaceInputRef = useRef<HTMLInputElement | null>(null);
   const gotoInputRef = useRef<HTMLInputElement | null>(null);
   /* 弹出定位（仅浮层形态）：测量自身尺寸后按指针位置钳制（打开时算一次，不跟随） */
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -130,6 +131,15 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
     if (!gotoOpen) findInputRef.current?.select();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pos, docked]);
+
+  /* 触屏：展开/收起替换、开关跳行之后，把焦点交给「此刻该打字的那一格」。
+     收起来时交还查找框，否则焦点会停在刚消失的那格上（连同输入法一起没了下文）。
+     桌面不接管：那边的焦点本来就该跟着点击走，且物理键盘不存在弹回不弹回的问题 */
+  useEffect(() => {
+    if (!IS_TOUCH_PRIMARY) return;
+    const el = (gotoOpen ? gotoInputRef : replaceOpen ? replaceInputRef : findInputRef).current;
+    el?.focus();
+  }, [replaceOpen, gotoOpen]);
 
   /* 文档与选区变化跟随：文档变化重扫，纯选区移动仅更新当前下标。
      订阅经 CodeEditor 的视图更新分发（挂在根配置里）——早先用 StateEffect.appendConfig 追加监听器，
@@ -365,6 +375,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
     <div className={row}>
       {!stacked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-12' : 'w-7')} />}
       <input
+        ref={replaceInputRef}
         value={replaceText}
         onChange={(e) => setReplaceText(e.target.value)}
         onKeyDown={(e) => onKeyDown(e, 'replace')}
@@ -418,6 +429,14 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
           : 'fixed z-[70] w-[min(540px,92vw)] rounded-lg p-1.5'
       )}
       style={docked ? undefined : (pos ?? { visibility: 'hidden', left: -9999, top: 0 })}
+      /* 触屏：这条栏里除了输入框本身，任何东西都不该把焦点从输入框抢走。Blink 在 tap 之后补发
+         一个 mousedown，改焦点的是它的默认动作，拦掉即可、click 照常派发。不拦的后果就是用户反馈的
+         那条：点「展开替换」箭头，输入法先收起来且不再自己弹出，得再点一次输入框——
+         这条停靠条能不能连续查找替换，取决于输入法在不在。
+         连禁用态的按钮一起拦（按到没反应的钮不该把键盘弄没），故判据取反：只放过 input */
+      onMouseDown={IS_TOUCH_PRIMARY ? (e) => {
+        if (!(e.target as HTMLElement | null)?.closest('input')) e.preventDefault();
+      } : undefined}
       role="search"
     >
       {stacked ? (
