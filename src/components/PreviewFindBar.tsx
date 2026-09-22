@@ -107,12 +107,15 @@ function rangeForMatch(spans: TextSpan[], m: MatchRange): Range | null {
  * Markdown 预览查找浮层：只搜索最终渲染出来的字符（markdown 语法标记不在渲染树中），
  * 匹配项经 CSS Custom Highlight API 高亮，导航循环回绕并滚动到当前项。
  * 不提供替换/跳行（渲染文本无法可靠映射回源码偏移）。
- * 手机端为贴窗口底缘的停靠条，控件分两行排布；桌面与平板仍是指针定位浮层。
+ * 安卓两端为贴窗口底缘的停靠条（指针定位在触屏上不可靠，见 FindReplaceBar 的同款注释）；
+ * 窄屏（手机）再把控件按两行重排，平板沿用桌面的一行布局。桌面仍是指针定位浮层。
  */
 export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, onClose }: PreviewFindBarProps) {
   const t = useT();
-  /* 手机端停靠形态：贴窗口底缘、按 --heid-kb 让位键盘（定位见 index.css 的 .heid-find-dock） */
-  const docked = IS_ANDROID_APP && useMediaQuery(NARROW_QUERY);
+  /* 停靠（贴窗口底缘、整幅宽度、按 --heid-kb 让位键盘）与两行重排分开看，定位见 index.css 的 .heid-find-dock */
+  const narrow = useMediaQuery(NARROW_QUERY);
+  const docked = IS_ANDROID_APP;
+  const stacked = docked && narrow;
   const [query, setQuery] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [regexp, setRegexp] = useState(false);
@@ -319,13 +322,16 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
         'border shadow-xl',
         isDarkMode ? 'border-zinc-600 bg-zinc-800/95 backdrop-blur-sm' : 'border-zinc-300 bg-white/95 backdrop-blur-sm',
         docked
-          ? 'heid-find-dock z-[70] rounded-none border-x-0 border-b-0 p-2 flex flex-col gap-2'
+          ? cn(
+              'heid-find-dock z-[70] rounded-none border-x-0 border-b-0 p-2',
+              stacked ? 'heid-find-dock--phone flex flex-col gap-2' : 'heid-find-dock--tablet flex items-center gap-2'
+            )
           : cn('fixed z-[70] w-[min(440px,92vw)] rounded-lg p-1.5 flex items-center', IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5')
       )}
       style={docked ? undefined : (pos ?? { visibility: 'hidden', left: -9999, top: 0 })}
       role="search"
     >
-      {docked ? (
+      {stacked ? (
         <>
           <div className={row}>
             {findInput(false)}

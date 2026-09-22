@@ -44,14 +44,19 @@ interface MatchState {
  * 查找 / 替换 / 跳转到行浮层（三端统一自绘，不使用 CodeMirror 官方面板）：
  * - 计数与高亮经 setFindMatchesEffect 下发给 editorSearch 扩展；
  * - 导航在匹配列表上循环回绕，替换支持正则 $1 引用；
- * - 手机端不用「指针位置浮层」：改成贴窗口底缘的停靠条（.heid-find-dock，见 index.css），
- *   键盘弹出时按 --heid-kb 上移，控件按行重排保证每项完整可见，触控目标 48dp。
+ * - 安卓两端不用「指针位置浮层」：改成贴窗口底缘的停靠条（.heid-find-dock，见 index.css），
+ *   键盘弹出时按 --heid-kb 上移，控件触控目标 48dp。窄屏（手机）再把控件按两行重排。
  */
 export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, canReplace, getPointer, subscribeViewUpdate, onClose }: FindReplaceBarProps) {
   const t = useT();
-  /* 手机端停靠形态：窄屏安卓才停靠。定位见 index.css 的 .heid-find-dock——
-     贴窗口底缘并按 --heid-kb 让位键盘，整幅宽度，不受文件树挤占窗格影响 */
-  const docked = IS_ANDROID_APP && useMediaQuery(NARROW_QUERY);
+  /* 停靠（贴窗口底缘的整幅条）与两行重排是两件事：
+     停靠看「是不是安卓」——触屏上指针定位不可靠（单击不一定产生 pointermove，浮层会落在
+     上一次点击的残留坐标上），而 WebView 不因输入法收缩视口，浮层还可能整个躲到键盘底下；
+     重排看「窄不窄」——手机整幅宽度只有 411dp，一行装不下输入框加七个 48dp 控件。
+     定位见 index.css 的 .heid-find-dock */
+  const narrow = useMediaQuery(NARROW_QUERY);
+  const docked = IS_ANDROID_APP;
+  const stacked = docked && narrow;
   const [query, setQuery] = useState('');
   const [replaceText, setReplaceText] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
@@ -341,10 +346,10 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
     </div>
   );
 
-  /** 替换行：行首/行尾的占位块只用于浮层形态与上一行的按钮对齐 */
+  /** 替换行：行首/行尾的占位块只用于「一行装下全部控件」的形态，与上一行的按钮对齐 */
   const replaceRow = replaceOpen && (
     <div className={row}>
-      {!docked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-12' : 'w-7')} />}
+      {!stacked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-12' : 'w-7')} />}
       <input
         value={replaceText}
         onChange={(e) => setReplaceText(e.target.value)}
@@ -359,7 +364,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
       <button onClick={replaceAll} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.replaceAll')} aria-label={t('find.replaceAll')}>
         <ReplaceAll size={15} />
       </button>
-      {!docked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-[132px]' : 'w-14')} />}
+      {!stacked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-[132px]' : 'w-14')} />}
     </div>
   );
 
@@ -380,7 +385,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
       <button onClick={jumpToLine} disabled={!gotoLineText} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.gotoTip')} aria-label={t('find.gotoLine')}>
         <ArrowDown size={14} />
       </button>
-      {!docked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-[132px]' : 'w-[86px]')} />}
+      {!stacked && <div className={cn('shrink-0', IS_TOUCH_PRIMARY ? 'w-[132px]' : 'w-[86px]')} />}
     </div>
   );
 
@@ -392,13 +397,16 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
         IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5',
         isDarkMode ? 'border-zinc-600 bg-zinc-800/95 backdrop-blur-sm' : 'border-zinc-300 bg-white/95 backdrop-blur-sm',
         docked
-          ? 'heid-find-dock z-[70] border-x-0 border-b-0 rounded-none p-2'
+          ? cn(
+              'heid-find-dock z-[70] border-x-0 border-b-0 rounded-none p-2',
+              stacked ? 'heid-find-dock--phone' : 'heid-find-dock--tablet'
+            )
           : 'fixed z-[70] w-[min(540px,92vw)] rounded-lg p-1.5'
       )}
       style={docked ? undefined : (pos ?? { visibility: 'hidden', left: -9999, top: 0 })}
       role="search"
     >
-      {docked ? (
+      {stacked ? (
         <>
           {/* 第一行：输入 + 上一个/下一个/关闭（拇指够得到的右侧） */}
           <div className={row}>
@@ -421,7 +429,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
           </div>
         </>
       ) : (
-        /* 查找行（浮层形态：一行装下全部控件） */
+        /* 查找行（一行装下全部控件：桌面浮层与平板停靠条共用） */
         <div className={row}>
           {expandBtn}
           {findInput(true)}

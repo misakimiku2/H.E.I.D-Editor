@@ -134,26 +134,38 @@ body {
   padding-bottom: 0 !important;
 }
 
-/* 手机端底部两栏的高度。查找栏的停靠位置由这两个值推导，
+/* 手机端底部两栏、平板端底部状态栏的高度。查找栏的停靠位置由这些值推导，
    StatusStrip / BottomToolbar 也读它们——改尺寸只需改这里 */
 :root {
   --heid-phone-strip: 48px;
   --heid-phone-toolbar: 52px;
+  /* 平板档底部是桌面那条状态栏：触屏高度 3rem（见 App.tsx 的 heid-statusbar 行内 style） */
+  --heid-tablet-status: 48px;
 }
 
-/* 手机端查找栏：贴窗口底缘，而不是贴编辑窗格底缘。
+/* 查找栏停靠形态（手机与平板共用，桌面仍是指针定位浮层）：贴窗口底缘，而不是贴编辑窗格底缘。
    窗格开着 2/3 屏的文件树时只剩 137dp，装不下输入框加四个 48dp 按钮（会溢出屏幕）；
    查找是窗口级的工具，本来就该占满整幅。
+   两档各让开自己那条常驻底部栏：手机让开信息栏 + 底部工具栏，平板让开桌面状态栏。
    键盘让位用 --heid-kb：本应用的 WebView 不因输入法收缩布局视口
-   （Chrome 99 与 124 实测 innerHeight 都不变），所以它是键盘高度的唯一来源 */
+   （Chrome 99 与 124 实测 innerHeight 都不变），所以它是键盘高度的唯一来源。
+   键盘弹出时底部只剩那条信息栏——工具栏退场、状态栏收成 48px，见上面两条 .heid-kb-open 规则 */
 .heid-find-dock {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc(var(--heid-phone-strip) + var(--heid-phone-toolbar) + var(--heid-safe-bottom, 0px));
+  bottom: calc(var(--heid-dock-inset, 0px) + var(--heid-safe-bottom, 0px));
+}
+.heid-find-dock--phone {
+  --heid-dock-inset: calc(var(--heid-phone-strip) + var(--heid-phone-toolbar));
+  --heid-dock-inset-kb: var(--heid-phone-strip);
+}
+.heid-find-dock--tablet {
+  --heid-dock-inset: var(--heid-tablet-status);
+  --heid-dock-inset-kb: var(--heid-tablet-status);
 }
 .heid-kb-open .heid-find-dock {
-  bottom: calc(var(--heid-kb, 0px) + var(--heid-phone-strip));
+  bottom: calc(var(--heid-kb, 0px) + var(--heid-dock-inset-kb, 0px));
 }
 
 /* 底部抽屉动画 */

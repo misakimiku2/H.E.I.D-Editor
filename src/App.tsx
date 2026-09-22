@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
-  Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2,
+  Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2, Search,
   GitCompare, Columns2, History, ChevronRight, ChevronLeft, ChevronDown, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
   Table, Code, Braces, Wand2, Printer, RefreshCw, AppWindow, Share2,
 } from 'lucide-react';
@@ -1666,6 +1666,21 @@ export default function App() {
               )}
             >
               <Redo2 size={20} />
+            </button>
+            {/* 查找：手机端在底部工具栏有入口，平板此前只有 Ctrl+F 和编辑器长按菜单——
+                平板多半没接实体键盘，等于没有入口。与手机走同一个 openFind，
+                编辑/预览态自动分流到对应的查找栏 */}
+            <button
+              onClick={() => openFind(false, false)}
+              disabled={!activeTab || !!activeTab.largePreview}
+              aria-label={t('common.find')}
+              title={showKbdHints ? `${t('common.find')} (Ctrl+F)` : t('common.find')}
+              className={cn(
+                "w-12 h-12 rounded-md flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none",
+                isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
+              )}
+            >
+              <Search size={20} />
             </button>
             {isTauri && (
               <button
