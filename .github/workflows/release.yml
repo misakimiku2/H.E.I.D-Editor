@@ -155,3 +155,55 @@ jobs:
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/' || { echo "::error::APK 内无 arm64 库，检查 --target 构建"; exit 1; }
           # gh release upload：只往已存在的 Release 追加资产（Release 由桌面任务建立）
           gh release upload "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" --clobber "$APK"
+
+  # 国内镜像：整条更新链原本只有 GitHub 一个源，而国内不挂代理到不了 github.com，
+  # 桌面端的表现为自动检查静默失败、用户永远停在旧版。这里把安装包与 APK 同步到
+  # Gitee Release，并维护一个固定 tag 的 latest.json 作为 updater 的第二端点。
+  # Gitee 的几处反直觉行为（target_commitish 与 body 必填、token 只能放 query、
+  # 同名附件不覆盖而是各挂一份且直链固定返回第一份）记在 scripts/mirror-gitee.mjs 头部。
+  mirror-gitee:
+    name: 国内镜像（Gitee Release）
+    needs: [desktop-release, android-release]
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 同步产物与镜像清单
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_REPO: ${{ vars.GITEE_REPO || 'misakimiku2/heid-editor' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::error::缺少仓库 secrets：GITEE_TOKEN。生成步骤与端点验证见 docs/update-mirror-plan.md。"
+            exit 1
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${{ github.ref_name }}"
+          NOTES="docs/RELEASE-NOTES-v${VERSION}.md"
+          EXE="H.I.D.E_${VERSION}_x64-setup.exe"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "H.I.D.E_${VERSION}_*"
+
+          # 镜像版清单：与 GitHub 那份只差下载地址——必须指向 Gitee 自己的直链，
+          # 否则用户拿到清单仍回 GitHub 取安装包，等于只镜像了一张纸
+          node scripts/gen-latest-json.mjs \
+            --version "$VERSION" \
+            --sig "${EXE}.sig" \
+            --notes "$NOTES" \
+            --url "https://gitee.com/${GITEE_REPO}/releases/download/${TAG}/${EXE}" \
+            --out latest-mirror.json
+
+          node scripts/mirror-gitee.mjs \
+            --version "$VERSION" \
+            --tag "$TAG" \
+            --notes "$NOTES" \
+            --file "$EXE" \
+            --file "H.I.D.E_${VERSION}_arm64.apk" \
+            --manifest latest-mirror.json

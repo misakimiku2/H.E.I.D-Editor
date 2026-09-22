@@ -93,10 +93,11 @@ import { useShowKbdHints } from './hooks/useHardwareKeyboard';
 import { useUpdater } from './hooks/useUpdater';
 import { useUpdateNotifications } from './hooks/useUpdateNotifications';
 import {
-  consumeStartupReleaseNotes, FALLBACK_APP_VERSION, LATEST_JSON_URL, loadReleaseNotesList,
-  maybeSeedCurrentVersionNotes, parseLatestJson,
+  consumeStartupReleaseNotes, FALLBACK_APP_VERSION, fetchLatestJson, loadReleaseNotesList,
+  maybeSeedCurrentVersionNotes, tauriHttpGetText,
   type StoredReleaseNotes,
 } from './lib/update';
+import { writeClipboardText } from './lib/fileOps';
 
 /* ---------- App ---------- */
 
@@ -605,6 +606,13 @@ export default function App() {
   }, []);
   useEffect(() => cancelRecentSubTimer, [cancelRecentSubTimer]);
   const [aboutOpen, setAboutOpen] = useState(false);
+  /* 「关于」里复制下载链接的回执，2 秒后自动收回 */
+  const [downloadLinkCopied, setDownloadLinkCopied] = useState(false);
+  useEffect(() => {
+    if (!downloadLinkCopied) return;
+    const timer = setTimeout(() => setDownloadLinkCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [downloadLinkCopied]);
   /* 移动端：标签页抽屉开合 */
   const [tabSheetOpen, setTabSheetOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -844,10 +852,7 @@ export default function App() {
     notesSeedAttemptedRef.current = true;
     void (async () => {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const res = await invoke<{ text: string }>('http_get', { url: LATEST_JSON_URL });
-        const info = parseLatestJson(res.text);
-        if (!info) return;
+        const info = await fetchLatestJson(tauriHttpGetText);
         if (maybeSeedCurrentVersionNotes(appVersion, info)) {
           setReleaseNotesList(loadReleaseNotesList());
           const seeded = consumeStartupReleaseNotes(appVersion);
@@ -2568,9 +2573,36 @@ export default function App() {
                     <span className="text-[10px] text-emerald-500 pointer-coarse:text-xs">{t('update.upToDate')}</span>
                   )}
                   {updater.phase === 'error' && (
-                    <span className="text-[10px] text-red-400 truncate max-w-[15rem] pointer-coarse:text-xs" title={updater.errorMessage ?? ''}>
-                      {t('update.errGeneric', { msg: updater.errorMessage ?? '' })}
+                    <span
+                      className="text-[10px] text-red-400 truncate max-w-[15rem] pointer-coarse:text-xs"
+                      title={updater.errorKind === 'unreachable' ? undefined : (updater.errorMessage ?? '')}
+                    >
+                      {updater.errorKind === 'unreachable'
+                        ? t('update.errUnreachable')
+                        : t('update.errGeneric', { msg: updater.errorMessage ?? '' })}
                     </span>
+                  )}
+                  {/* 后台自动检查没通：不弹窗打扰，但要在「关于」留痕并给一条不依赖代理的出路
+                      （更新源全不可达时用户会一直停在旧版而毫不知情） */}
+                  {updater.autoCheckFailed && updater.phase === 'idle' && (
+                    <div className="flex flex-col items-center gap-1 pointer-coarse:gap-2">
+                      <span className="text-[10px] text-amber-500 pointer-coarse:text-xs">
+                        {t(updater.errorKind === 'unreachable' ? 'update.autoFailedUnreachable' : 'update.autoFailed')}
+                      </span>
+                      <button
+                        onClick={() => {
+                          void writeClipboardText(updater.downloadPage)
+                            .then(() => setDownloadLinkCopied(true))
+                            .catch(() => { /* 剪贴板被系统拒绝：按钮保持原样，用户仍可手动选中地址 */ });
+                        }}
+                        className={cn(
+                          "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px]",
+                          isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
+                        )}
+                      >
+                        {downloadLinkCopied ? t('update.copied') : t('update.copyLink')}
+                      </button>
+                    </div>
                   )}
                   {updater.phase === 'downloading' && (
                     <span className="text-[10px] text-zinc-500 pointer-coarse:text-xs">{t('update.downloading')}</span>

@@ -12,7 +12,7 @@ import { IS_ANDROID_APP } from '../lib/platform';
 import { isTauri } from '../lib/fileIO';
 import { openExternal } from '../lib/openExternal';
 import {
-  LATEST_JSON_URL, RELEASES_PAGE, isNewerVersion, parseLatestJson,
+  downloadPageFor, fetchLatestJson, isNewerVersion, tauriHttpGetText, UpdateSourceUnavailableError,
 } from '../lib/update';
 
 export type UpdatePhase =
@@ -32,6 +32,12 @@ interface UpdaterState {
   latestVersion: string | null;
   notes: string | null;
   errorMessage: string | null;
+  /** 错误归类：'unreachable' = 所有更新源都没通（国内不挂代理就是这个），UI 据此换文案 */
+  errorKind: 'unreachable' | 'generic' | null;
+  /** 后台自动检查是否失败过：失败不该无声——用户会一直停在旧版而毫不知情，故在「关于」里留痕 */
+  autoCheckFailed: boolean;
+  /** 本次检查实际命中的 latest.json 地址；桌面走插件多源、拿不到，故可能为 null */
+  sourceUrl: string | null;
 }
 
 const INITIAL_STATE: UpdaterState = {
@@ -40,6 +46,9 @@ const INITIAL_STATE: UpdaterState = {
   latestVersion: null,
   notes: null,
   errorMessage: null,
+  errorKind: null,
+  autoCheckFailed: false,
+  sourceUrl: null,
 };
 
 /** 启动自动检查的延迟：避开启动瞬间的 I/O 高峰 */
@@ -55,20 +64,18 @@ export function useUpdater() {
     const source = opts?.source ?? 'manual';
     if (!isTauri || busyRef.current) return;
     busyRef.current = true;
-    setState(s => ({ ...s, phase: 'checking', source, errorMessage: null }));
+    setState(s => ({ ...s, phase: 'checking', source, errorMessage: null, errorKind: null, sourceUrl: null }));
     try {
       if (IS_ANDROID_APP) {
-        /* 安卓：版本检查提示（复用 http_get：原生无 CORS，超时/5MB 上限齐备） */
-        const { invoke } = await import('@tauri-apps/api/core');
-        const res = await invoke<{ text: string }>('http_get', { url: LATEST_JSON_URL });
-        const info = parseLatestJson(res.text);
-        if (!info) throw new Error('invalid latest.json');
+        /* 安卓：版本检查提示（复用 http_get：原生无 CORS，超时/5MB 上限齐备）；
+           多个候选源按序回退，见 LATEST_JSON_URLS */
+        const info = await fetchLatestJson(tauriHttpGetText);
         const { getVersion } = await import('@tauri-apps/api/app');
         const current = await getVersion();
         if (isNewerVersion(info.version, current)) {
-          setState(s => ({ ...s, phase: 'available', latestVersion: info.version, notes: info.notes ?? null }));
+          setState(s => ({ ...s, phase: 'available', autoCheckFailed: false, sourceUrl: info.sourceUrl, latestVersion: info.version, notes: info.notes ?? null }));
         } else {
-          setState(s => ({ ...s, phase: source === 'manual' ? 'upToDate' : 'idle', latestVersion: current }));
+          setState(s => ({ ...s, phase: source === 'manual' ? 'upToDate' : 'idle', autoCheckFailed: false, sourceUrl: info.sourceUrl, latestVersion: current }));
         }
         return;
       }
@@ -79,19 +86,26 @@ export function useUpdater() {
         setState(s => ({
           ...s,
           phase: 'available',
+          autoCheckFailed: false,
           latestVersion: update.version,
           notes: update.body ?? null,
         }));
       } else {
         updateRef.current = null;
-        setState(s => ({ ...s, phase: source === 'manual' ? 'upToDate' : 'idle', latestVersion: null }));
+        setState(s => ({ ...s, phase: source === 'manual' ? 'upToDate' : 'idle', autoCheckFailed: false, latestVersion: null }));
       }
     } catch (e) {
-      /* 启动自动检查失败静默不打扰；手动检查失败展示错误 */
+      /* 启动自动检查失败不弹窗打扰，但要在「关于」里留痕（见 autoCheckFailed）；手动检查直接展示 */
+      const errorKind = e instanceof UpdateSourceUnavailableError ? 'unreachable' as const : 'generic' as const;
       if (source === 'manual') {
-        setState(s => ({ ...s, phase: 'error', errorMessage: e instanceof Error ? e.message : String(e) }));
+        setState(s => ({
+          ...s,
+          phase: 'error',
+          errorKind,
+          errorMessage: e instanceof Error ? e.message : String(e),
+        }));
       } else {
-        setState(s => ({ ...s, phase: 'idle' }));
+        setState(s => ({ ...s, phase: 'idle', autoCheckFailed: true, errorKind }));
       }
     } finally {
       busyRef.current = false;
@@ -113,6 +127,7 @@ export function useUpdater() {
       setState(s => ({
         ...s,
         phase: 'error',
+        errorKind: 'generic',
         errorMessage: e instanceof Error ? e.message : String(e),
       }));
     } finally {
@@ -120,11 +135,14 @@ export function useUpdater() {
     }
   }, []);
 
-  /** 安卓：前往 Releases 页面手动下载 APK */
+  /** 手动下载入口该指向哪个页面（检查更新命中镜像就用镜像页） */
+  const downloadPage = downloadPageFor(state.sourceUrl);
+
+  /** 安卓：前往下载页手动安装 APK */
   const goDownload = useCallback(() => {
-    void openExternal(RELEASES_PAGE);
+    void openExternal(downloadPageFor(state.sourceUrl));
     setState(s => ({ ...s, phase: 'idle' }));
-  }, []);
+  }, [state.sourceUrl]);
 
   /** 关闭更新提示（不改变任何安装状态） */
   const dismiss = useCallback(() => {
@@ -148,6 +166,8 @@ export function useUpdater() {
     install,
     goDownload,
     dismiss,
+    /** 手动下载入口的落地页（GitHub 或镜像） */
+    downloadPage,
     /** 手动「检查更新」入口（安卓同样可用） */
     checkManually: () => void check({ source: 'manual' }),
   };

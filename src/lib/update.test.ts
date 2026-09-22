@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
-  compareVersions, consumeStartupReleaseNotes, getIgnoredVersion, isNewerVersion,
-  loadReleaseNotesList, maybeSeedCurrentVersionNotes, MAX_RELEASE_NOTES, parseLatestJson,
-  saveReleaseNotes, setIgnoredVersion, shouldNotifyUpdate, summarizeNotes,
+  compareVersions, consumeStartupReleaseNotes, downloadPageFor, fetchLatestJson,
+  getIgnoredVersion, isNewerVersion, LATEST_JSON_URLS, loadReleaseNotesList,
+  maybeSeedCurrentVersionNotes, MAX_RELEASE_NOTES, MIRROR_RELEASES_PAGE, parseLatestJson,
+  RELEASES_PAGE, saveReleaseNotes, setIgnoredVersion, shouldNotifyUpdate,
+  summarizeNotes, UpdateSourceUnavailableError,
 } from './update';
 
 function fakeStorage(): { store: Map<string, string>; getItem(k: string): string | null; setItem(k: string, v: string): void } {
@@ -71,6 +73,73 @@ describe('parseLatestJson', () => {
     expect(parseLatestJson('{"notes":"no version"}')).toBe(null);
     expect(parseLatestJson('[]')).toBe(null);
     expect(parseLatestJson('null')).toBe(null);
+  });
+});
+
+describe('fetchLatestJson（多源按序回退）', () => {
+  const body = (v: string) => JSON.stringify({ version: v });
+
+  it('第一个源不可达时用第二个源，且带 notes 一起返回', async () => {
+    const hit: string[] = [];
+    const info = await fetchLatestJson(async url => {
+      hit.push(url);
+      if (url === 'a') throw new Error('connection refused');
+      return body('1.4.2');
+    }, ['a', 'b']);
+    expect(info.version).toBe('1.4.2');
+    expect(hit).toEqual(['a', 'b']);
+  });
+
+  it('拿到内容但不合法也算该源不可用，继续下一个', async () => {
+    const info = await fetchLatestJson(
+      async url => (url === 'a' ? '<html>502 Bad Gateway</html>' : body('1.4.3')),
+      ['a', 'b'],
+    );
+    expect(info.version).toBe('1.4.3');
+  });
+
+  it('第一个源成功就不再打下一个（不浪费请求）', async () => {
+    let calls = 0;
+    await fetchLatestJson(async () => { calls += 1; return body('1.0.0'); }, ['a', 'b']);
+    expect(calls).toBe(1);
+  });
+
+  it('全部落空抛 UpdateSourceUnavailableError，并逐个记下失败原因', async () => {
+    const err = await fetchLatestJson(
+      async url => { if (url === 'a') throw new Error('timeout'); return ''; },
+      ['a', 'b'],
+    ).then(() => null).catch(e => e);
+    expect(err).toBeInstanceOf(UpdateSourceUnavailableError);
+    expect((err as UpdateSourceUnavailableError).kind).toBe('unreachable');
+    expect((err as UpdateSourceUnavailableError).attempts).toEqual([
+      { url: 'a', message: 'timeout' },
+      { url: 'b', message: 'invalid latest.json' },
+    ]);
+  });
+
+  it('返回命中的是哪个源（下载页要跟着它走）', async () => {
+    const info = await fetchLatestJson(
+      async url => (url === 'a' ? 'garbage' : body('1.4.4')),
+      ['a', 'b'],
+    );
+    expect(info.sourceUrl).toBe('b');
+  });
+
+  it('默认候选源非空且全是 https（镜像追加时别把明文地址混进来）', () => {
+    expect(LATEST_JSON_URLS.length).toBeGreaterThan(0);
+    for (const url of LATEST_JSON_URLS) expect(url.startsWith('https://')).toBe(true);
+  });
+});
+
+describe('downloadPageFor（下载页跟随命中的源）', () => {
+  it('命中镜像源就用镜像页', () => {
+    expect(downloadPageFor(LATEST_JSON_URLS[1])).toBe(MIRROR_RELEASES_PAGE);
+  });
+
+  it('命中 GitHub 或压根没命中就用 GitHub 页', () => {
+    expect(downloadPageFor(LATEST_JSON_URLS[0])).toBe(RELEASES_PAGE);
+    expect(downloadPageFor(null)).toBe(RELEASES_PAGE);
+    expect(downloadPageFor('不是个 URL')).toBe(RELEASES_PAGE);
   });
 });
 

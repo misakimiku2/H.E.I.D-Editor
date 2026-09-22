@@ -9,8 +9,24 @@
  */
 
 export const RELEASES_PAGE = 'https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest';
-export const LATEST_JSON_URL =
-  'https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest/download/latest.json';
+
+/** Gitee 镜像的下载页（国内直连可达）；与 LATEST_JSON_URLS 的第二条同源 */
+export const MIRROR_RELEASES_PAGE = 'https://gitee.com/misakimiku2/heid-editor/releases';
+
+/**
+ * latest.json 的候选源，按顺序尝试、取第一个拿到的合法清单。
+ * 桌面端由 tauri-plugin-updater 读 `tauri.conf.json` 的 `plugins.updater.endpoints`（同样是数组、
+ * 按序回退），这里服务的是安卓侧载的版本检查与启动时的文档自愈补种。
+ * 第二条是 Gitee 镜像：国内不挂代理到不了 github.com，只有 GitHub 一个源时桌面端会静默停在旧版。
+ * 镜像挂在一个固定 tag（`mirror-latest`）的 release 上，因为 Gitee 没有 GitHub 那种
+ * `releases/latest/download/...`「永远指向最新版」的路径；每次发版由 CI 删除重建，地址保持不变。
+ * 镜像那份清单里的安装包地址已改写成 Gitee 直链（否则拿到清单仍回 GitHub 取包，等于只镜像了清单），
+ * 生成与校验见 scripts/mirror-gitee.mjs。
+ */
+export const LATEST_JSON_URLS = [
+  'https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest/download/latest.json',
+  'https://gitee.com/misakimiku2/heid-editor/releases/download/mirror-latest/latest.json',
+];
 
 /** 版本号兜底（浏览器模式无 getVersion API；与 package.json / tauri.conf.json 同步维护） */
 export const FALLBACK_APP_VERSION = '1.4.1';
@@ -77,6 +93,69 @@ export function parseLatestJson(raw: string): LatestReleaseInfo | null {
   } catch {
     return null;
   }
+}
+
+/** 所有候选源都没拿到合法清单（网络不可达 / 镜像下线 / 内容不合法） */
+export class UpdateSourceUnavailableError extends Error {
+  readonly kind = 'unreachable' as const;
+  constructor(readonly attempts: { url: string; message: string }[]) {
+    super('update-source-unavailable');
+    this.name = 'UpdateSourceUnavailableError';
+  }
+}
+
+/**
+ * 取回某个源的 latest.json 文本。由各端注入（安卓/桌面走 `http_get` 命令），
+ * 以便 fetchLatestJson 本身不依赖 Tauri、可单测。
+ */
+export type LatestJsonGetter = (url: string) => Promise<string>;
+
+/** 取某个源的文本：Tauri 的 `http_get` 命令（原生请求，无 CORS、超时与体积上限齐备） */
+export const tauriHttpGetText: LatestJsonGetter = async url => {
+  const { invoke } = await import('@tauri-apps/api/core');
+  const res = await invoke<{ text: string }>('http_get', { url });
+  return res.text;
+};
+
+/** 命中的清单源 + 其地址，供调用方决定「前往下载」该开哪个页面 */
+export type FetchedRelease = LatestReleaseInfo & { sourceUrl: string };
+
+/**
+ * 依次尝试候选源，取回并解析 latest.json：单个源请求失败或内容不合法都算该源不可用，
+ * 继续往下试；全部落空抛 UpdateSourceUnavailableError（带每个源的失败原因，便于排查）。
+ */
+export async function fetchLatestJson(
+  get: LatestJsonGetter,
+  urls: string[] = LATEST_JSON_URLS,
+): Promise<FetchedRelease> {
+  const attempts: { url: string; message: string }[] = [];
+  for (const url of urls) {
+    try {
+      const info = parseLatestJson(await get(url));
+      if (info) return { ...info, sourceUrl: url };
+      attempts.push({ url, message: 'invalid latest.json' });
+    } catch (e) {
+      attempts.push({ url, message: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  throw new UpdateSourceUnavailableError(attempts);
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 检查更新命中的是哪个源，「前往下载 / 复制下载链接」就用那个源的页面：
+ * 走镜像说明 GitHub 到不了，再给 GitHub 地址等于没给。
+ */
+export function downloadPageFor(sourceUrl: string | null): string {
+  if (sourceUrl && hostOf(sourceUrl) === hostOf(MIRROR_RELEASES_PAGE)) return MIRROR_RELEASES_PAGE;
+  return RELEASES_PAGE;
 }
 
 /* ---------- 「忽略此版本」持久化 ---------- */

@@ -22,6 +22,7 @@
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | `src-tauri/keys/heid.key` 文件的完整内容 |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 留空（密钥未设密码） |
+| `GITEE_TOKEN` | Gitee 私人令牌（只勾 `projects` 权限），国内镜像任务用；缺失时该任务显式报错 |
 
 ### 3. 安卓 release 签名（v1.4 起）
 
@@ -78,6 +79,12 @@ git push origin v1.0.1
   在 `--target aarch64` 下名不副实），并断言包内确有 `lib/arm64-v8a/`。
   该任务 `needs: desktop-release`：Release 正文（= 应用内更新说明）由桌面任务用
   `--notes-file` 建立，两任务并行时安卓先跑完会抢先用自动生成的说明建 Release、把正文占掉。
+- **国内镜像**（`mirror-gitee` 任务，`needs` 上面两个）：把安装包与 APK 同步到 Gitee Release
+  （`misakimiku2/heid-editor`），并用 `scripts/gen-latest-json.mjs` 生成一份**下载地址指向 Gitee**
+  的 `latest.json`，挂到固定 tag `mirror-latest` 上——它就是 `tauri.conf.json` 里 updater 的第二
+  endpoint，也是安卓「前往下载」在 GitHub 不可达时指向的页面。为什么需要它、以及 Gitee 那几处
+  反直觉的 API 行为，记在 [update-mirror-plan.md](update-mirror-plan.md) 与 `scripts/mirror-gitee.mjs` 头部。
+  镜像失败不影响 GitHub 侧已完成的发布（该任务在最后，仅自身标红）。
 
 日常 CI（`.github/workflows/ci.yml`，push/PR 触发）运行 vitest + tsc + 前端构建、
 Windows NSIS 构建（**关闭** `createUpdaterArtifacts`，无需 secrets）、安卓 arm64 debug APK 构建。
