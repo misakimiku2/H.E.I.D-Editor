@@ -342,7 +342,7 @@ export function TabBar({
         onClick={onNewTab}
         className={cn(
           "rounded-md transition-colors shrink-0 flex items-center justify-center",
-          IS_TOUCH_PRIMARY ? "w-11 h-11 -mr-1" : "p-1.5",
+          IS_TOUCH_PRIMARY ? "w-12 h-12 -mr-1" : "p-1.5",
           isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200/70 text-zinc-600"
         )}
         title={newTabTitle}

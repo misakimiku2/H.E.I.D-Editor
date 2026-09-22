@@ -295,6 +295,20 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
     </button>
   );
 
+  /* 跳转到行的触屏开关：桌面有 Ctrl+G，触屏两端此前没有任何入口（平板连键盘都常不接）。
+     用与三个匹配选项同款的开关态样式；放在导航组旁而不是行首——行首那格是展开替换的，
+     替换行的对齐占位块按它算 */
+  const gotoBtn = IS_TOUCH_PRIMARY && (
+    <button
+      onClick={() => setGotoOpen(v => !v)}
+      className={optBtn(gotoOpen)}
+      title={t('find.gotoLine')}
+      aria-label={t('find.gotoLine')}
+    >
+      <Hash size={15} />
+    </button>
+  );
+
   const optionButtons = (
     <>
       <button onClick={() => setCaseSensitive(v => !v)} className={optBtn(caseSensitive)} title={t('find.caseSensitive')} aria-label={t('find.caseSensitive')}>
@@ -418,6 +432,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
           <div className={row}>
             {optionButtons}
             {expandBtn}
+            {gotoBtn}
             <span
               className={cn(
                 'flex-1 min-w-0 truncate text-right text-xs tabular-nums',
@@ -435,6 +450,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
           {findInput(true)}
           {optionButtons}
           {divider}
+          {gotoBtn}
           {navButtons}
         </div>
       )}

@@ -93,20 +93,22 @@ describe('FindReplaceBar 三端形态', () => {
     return document.querySelector('[role=search]') as HTMLElement;
   }
 
-  it('桌面：指针定位浮层，不挂停靠类', async () => {
+  it('桌面：指针定位浮层，不挂停靠类，也没有跳行开关（Ctrl+G 已够）', async () => {
     const panel = await renderForm(false, false);
     expect(panel.className).toContain('fixed');
     expect(panel.className).not.toContain('heid-find-dock');
+    expect(panel.querySelector('[aria-label="find.gotoLine"]')).toBeNull();
   });
 
   it('安卓平板：整幅停靠条，控件仍是一行', async () => {
     const panel = await renderForm(true, false);
     expect(panel.className).toContain('heid-find-dock--tablet');
     expect(panel.className).not.toContain('heid-find-dock--phone');
-    /* 一行形态：展开替换与三个匹配选项与导航钮同属一个行容器 */
+    /* 一行形态：展开替换 + 三个匹配选项 + 跳行开关 + 三个导航钮同属一个行容器 */
     const rows = [...panel.children] as HTMLElement[];
     expect(rows[0].className).toContain('flex items-center');
-    expect(rows[0].querySelectorAll('button')).toHaveLength(7);
+    expect(rows[0].querySelectorAll('button')).toHaveLength(8);
+    expect(rows[0].querySelector('[aria-label="find.gotoLine"]')).toBeTruthy();
   });
 
   it('手机端：停靠条 + 两行重排', async () => {
@@ -116,6 +118,6 @@ describe('FindReplaceBar 三端形态', () => {
     const rows = [...panel.children] as HTMLElement[];
     expect(rows).toHaveLength(2);
     expect(rows[0].querySelectorAll('button')).toHaveLength(3);
-    expect(rows[1].querySelectorAll('button')).toHaveLength(4);
+    expect(rows[1].querySelectorAll('button')).toHaveLength(5);
   });
 });

@@ -1566,7 +1566,7 @@ export default function App() {
           onClick={() => setMenuOpen(v => !v)}
           className={cn(
             IS_TOUCH_PRIMARY
-              ? "w-11 h-11 rounded-md transition-colors flex items-center justify-center"
+              ? "w-12 h-12 rounded-md transition-colors flex items-center justify-center"
               : "p-1.5 rounded-md transition-colors flex items-center gap-1 text-xs",
             menuOpen
               ? (isDarkMode ? "bg-zinc-700 text-zinc-200" : "bg-zinc-200 text-zinc-700")
@@ -1768,7 +1768,7 @@ export default function App() {
                   onClick={() => editor.setMdView(m)}
                   title={title}
                   className={cn(
-                    IS_TOUCH_PRIMARY ? "w-11 h-10" : "w-7 h-6",
+                    IS_TOUCH_PRIMARY ? "w-12 h-12" : "w-7 h-6",
                     "rounded-full flex items-center justify-center transition-all",
                     active
                       ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
@@ -1804,7 +1804,7 @@ export default function App() {
                   onClick={() => editor.setCsvState({ csvView: m })}
                   title={title}
                   className={cn(
-                    IS_TOUCH_PRIMARY ? "w-11 h-10" : "w-7 h-6",
+                    IS_TOUCH_PRIMARY ? "w-12 h-12" : "w-7 h-6",
                     "rounded-full flex items-center justify-center transition-all",
                     active
                       ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
@@ -1841,7 +1841,7 @@ export default function App() {
                     onClick={() => editor.setJsonView(m)}
                     title={title}
                     className={cn(
-                      cn(IS_TOUCH_PRIMARY ? "w-11 h-10" : "w-7 h-6", "rounded-full flex items-center justify-center transition-all"),
+                      cn(IS_TOUCH_PRIMARY ? "w-12 h-12" : "w-7 h-6", "rounded-full flex items-center justify-center transition-all"),
                       active
                         ? cn("shadow-sm", isDarkMode ? "bg-zinc-600 text-zinc-100" : "bg-white text-zinc-700")
                         : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
@@ -1856,7 +1856,7 @@ export default function App() {
               onClick={() => void handleFormatStruct()}
               disabled={!!activeTab.readOnly}
               className={cn(
-                IS_TOUCH_PRIMARY ? "w-11 h-10 flex items-center justify-center" : "p-1.5",
+                IS_TOUCH_PRIMARY ? "w-12 h-12 flex items-center justify-center" : "p-1.5",
                 "rounded-md transition-colors shrink-0 disabled:opacity-40",
                 isDarkMode ? "hover:bg-zinc-600/70 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
               )}
@@ -1889,7 +1889,7 @@ export default function App() {
                 onClick={() => setThemeMode(m)}
                 title={title}
                 className={cn(
-                  cn(IS_TOUCH_PRIMARY ? "w-11 h-10" : "w-7 h-6", "rounded-full flex items-center justify-center transition-all"),
+                  cn(IS_TOUCH_PRIMARY ? "w-12 h-12" : "w-7 h-6", "rounded-full flex items-center justify-center transition-all"),
                   active
                     ? cn("shadow-sm", isDarkMode ? "bg-zinc-600" : "bg-white", activeColor)
                     : (isDarkMode ? "text-zinc-500 hover:text-zinc-300" : "text-zinc-500 hover:text-zinc-700")
@@ -2372,7 +2372,7 @@ export default function App() {
                 onClick={() => setStatusMenu(m => m === 'eol' ? null : 'eol')}
                 className={cn(
                   "rounded font-medium transition-colors flex items-center gap-1 shrink-0",
-                  IS_TOUCH_PRIMARY ? "min-h-[44px] min-w-[44px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
+                  IS_TOUCH_PRIMARY ? "min-h-[48px] min-w-[48px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
                 )}
                 title={t('status.eol')}
@@ -2386,7 +2386,7 @@ export default function App() {
                 onClick={() => setStatusMenu(m => m === 'encoding-root' ? null : 'encoding-root')}
                 className={cn(
                   "rounded font-medium transition-colors flex items-center gap-1 shrink-0",
-                  IS_TOUCH_PRIMARY ? "min-h-[44px] min-w-[44px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
+                  IS_TOUCH_PRIMARY ? "min-h-[48px] min-w-[48px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-200 text-zinc-600"
                 )}
                 title={t('status.encoding')}
@@ -2401,7 +2401,7 @@ export default function App() {
                   disabled={!activeTab.isDirty}
                   className={cn(
                     "rounded font-medium transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0",
-                    IS_TOUCH_PRIMARY ? "min-h-[44px] min-w-[44px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
+                    IS_TOUCH_PRIMARY ? "min-h-[48px] min-w-[48px] justify-center px-3 text-xs" : "px-2 py-0.5 text-[10px]",
                     isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
                   )}
                   title={t('status.revertTip')}
