@@ -25,18 +25,27 @@ if [ ! -f "$APK" ]; then
 fi
 
 echo "== 安装到所有在线设备"
-found=0
-while read -r serial state; do
-  [ "$state" = "device" ] || continue
-  found=1
-  echo "-- $serial"
-  adb -s "$serial" install -r "$APK"
-  adb -s "$serial" shell am force-stop com.nexus.editor
-done < <(adb devices | awk 'NR>1 {print $1, $2}')
+# 先把设备列表收进数组再循环。adb shell 会读走 stdin，如果直接在 `while read` 里调它，
+# 第一台装完后剩下的设备行就被吃掉了——表现是只有手机装成功、平板静默跳过。
+mapfile -t devices < <(adb devices | awk 'NR>1 && $2=="device" {print $1}')
 
-if [ "$found" = "0" ]; then
+if [ "${#devices[@]}" = "0" ]; then
   echo "没有在线的安卓设备（adb devices 看一眼）" >&2
   exit 1
 fi
-echo "== 完成。重新点开 App 就是新代码。"
+
+fail=0
+for serial in "${devices[@]}"; do
+  [ -n "$serial" ] || continue
+  echo "-- $serial"
+  if ! adb -s "$serial" install -r "$APK" </dev/null; then
+    echo "!! $serial 安装失败（跳过后继续装其他设备）" >&2
+    fail=1
+    continue
+  fi
+  adb -s "$serial" shell am force-stop com.nexus.editor </dev/null
+done
+
+[ "$fail" = "0" ] || exit 1
+echo "== 完成，共 ${#devices[@]} 台。重新点开 App 就是新代码。"
 echo "   扫码诊断：进扫一扫后点底部那行调试字，展开的日志截图即可回传。"

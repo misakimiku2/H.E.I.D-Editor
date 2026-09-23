@@ -615,10 +615,12 @@ rustls 用的就是 ring 后端），而 `ring::aead::CHACHA20_POLY1305` / `ring
 | --- | --- | --- |
 | 0 ✅ | 两端 hello 成功；抓包看不到明文 —— **2026-09-23 已达** | `cargo test --lib link::`（21 例）+ `npx vitest run src/lib/link.test.ts`（11 例）+ `node scripts/link-verify.mjs`（18 项运行时检查，要先起带 CDP 的 dev）。该脚本**用 Node 的 crypto 独立实现了一遍对端协议**、分别扮演手机与桌面，所以"能互通"不是 Rust 自己跟自己通 |
 | 1 ✅🔧 | **免扫重连核心已完成并实测（2026-09-23）**：桌面二维码（带一次性票 + 6 位短码 + 长期身份指纹）、TOFU 确认、配对后双方各存一把从已认证 ECDH 派生的 LS、免扫自动重连、多配对单在线、票用后即废。**应用内相机扫码器也已落地并两台实测能扫上**（§7.2 三点全过，见上）。扫码器手感已于 2026-09-24 重做收口：
-一次开流（旧版为拿权限多开一枪）、切换用冻结帧过渡不再硬切黑屏、捏合改对数映射 + 每帧低通下发、
+一次开流（旧版为拿权限多开一枪）、扫码定为**单镜头**（用户主动换镜头才走冻结帧过渡）、
+捏合改对数映射 + 每帧低通下发、
 无硬件变焦的镜头由数码放大顶上（解码只喂放大后的可见区域）、占用按退避重试不再误报「权限被拒」，
-并修掉预览被设置弹窗 `backdrop-blur` 关成一格（平板上非全屏）的真 bug。**还开着**：Mate 40 Pro 未跑本轮、
-黑闪与跟手需人眼 | `cargo test --lib link::`（38 例，含两端 TCP 真实往返）+ `node scripts/link-verify.mjs`（阶段 1 全绿：Node 独立实现验出桌面 Ed25519 身份签名 + 二维码指纹、LS 对称、免扫重连、票作废）+ 两台真机扫一扫实测（Tab S8 原生 BarcodeDetector、Mate 走 jsQR 兜底，均能扫上配对）+ `npx vitest run src/lib/scanCam.test.ts src/components/QrScanner.camera.test.tsx`（28 例：变焦数学、一次开流、占用/权限分流、捏合接线） |
+并修掉预览被设置弹窗 `backdrop-blur` 关成一格（平板上非全屏）的真 bug。**已两台复测通过**
+（2026-09-24：黑闪与卡顿随「换镜头」动作一并消失，Mate 靠 8K 交付尺寸选中主摄）；
+捏合判定「够用、谈不上很流畅、扫码够了」，不再花一轮 → `docs/bugs/2026-09-23-scanner-camera-switch-ux.md` | `cargo test --lib link::`（38 例，含两端 TCP 真实往返）+ `node scripts/link-verify.mjs`（阶段 1 全绿：Node 独立实现验出桌面 Ed25519 身份签名 + 二维码指纹、LS 对称、免扫重连、票作废）+ 两台真机扫一扫实测（Tab S8 原生 BarcodeDetector、Mate 走 jsQR 兜底，均能扫上配对）+ `npx vitest run src/lib/scanCam.test.ts src/components/QrScanner.camera.test.tsx`（36 例：变焦数学、一次开流、选主摄、占用/权限分流、探测期不给看画面、捏合接线） |
 | 2 树同步 + 读写 | 手机浏览/打开/编辑/保存桌面文件 | **逃逸防护测试先于功能**：`..` / 盘符切换 / UNC / symlink 四组用例先写成 `#[cfg(test)]` |
 | 3 标签同步 | 手机看到桌面聚焦窗口的标签并接着改 | 多开两个窗口验「聚焦窗口那份」的判定 |
 | 4 实时更新 | 桌面改文件，手机秒级跟上 | 拿本仓（含 `node_modules`）当共享根，先量事件量与去抖，再谈功能 |
@@ -627,7 +629,48 @@ rustls 用的就是 ring 后端），而 `ring::aead::CHACHA20_POLY1305` / `ring
 
 两台真机都是 **release 签名**（Tab S8 = 1.4.1、Mate 40 Pro = 1.4.2），本地 release 包可 `install -r`
 原地升级、保留 SAF 授权；换 debug 包要卸载，会清掉授权 —— 阶段 0 起就固定用 release 包测，
-顺带把 §11.2 那条一直验到发版。
+顺带把 §11.2 那条一直验到发版。装机统一走 `scripts/android-install.sh`（`install-only` 跳过构建）。
+
+### 下一会话开工单：阶段 2（树同步 + 读写）
+
+**先做三条低成本收尾**（都属于阶段 1，别带着它们开工下一阶段）：
+
+1. ~~扫码器灰色播放按钮占位符定性~~ —— Tab S8 复测已不见，最可能就是选错镜头那段时间的产物。
+   若再现：进扫一扫点底部调试行展开日志环缓冲，看 `play(attach) 成功/被拒` 一行即可判定
+   （logcat 在华为上不可靠，只能走界面这份）。
+2. ~~切换黑闪与卡顿~~ —— **已结**（2026-09-24 用户复测两台均无，并给出因果：症状挂在「换镜头」
+   这个动作上，扫码改成单镜头后动作消失，症状随之消失）；**捏合跟手**也已判定
+   「够用、谈不上很流畅、扫码够了」，不再花一轮。三条收尾全部结清，直接进阶段 2。
+3. ~~Tab S8 补机型档案种子~~ —— Tab S8 只有两颗后置、探测本来就便宜，复测无问题，不必补。
+
+**然后进阶段 2，顺序是硬的**：
+
+1. **逃逸防护测试先于实现**（设计稿 §4.3，本方案唯一「写错就把整个磁盘暴露给局域网」的地方）：
+   新建 `src-tauri/src/link/roots.rs` 的 `resolve_rel()`，先把四组 `#[cfg(test)]` 写成失败再实现——
+   `..` 穿越 / Windows 盘符切换（`C:`→`D:`）/ UNC（`\\server\share`）/ symlink 指向根外。
+   Windows 语义要单独当心：大小写不敏感比较、`C:` 与 `C:\` 的驱动器相对路径、`\\?\` 前缀、
+   以及**必须 `canonicalize` 之后再前缀校验**（reparse point 只有解析后才露出真目标）。
+2. 命令面 `list` / `stat` / `read` / `write`，走已实测的 AEAD 会话，零新增依赖；
+   `write` 带 `hash` + `mtimeMs` 基线，不一致返回 `conflict` + 服务端最新内容（§5.4，不做自动三方合并）。
+3. 前端 `hide-remote://<deviceId>/<relPath>` 分支：`platform.ts`（displayName/dirName）、
+   `fileIO.ts`（read/write/save，远程保存不走 SAF 新建文档）、`largeFile.ts`（fileSize/classify）、
+   `fileTree.ts` 的 `remoteDirLister`、`FileTreeSidebar` 的「远程设备」根（**v1 保持单根**）。
+   冲突复用既有 diff 时间线（`diffTimeline.ts`）。
+4. 设置面板两条明示：**当前共享范围**（「手机端可访问 `D:\projects\notes`」）+
+   bind 成功但 N 秒内无任何连接时提示「可能被 Windows 防火墙拦截」并给放行步骤
+   —— 半死状态比直接报错难查，这条是 §7.2 第 2 条留下的实现要求，本机环境验不出用户侧结论，
+   只验通路本身（这台机器有历史 node 放行规则，别拿它当防火墙证据）。
+5. 能力边界如实标注，不做：>32MB 远程打开、跨文件搜索含远程、手机端系统级操作（置灰）。
+
+**验收**：`cargo test --lib link::` 含四组逃逸用例 + 双端 `list/stat/read/write` 真实 TCP 往返；
+前端 vitest 覆盖 `hide-remote://` 的 displayName/dirName/size 分支；真机在共享根里打开一个 md、
+编辑、保存回桌面，并**人为制造一次冲突**看 diff 能不能逐条采纳。
+
+**若阶段 2 卡住**：v1.5.0 还欠 51（语言高亮覆盖）与 52②（弹窗层 48dp 提档），都是独立小项，可以先做。
+
+**设备实测的固定动作**（每轮都照做，否则又会烧掉十几轮假阴性）：截图给模型会被缩放，
+必须先裁 ≤1100px 宽、亲眼读坐标、再换算 crop 偏移；夜里两台都会 doze，先确认 `mWakefulness`；
+探测/切镜头期间不要显示定格画面（会被读成卡死）。
 
 
 42. **链路基座与扫码配对**
