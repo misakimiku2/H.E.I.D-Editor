@@ -2470,6 +2470,7 @@ dependencies = [
  "notify-debouncer-full",
  "rayon",
  "regex",
+ "ring",
  "serde",
  "serde_json",
  "tauri",

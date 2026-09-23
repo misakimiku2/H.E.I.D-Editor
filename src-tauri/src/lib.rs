@@ -2,6 +2,8 @@ mod encoding;
 mod external;
 mod fsops;
 mod http;
+/// 设备互联（v1.5）：桌面与手机两端都要编进去 —— 桌面当服务端、手机当客户端
+mod link;
 #[cfg(desktop)]
 mod large_file;
 mod render;
@@ -148,7 +150,9 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_clipboard_manager::init());
+        .plugin(tauri_plugin_clipboard_manager::init())
+        /* 设备互联状态：两端共用（桌面起服务端、手机当客户端），所以不按平台裁剪 */
+        .manage(link::LinkState::default());
 
     /* 桌面专属：单实例必须最先注册（官方要求），启动路径状态供文件关联命令读取 */
     #[cfg(desktop)]
@@ -169,6 +173,12 @@ pub fn run() {
             write_text_file,
             http::http_get,
             http::http_get_binary,
+            link::link_status,
+            link::link_ticket,
+            link::link_server_start,
+            link::link_server_stop,
+            link::link_client_connect,
+            link::link_client_disconnect,
             external::open_external,
             render::render_page,
             render::render_result,

@@ -1,8 +1,9 @@
 import { useEffect } from 'react';
 import {
   X, RotateCcw, Settings, Palette, Sparkles, Type, LayoutGrid, Save,
-  Check, Moon, Sun, ArrowLeft, Minus, Plus,
+  Check, Moon, Sun, ArrowLeft, Minus, Plus, Usb,
 } from 'lucide-react';
+import { DeviceLinkSection } from './DeviceLinkSection';
 import { cn } from '../lib/utils';
 import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import {
@@ -518,6 +519,10 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
                 {t('settings.draftNote')}
               </p>
             </>
+          ))}
+
+          {sectionNode(Usb, t('settings.section.deviceLink'), (
+            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} />
           ))}
         </div>
 

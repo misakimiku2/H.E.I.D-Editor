@@ -76,6 +76,11 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun kb(): Int = cssKb
 
+    /** 设备型号：设备互联拿它当手机端的显示名（设计稿 §12.1 第 4 条），
+        桌面侧「已连接：xxx」与配对确认框都用这一份 */
+    @JavascriptInterface
+    fun deviceModel(): String = android.os.Build.MODEL
+
     /** SAF content URI → 显示文件名（数字型 URI 前端无法自行解析） */
     @JavascriptInterface
     fun displayName(uri: String): String? = queryDisplayName(Uri.parse(uri))

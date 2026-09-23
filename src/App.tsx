@@ -36,6 +36,7 @@ import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDo
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
+import { autoStartFromPrefs } from './lib/link';
 import { LANGUAGE_LABELS, detectLanguageFromPath } from './lib/codemirror';
 import {
   EOL_LABELS, applyLineEnding, type LineEnding,
@@ -819,6 +820,14 @@ export default function App() {
       closeAbout: () => setAboutOpen(false),
     },
   });
+
+  /* ---- 设备互联：上次开着就自动重新 bind（2026-09-23 定的「记忆开关」）。
+     等 hydrated 之后再开：阶段 2 的共享范围取的是文件树当前根，早了会拿到空值，
+     顺序先按最终形态摆好，免得那时再挪一次。 ---- */
+  useEffect(() => {
+    if (!hydrated) return;
+    void autoStartFromPrefs();
+  }, [hydrated]);
 
   /* ---- 分屏同步滚动 ---- */
   const { attachEditorScroller, attachPreviewScroller } = useSplitScroll();
