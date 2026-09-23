@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.util.Log
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -66,6 +67,14 @@ class MainActivity : TauriActivity() {
 
   /** 前端桥：安全区 / SAF 文件访问（读写 content URI） */
   private inner class InsetBridge {
+    /** 前端诊断日志进 logcat：release 包没有 CDP，WebView 的 console 又不落 logcat，
+        扫码器这类要看「到底选了哪颗镜头 / play() 有没有被拦」的东西必须有这条道。
+        读法：adb logcat -d -v time -s HeidScan */
+    @JavascriptInterface
+    fun log(msg: String) {
+      Log.i("HeidScan", msg)
+    }
+
     @JavascriptInterface
     fun top(): Int = cssTop
 

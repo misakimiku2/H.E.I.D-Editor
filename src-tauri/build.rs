@@ -41,7 +41,15 @@ fn main() {
             "link_server_start",
             "link_server_stop",
             "link_client_connect",
+            "link_client_pair",
+            "link_client_pair_code",
+            "link_client_reconnect",
             "link_client_disconnect",
+            "link_pair_qr",
+            "link_pair_approve",
+            "link_pair_deny",
+            "link_pairings_list",
+            "link_pairing_revoke",
         ])),
     )
     .expect("failed to run tauri-build");

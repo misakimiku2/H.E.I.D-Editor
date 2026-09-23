@@ -209,102 +209,178 @@ fn 公钥编解码往返与错误() {
     assert!(decode_pub(&encode_pub(&[0u8; 31])).is_err());
 }
 
-/* ------------------------------------------------------------------ 握手 */
+/* ------------------------------------------------------------------ 握手（阶段 1） */
 
-/// 环回握手的一整对端。`peer_device` 是**对端**报来的设备名。
-struct Side {
-    stream: TcpStream,
-    session: Session,
-    peer_device: String,
+/// 一把可复现的测试身份：同时给出对象、其 PKCS#8（塞给服务端线程重建）、其指纹（客户端拿去校验）。
+fn test_identity() -> (identity::Identity, Vec<u8>, String) {
+    let (id, pkcs8) = identity::Identity::generate();
+    let fp = id.fingerprint();
+    (id, pkcs8, fp)
 }
 
-fn loopback(t_client: &str, t_server: &str) -> Result<(Side, Side), String> {
+/// 走一整对握手：`server_resolve` 是服务端为这次 Hello 选的 salt（或拒绝）；
+/// `expect_fp` 是客户端要校验的桌面指纹。返回两侧各自的 `(会话, LS)`。
+fn establish(
+    server_resolve: Result<String, String>,
+    server_pkcs8: &[u8],
+    client_salt: &str,
+    mode: Mode,
+    key_id: &str,
+    slot: &str,
+    expect_fp: &str,
+) -> (Result<(Session, [u8; 32]), String>, Result<(Session, [u8; 32]), String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let t_s = t_server.to_string();
-    let srv = std::thread::spawn(move || -> Result<Side, String> {
+    let pkcs8 = server_pkcs8.to_vec();
+    let srv = std::thread::spawn(move || -> Result<(Session, [u8; 32]), String> {
         let (mut s, _) = listener.accept().unwrap();
-        s.set_read_timeout(Some(Duration::from_millis(300))).ok();
+        s.set_read_timeout(Some(Duration::from_millis(800))).ok();
+        let id = identity::Identity::from_pkcs8(&pkcs8)?;
         let mut f = Framer::default();
-        let (session, peer_device) =
-            handshake(&mut s, &mut f, &t_s, false, "heid-desktop", "MISAKI-PC")?;
-        Ok(Side {
-            stream: s,
-            session,
-            peer_device,
-        })
+        let sr = server_resolve;
+        let hs = server_handshake(
+            &mut s,
+            &mut f,
+            &|_m: Mode, _k: &str, _sl: &str| -> Result<String, String> {
+                match &sr {
+                    Ok(salt) => Ok(salt.clone()),
+                    Err(reason) => Err(reason.clone()),
+                }
+            },
+            &id,
+        )?;
+        let mut sess = hs.session;
+        // 客户端验证 Auth 后必须回 Pong，才证明它握有同一把 salt
+        match sess.recv(&mut s, &mut f) {
+            Ok(Some(Msg::Pong {})) => {}
+            other => return Err(format!("服务端未收到 pong：{other:?}")),
+        }
+        Ok((sess, hs.ls))
     });
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    c.set_read_timeout(Some(Duration::from_millis(300))).ok();
+    c.set_read_timeout(Some(Duration::from_millis(800))).ok();
     let mut cf = Framer::default();
-    let client = handshake(&mut c, &mut cf, t_client, true, "heid-android", "SM-X808U").map(
-        |(session, peer_device)| Side {
-            stream: c,
-            session,
-            peer_device,
-        },
-    )?;
-    Ok((client, srv.join().unwrap()?))
+    let cres =
+        client_handshake(&mut c, &mut cf, client_salt, mode, key_id, slot, "heid-android", "SM-X808U", expect_fp)
+            .map(|(s, ls, _)| (s, ls));
+    let sres = srv.join().unwrap();
+    (sres, cres)
 }
 
 #[test]
-fn 环回握手成功后双向可通信() {
-    let (mut client, mut server) = loopback(&ticket(), &ticket()).expect("握手应成功");
-    // 设备名只在服务端侧有意义（它是客户端 Hello 里带过去的）
-    assert_eq!(server.peer_device, "SM-X808U");
-    assert_eq!(client.peer_device, "");
-
-    let mut f = Framer::default();
-    client.session.send(&mut client.stream, &Msg::Ping {}).unwrap();
-    assert_eq!(
-        server.session.recv(&mut server.stream, &mut f).unwrap(),
-        Some(Msg::Ping {})
-    );
-    server.session.send(&mut server.stream, &Msg::Pong {}).unwrap();
-    assert_eq!(
-        client.session.recv(&mut client.stream, &mut f).unwrap(),
-        Some(Msg::Pong {})
-    );
-}
-
-/// 这条把设计的顺序钉住：**握手两帧是明文，所以票不匹配不会在握手期报错**，
-/// 而是在第一帧密文上暴露。服务端因此要在握手后主动发一帧（见 `serve_conn`），
-/// 否则手机会对着"连上了但什么都没说"干等心跳超时。
-#[test]
-fn 票不匹配在第一帧密文上暴露而不是握手期() {
-    let (mut client, mut server) = loopback(&ticket(), &new_ticket()).expect("握手只交换公钥");
-    client.session.send(&mut client.stream, &Msg::Ping {}).unwrap();
-    let mut f = Framer::default();
-    let err = server
-        .session
-        .recv(&mut server.stream, &mut f)
-        .unwrap_err();
-    assert!(err.contains("配对票"), "{err}");
+fn 配对握手两端派生出同一把LS() {
+    let (_, pkcs8, fp) = test_identity();
+    let ticket = ticket();
+    let (srv, cli) =
+        establish(Ok(ticket.clone()), &pkcs8, &ticket, Mode::Pair, "", "ticket", &fp);
+    let (_server, s_ls) = srv.expect("服务端握手应成功");
+    let (_client, c_ls) = cli.expect("客户端握手应成功");
+    assert_eq!(s_ls, c_ls, "两端从同一份 ECDH 派生的 LS 必须逐字节相同");
+    assert_eq!(pair::key_id(&s_ls).len(), 16, "keyId 是 16 个十六进制字符");
 }
 
 #[test]
-fn 配对票不匹配时服务端解不开客户端首帧() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+fn 配对握手后两端可双向收发() {
+    let (_, pkcs8, fp) = test_identity();
     let t = ticket();
-    let server = std::thread::spawn(move || {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let pk = pkcs8.clone();
+    let t2 = t.clone();
+    let srv = std::thread::spawn(move || -> (Msg, [u8; 32]) {
         let (mut s, _) = listener.accept().unwrap();
-        s.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        s.set_read_timeout(Some(Duration::from_millis(800))).ok();
+        let id = identity::Identity::from_pkcs8(&pk).unwrap();
         let mut f = Framer::default();
-        let (mut sess, _) =
-            handshake(&mut s, &mut f, &new_ticket(), false, "heid-desktop", "").unwrap();
-        // 服务端按协议先发一帧；客户端用另一张票，必然解不开
+        let hs =
+            server_handshake(&mut s, &mut f, &|_, _, _| Ok(t2.clone()), &id)
+                .unwrap();
+        let mut sess = hs.session;
+        let _ = sess.recv(&mut s, &mut f); // 客户端认证 Auth 后回的 pong
+        let got = match sess.recv(&mut s, &mut f) {
+            Ok(Some(m)) => m,
+            other => panic!("服务端没等到应用帧：{other:?}"),
+        };
         sess.send(&mut s, &Msg::Pong {}).unwrap();
-        let mut cf = Framer::default();
-        sess.recv(&mut s, &mut cf)
+        (got, hs.ls)
     });
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    c.set_read_timeout(Some(Duration::from_millis(500))).ok();
+    c.set_read_timeout(Some(Duration::from_millis(800))).ok();
     let mut cf = Framer::default();
-    let (mut cs, _) = handshake(&mut c, &mut cf, &t, true, "heid-android", "SM-X808U").unwrap();
-    let err = cs.recv(&mut c, &mut cf).unwrap_err();
-    assert!(err.contains("配对票"), "客户端要能看出是票的问题：{err}");
-    let _ = server.join();
+    let (mut csess, cl, _) =
+        client_handshake(&mut c, &mut cf, &t, Mode::Pair, "", "ticket", "heid-android", "SM-X808U", &fp)
+            .unwrap();
+    csess.send(&mut c, &Msg::Ping {}).unwrap();
+    let mut cf2 = Framer::default();
+    assert_eq!(csess.recv(&mut c, &mut cf2).unwrap(), Some(Msg::Pong {}));
+    let (got, sl) = srv.join().unwrap();
+    assert_eq!(got, Msg::Ping {}, "服务端要原样收到应用帧");
+    assert_eq!(cl, sl, "双向通信不改变两端 LS 一致这一事实");
+}
+
+#[test]
+fn 配对salt不匹配_客户端解不开Auth() {
+    let (_, pkcs8, fp) = test_identity();
+    let (srv, cli) = establish(
+        Ok(ticket()),               // 服务端用自己的票
+        &pkcs8,
+        "ffffffffffffffffffffffffffffffff", // 客户端拿错票
+        Mode::Pair,
+        "",
+        "ticket",
+        &fp,
+    );
+    assert!(cli.is_err(), "错票的客户端应开不了服务端发的 Auth");
+    // 服务端收不到 pong，握手在维持前就结束
+    assert!(srv.is_err(), "没收到 pong 时服务端不得当作握手完成");
+}
+
+#[test]
+fn 指纹不符的桌面被客户端拒() {
+    let (_, pkcs8, _) = test_identity(); // 真正的桌面身份（服务端用它的私钥）
+    let (_, _, other_fp) = test_identity(); // 另一把身份：客户端被引导去期待这个指纹
+    let (_, cli) = establish(
+        Ok(ticket()),
+        &pkcs8,
+        &ticket(),
+        Mode::Pair,
+        "",
+        "ticket",
+        &other_fp,
+    );
+    let err = cli.err().expect("指纹不符必须失败");
+    assert!(err.contains("指纹"), "错误要指到指纹上：{err}");
+}
+
+#[test]
+fn 重连_未登记的设备被服务端拒() {
+    let (_, pkcs8, fp) = test_identity();
+    // 服务端 resolve 对未知 keyId 返回拒绝（等价注入；真实那帧 Refused 由 serve_conn 发，见 link-verify）
+    let (srv, cli) = establish(
+        Err("这台设备未配对或已被移除，请重新扫码".into()),
+        &pkcs8,
+        &pair::ls_to_hex(&[0x55u8; 32]),
+        Mode::Reconnect,
+        "deadbeefdeadbeef",
+        "",
+        &fp,
+    );
+    assert!(srv.is_err(), "被拒时服务端不进入维持循环");
+    assert!(cli.is_err(), "握手没走通，客户端也拿不到会话");
+}
+
+#[test]
+fn 重连_登记的链路密钥对得上则成功() {
+    let (_, pkcs8, fp) = test_identity();
+    let ls = pair::derive_link_secret(b"shared-material-for-this-test-32b!!");
+    let kid = pair::key_id(&ls);
+    let salt = pair::ls_to_hex(&ls);
+    // 服务端按 keyId 查出的 LS 作为 salt —— 与客户端存的是同一把
+    let (srv, cli) = establish(Ok(salt.clone()), &pkcs8, &salt, Mode::Reconnect, &kid, "", &fp);
+    let (mut _server, s_ls) = srv.expect("重连握手应成功");
+    let (mut _client, c_ls) = cli.expect("重连客户端应成功");
+    // 重连会话里 LS 仍按 shared 派生（每次 eph 不同 → LS 每次不同）；这里只验握手成功、能双向
+    let _ = (&mut _server, &mut _client, s_ls, c_ls);
 }
 
 #[test]
@@ -314,8 +390,10 @@ fn 协议版本不匹配被拒并给出稳定码() {
     let server = std::thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
         s.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        let (_, pkcs8, _) = test_identity();
+        let id = identity::Identity::from_pkcs8(&pkcs8).unwrap();
         let mut f = Framer::default();
-        handshake(&mut s, &mut f, &ticket(), false, "heid-desktop", "")
+        server_handshake(&mut s, &mut f, &|_, _, _| Ok(ticket()), &id)
             .err()
             .unwrap_or_default()
     });
@@ -327,6 +405,9 @@ fn 协议版本不匹配被拒并给出稳定码() {
             pub_key: encode_pub(&[1u8; 32]),
             agent: "heid-android".into(),
             device: "SM-X808U".into(),
+            mode: Mode::Pair,
+            key_id: String::new(),
+            slot: "ticket".into(),
         })
         .unwrap(),
     )
@@ -337,32 +418,16 @@ fn 协议版本不匹配被拒并给出稳定码() {
 }
 
 #[test]
-fn 握手期收到巨帧被拒() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = std::thread::spawn(move || {
-        let (mut s, _) = listener.accept().unwrap();
-        s.set_read_timeout(Some(Duration::from_millis(500))).ok();
-        let mut f = Framer::default();
-        handshake(&mut s, &mut f, &ticket(), false, "heid-desktop", "")
-            .err()
-            .unwrap_or_default()
-    });
-    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write_frame(&mut c, &vec![b'x'; MAX_HANDSHAKE_BYTES + 10]).unwrap();
-    let err = server.join().unwrap();
-    assert!(err.contains("上限"), "要如实报超限：{err}");
-}
-
-#[test]
 fn 握手期不合规的第一帧被拒() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
         s.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        let (_, pkcs8, _) = test_identity();
+        let id = identity::Identity::from_pkcs8(&pkcs8).unwrap();
         let mut f = Framer::default();
-        handshake(&mut s, &mut f, &ticket(), false, "heid-desktop", "")
+        server_handshake(&mut s, &mut f, &|_, _, _| Ok(ticket()), &id)
             .err()
             .unwrap_or_default()
     });

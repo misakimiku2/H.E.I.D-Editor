@@ -11,7 +11,8 @@
 //! - 读超时与"半帧"必须分开处理，否则会在帧中间丢同步（见 [`Framer`]）。
 
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,6 +24,11 @@ use ring::hkdf::{Salt, HKDF_SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+/// 桌面长期身份（Ed25519 密钥对 + 二维码指纹）——阶段 1「记住设备、免扫重连」的信任根。
+mod identity;
+/// 配对凭证纯逻辑：一次性票 / 长期链路密钥 LS / keyId / 6 位短码 / 二维码载荷 / 落盘存储。
+mod pair;
 
 /// 协议版本。`hello` 里强校验：安卓侧载无静默更新，两端版本会长期不一致，
 /// 不匹配必须明确拒绝而不是"尽力兼容"。
@@ -45,27 +51,48 @@ const INFO_C2S: &[u8] = b"heid-link-v1 c2s";
 const INFO_S2C: &[u8] = b"heid-link-v1 s2c";
 /// 前端订阅的状态事件名
 pub const EVENT: &str = "heid-link";
+/// 阶段 1 的配对请求（TOFU）事件名：桌面收到一个持票设备、等用户点允许/拒绝时推这个
+pub const EVENT_PAIR: &str = "heid-link-pair";
 
 /* ------------------------------------------------------------------ 消息 */
+
+/// 握手模式（阶段 1）：配对用一次性票当 salt、握手后登记 LS；重连用存下的 LS 当 salt。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    Pair,
+    Reconnect,
+}
 
 /// 帧内消息。阶段 0 只有握手与心跳；阶段 2 的 list/stat/read/write 在此扩展，
 /// 版本不匹配会在握手期就被拒，所以不需要为旧版本留兼容分支。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Msg {
-    /// 握手第一帧（明文）：协议版本 + 本方 X25519 公钥 + 可读信息
+    /// 握手第一帧（明文）：协议版本 + 本方 X25519 公钥 + 可读信息 + 配对模式。
+    /// `mode=pair` 时 `key_id` 为空、`slot` 说明 salt 取票（`ticket`）还是取 6 位短码（`code`）；
+    /// `mode=reconnect` 时 `key_id` 是要用的那把 LS 的公开标识，`slot` 忽略。
     Hello {
         ver: u32,
         #[serde(rename = "pub")]
         pub_key: String,
         agent: String,
         device: String,
+        mode: Mode,
+        key_id: String,
+        slot: String,
     },
     /// 握手第二帧（明文）：服务端同意，带回自己的公钥
     Welcome {
         ver: u32,
         #[serde(rename = "pub")]
         pub_key: String,
+    },
+    /// 握手后服务端发的第一帧**密文**：桌面长期身份的公钥 + 对握手内容的签名。
+    /// 手机据此校验指纹是否与码里/钉住的一致，从而挡住同网段抢答与"地址被换了机器"。
+    Auth {
+        id: String,
+        sig: String,
     },
     Ping {},
     Pong {},
@@ -331,73 +358,144 @@ fn frame_err_text(e: FrameError) -> String {
 
 /* ------------------------------------------------------------------ 握手 */
 
-/// 完成握手并返回加密会话。返回的第二项是对端设备名（客户端侧为空，
-/// 因为设备名是它自己发出去的）。
-pub fn handshake<S: Read + Write>(
-    s: &mut S,
-    framer: &mut Framer,
-    ticket: &str,
-    we_initiate: bool,
-    agent: &str,
-    device: &str,
-) -> Result<(Session, String), String> {
+/// 本方临时密钥对。私钥只能被 `agree_ephemeral` 消费一次，故协商必在换完明文帧之后。
+fn gen_ephemeral() -> Result<(EphemeralPrivateKey, [u8; 32]), String> {
     let rng = SystemRandom::new();
     let priv_key =
         EphemeralPrivateKey::generate(&X25519, &rng).map_err(|_| "无法生成临时密钥".to_string())?;
-    let my_pub = encode_pub(
-        priv_key
-            .compute_public_key()
-            .map_err(|_| "无法取到本方公钥".to_string())?
-            .as_ref(),
-    );
+    let pub_raw: [u8; 32] = priv_key
+        .compute_public_key()
+        .map_err(|_| "无法取到本方公钥".to_string())?
+        .as_ref()
+        .try_into()
+        .map_err(|_| "本方公钥长度不是 32 字节".to_string())?;
+    Ok((priv_key, pub_raw))
+}
 
-    // 私钥只能消费一次（`agree_ephemeral` 收走它），所以顺序是固定的：
-    // 先取本方公钥 → 交换明文帧 → 最后才协商。协商必须在读完对端公钥之后。
-    let (peer_pub, peer_device) = if we_initiate {
-        write_plain(
-            s,
-            &Msg::Hello {
-                ver: PROTOCOL_VERSION,
-                pub_key: my_pub,
-                agent: agent.to_string(),
-                device: device.to_string(),
-            },
-        )?;
-        match read_plain(s, framer)? {
-            Msg::Welcome { ver, pub_key } => {
-                check_version(ver)?;
-                (pub_key, String::new())
-            }
-            Msg::Refused { code, reason } => return Err(format!("对端拒绝（{code}）：{reason}")),
-            other => return Err(format!("握手期望 welcome，收到 {other:?}")),
+/// 用协商出的共享密钥同时得到「本会话密钥对」和「长期链路密钥 LS」。
+/// 二者用同一份 shared、不同的 salt/info —— 会话密钥掺配对票（或上次的 LS），
+/// LS 只掺 shared（见 [`pair::derive_link_secret`]），所以 LS 不随票作废而变，能撑起免扫重连。
+fn agree_keys(
+    priv_key: EphemeralPrivateKey,
+    peer_pub_b64: &str,
+    salt: &str,
+    we_initiate: bool,
+) -> Result<(Session, [u8; 32]), String> {
+    let peer = UnparsedPublicKey::new(&X25519, decode_pub(peer_pub_b64)?);
+    let (c2s, s2c, ls) = agree_ephemeral(priv_key, &peer, |shared| -> Result<([u8; 32], [u8; 32], [u8; 32]), String> {
+        let (c2s, s2c) = derive_keys(shared, salt)?;
+        Ok((c2s, s2c, pair::derive_link_secret(shared)))
+    })
+    .map_err(|_| "密钥协商失败".to_string())??;
+    Ok((Session::from_keys(c2s, s2c, we_initiate)?, ls))
+}
+
+/// 服务端握手结果：会话 + 这次配对/重连算出的 LS + 对端设备名与模式。
+pub struct ServerHandshake {
+    pub session: Session,
+    pub ls: [u8; 32],
+    pub mode: Mode,
+    pub peer_device: String,
+}
+
+/// 服务端握手：读 Hello（明文）→ 用 `resolve_salt` 选出 salt（票 / 短码 / 某把 LS）→ 换 Welcome →
+/// 协商 → 用桌面长期身份对握手内容签名，作为第一帧密文发给对端。
+///
+/// `resolve_salt` 据模式选 salt、并在不该放行时返回 `Err(原因)`（原因串里带「配对/票」等，
+/// 交给 [`refuse_code`] 归成稳定码）；一旦 Err，本函数直接返回，由 `serve_conn` 统一发一帧 Refused。
+pub fn server_handshake<S: Read + Write>(
+    s: &mut S,
+    framer: &mut Framer,
+    resolve_salt: &dyn Fn(Mode, &str, &str) -> Result<String, String>,
+    id: &identity::Identity,
+) -> Result<ServerHandshake, String> {
+    let (priv_key, my_pub) = gen_ephemeral()?;
+    let (peer_pub, peer_device, mode, key_id, slot) = match read_plain(s, framer)? {
+        Msg::Hello { ver, pub_key, device, mode, key_id, slot, .. } => {
+            check_version(ver)?;
+            (pub_key, device, mode, key_id, slot)
         }
-    } else {
-        match read_plain(s, framer)? {
-            Msg::Hello {
-                ver,
-                pub_key,
-                device,
-                ..
-            } => {
-                check_version(ver)?;
-                write_plain(
-                    s,
-                    &Msg::Welcome {
-                        ver: PROTOCOL_VERSION,
-                        pub_key: my_pub,
-                    },
-                )?;
-                (pub_key, device)
-            }
-            other => return Err(format!("握手期望 hello，收到 {other:?}")),
-        }
+        other => return Err(format!("握手期望 hello，收到 {other:?}")),
     };
+    let salt = resolve_salt(mode, &key_id, &slot)?;
+    write_plain(
+        s,
+        &Msg::Welcome { ver: PROTOCOL_VERSION, pub_key: encode_pub(&my_pub) },
+    )?;
+    let (mut session, ls) = agree_keys(priv_key, &peer_pub, &salt, false)?;
+    let id_pub = id.public_key();
+    let msg = identity::auth_message(b"srv\0", &decode_pub(&peer_pub)?, &my_pub, &id_pub);
+    let sig = id.sign(&msg);
+    session.send(
+        s,
+        &Msg::Auth {
+            id: encode_pub(&id_pub),
+            sig: base64::engine::general_purpose::STANDARD.encode(&sig),
+        },
+    )?;
+    Ok(ServerHandshake { session, ls, mode, peer_device })
+}
 
-    let peer = UnparsedPublicKey::new(&X25519, decode_pub(&peer_pub)?);
-    let (c2s, s2c) = agree_ephemeral(priv_key, &peer, |shared| derive_keys(shared, ticket))
-        .map_err(|_| "密钥协商失败".to_string())??;
-    let session = Session::from_keys(c2s, s2c, we_initiate)?;
-    Ok((session, peer_device))
+/// 客户端握手：发 Hello（带模式与 keyId/slot）→ 收 Welcome（或对端的 Refused）→ 协商 →
+/// 打开对端第一帧密文（`Auth`），校验桌面身份签名**与指纹**——指纹来源：配对取码里的、重连取本地钉住的。
+/// 校验通过才回 `Pong`（完成对 salt 的双向证明）。
+#[allow(clippy::too_many_arguments)]
+pub fn client_handshake<S: Read + Write>(
+    s: &mut S,
+    framer: &mut Framer,
+    salt: &str,
+    mode: Mode,
+    key_id: &str,
+    slot: &str,
+    agent: &str,
+    device: &str,
+    expected_fp: &str,
+) -> Result<(Session, [u8; 32], Vec<u8>), String> {
+    let (priv_key, my_pub) = gen_ephemeral()?;
+    write_plain(
+        s,
+        &Msg::Hello {
+            ver: PROTOCOL_VERSION,
+            pub_key: encode_pub(&my_pub),
+            agent: agent.to_string(),
+            device: device.to_string(),
+            mode,
+            key_id: key_id.to_string(),
+            slot: slot.to_string(),
+        },
+    )?;
+    let server_pub = match read_plain(s, framer)? {
+        Msg::Welcome { ver, pub_key } => {
+            check_version(ver)?;
+            pub_key
+        }
+        Msg::Refused { code, reason } => return Err(format!("对端拒绝（{code}）：{reason}")),
+        other => return Err(format!("握手期望 welcome，收到 {other:?}")),
+    };
+    let (mut session, ls) = agree_keys(priv_key, &server_pub, salt, true)?;
+    // 对端的第一帧必须是 Auth；解不开即 salt 不对（票/LS 不匹配）——与阶段 0 同一处暴露点。
+    // 带截止时间循环收：真实链路上它会比 Welcome 晚几毫秒到。
+    let auth = match recv_msg_deadline(s, &mut session, framer, Instant::now() + HANDSHAKE_DEADLINE)? {
+        Msg::Auth { id, sig } => (id, sig),
+        other => return Err(format!("握手期望 auth，收到 {other:?}")),
+    };
+    let id_pub = decode_pub(&auth.0)?;
+    // 扫码路径带指纹（防抢答）；6 位短码手输没有码可校验，留空即跳过这一道——
+    // 无论哪条，握手成功后都把真实指纹记下来，供以后重连钉住。
+    if !expected_fp.is_empty() && identity::fingerprint(&id_pub) != expected_fp {
+        return Err("对端身份与配对码里的指纹不符，已中止".to_string());
+    }
+    let sig = base64::engine::general_purpose::STANDARD
+        .decode(&auth.1)
+        .map_err(|_| "对端签名不是合法 base64".to_string())?;
+    let msg =
+        identity::auth_message(b"srv\0", &my_pub, &decode_pub(&server_pub)?, &id_pub);
+    if !identity::verify(&id_pub, &msg, &sig) {
+        return Err("对端身份签名校验失败".to_string());
+    }
+    // 通过：回 Pong 完成双向证明。
+    session.send(s, &Msg::Pong {})?;
+    Ok((session, ls, id_pub.to_vec()))
 }
 
 fn write_plain<W: Write>(w: &mut W, msg: &Msg) -> Result<(), String> {
@@ -430,13 +528,38 @@ fn check_version(ver: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// 在截止时间内收一个**密文**消息。`Session::recv` 单次可能返回 `Ok(None)`（读超时但帧还在路上），
+/// 真实 TCP 上握手后的那一帧（Auth / Pong）常有几毫秒延迟，单次收会把它误判成失败 —— 所以这里循环等。
+fn recv_msg_deadline<S: Read + Write>(
+    s: &mut S,
+    session: &mut Session,
+    framer: &mut Framer,
+    until: Instant,
+) -> Result<Msg, String> {
+    loop {
+        match session.recv(s, framer) {
+            Ok(Some(m)) => return Ok(m),
+            Ok(None) => {
+                if Instant::now() >= until {
+                    return Err("握手超时".to_string());
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// 握手失败时回给对端的稳定错误码
 fn refuse_code(err: &str) -> &'static str {
     if err.contains("协议版本") {
         "version"
     } else if err.contains("握手超时") {
         "timeout"
-    } else if err.contains("hello") || err.contains("welcome") || err.contains("解析") {
+    } else if err.contains("指纹") || err.contains("签名") {
+        "identity"
+    } else if err.contains("配对") || err.contains("未登记") {
+        "ticket"
+    } else if err.contains("hello") || err.contains("welcome") || err.contains("auth") || err.contains("解析") {
         "protocol"
     } else {
         "handshake"
@@ -488,10 +611,30 @@ impl Default for LinkStatus {
     }
 }
 
+/// 推给前端的设备行（`link_pairings_list` 的载荷）。不含 LS，只给显示与撤销要的东西。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PairInfo {
+    pub key_id: String,
+    pub name: String,
+    pub paired_at: i64,
+}
+
 #[derive(Default)]
 pub struct LinkState {
     inner: Mutex<LinkStatus>,
     stop: Mutex<Option<Arc<AtomicBool>>>,
+    /// 落盘位置（app 数据目录下的 link.json）；setup 里注入，未注入时配对不落盘（仅测试/降级）
+    store_path: Mutex<Option<PathBuf>>,
+    /// 桌面长期身份；启动时从 store 载入或新建
+    identity: Mutex<Option<identity::Identity>>,
+    /// 当前有效的一次性配对票（含过期/已用状态）；开开关时新建
+    pairing: Mutex<Option<pair::PairingTicket>>,
+    /// 已配对设备（含各自 LS）。桌面=多台手机，手机=一台桌面，同一结构。
+    store: Mutex<pair::Store>,
+    /// 有一条配对请求正等用户决定（serve_conn 挂上、轮询 decision）
+    pending: Mutex<Option<()>>,
+    decision: Mutex<Option<bool>>,
 }
 
 impl LinkState {
@@ -500,6 +643,15 @@ impl LinkState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    fn identity_fp(&self) -> String {
+        self.identity
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|i| i.fingerprint())
+            .unwrap_or_default()
     }
 }
 
@@ -532,6 +684,96 @@ fn mark_error(app: &AppHandle, msg: impl Into<String>) {
 fn replace_stop(state: &LinkState, flag: Option<Arc<AtomicBool>>) -> Option<Arc<AtomicBool>> {
     let mut g = state.stop.lock().unwrap_or_else(|p| p.into_inner());
     std::mem::replace(&mut *g, flag)
+}
+
+/* -------------------------------------------------- 配对辅助（阶段 1） */
+
+/// 用户多久没决定就把这次配对请求当作拒绝。别拿手机干等，也别久占桌面。
+const PAIR_CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 推给前端的配对请求（TOFU 弹窗要显示的手机名 + 这次的 keyId）。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PairReq {
+    pub device: String,
+    pub key_id: String,
+}
+
+/// `link_pair_qr` 的返回：二维码 URI + 6 位短码 + 本机地址（供手填兜底时显示）。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct QrInfo {
+    pub uri: String,
+    pub code: String,
+    pub host: String,
+    pub port: u16,
+    pub fp: String,
+    pub name: String,
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 把存储落盘。没注入路径（测试/降级）就跳过；失败不致命，下一次配对再试。
+fn persist(state: &LinkState) {
+    let path = state.store_path.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    if let Some(p) = path {
+        let g = state.store.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = g.save(&p);
+    }
+}
+
+fn clear_pending(state: &LinkState) {
+    *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *state.decision.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+/// 轮询等用户决定；超时、或等待期间桌面关了共享，都当作拒绝。
+fn wait_decision(app: &AppHandle, state: &LinkState, timeout: Duration) -> bool {
+    let until = Instant::now() + timeout;
+    loop {
+        if let Some(v) = *state.decision.lock().unwrap_or_else(|p| p.into_inner()) {
+            return v;
+        }
+        if snapshot(app).role == Role::Off || stop_requested(app) {
+            return false;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// 桌面当前的停止开关是否已被置位（关开关 / 重启服务时用它尽早收场）。
+fn stop_requested(app: &AppHandle) -> bool {
+    let state = app.state::<LinkState>();
+    let g = state.stop.lock().unwrap_or_else(|p| p.into_inner());
+    g.as_ref().map(|f| f.load(Ordering::SeqCst)).unwrap_or(false)
+}
+
+/// 本机对局域网可见的 IPv4：UDP「connect」不发包，只让内核按默认路由选出出口网卡地址。
+/// 拿不到（无网络 / 特殊环境）返回空串，前端据此提示手填地址。
+fn local_ipv4() -> String {
+    let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else { return String::new() };
+    // 目的地址不需要可达，甚至不需要存在——connect 只是选定一条出向路由
+    if sock.connect(("8.8.8.8", 80)).is_err() {
+        return String::new();
+    }
+    sock.local_addr().map(|a| a.ip().to_string()).unwrap_or_default()
+}
+
+/// 桌面设备名：`COMPUTERNAME`（Windows）兜底 hostname。手机侧的名字经 HeidBridge 上报，不在这。
+fn desktop_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "H.I.D.E".to_string())
 }
 
 /* ------------------------------------------------------------------ 连接维持 */
@@ -611,11 +853,16 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
         .set_nonblocking(true)
         .map_err(|e| format!("监听套接字设置失败：{e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
+    let ticket = new_ticket();
     {
         let state = app.state::<LinkState>();
         if let Some(old) = replace_stop(&state, Some(Arc::clone(&stop))) {
             old.store(true, Ordering::SeqCst);
         }
+        // 开一次共享就发一张全新的一次性配对票（2 分钟 / 用后即废），旧的当场作废
+        *state.pairing.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(pair::PairingTicket::new(ticket.clone()));
+        *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
     publish(&app, move |s| {
         s.role = Role::Server;
@@ -625,9 +872,7 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
         s.peer_device.clear();
         s.peer_addr.clear();
         s.last_error.clear();
-        /* 每次开始共享都换一张新票：关掉了再开，旧票不该还连得上。
-           阶段 1 的「记住设备免重复扫码」走长期凭证，不依赖这张票存活。 */
-        s.ticket = new_ticket();
+        s.ticket = ticket;
     });
 
     let app_thread = app.clone();
@@ -659,8 +904,8 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// 一条已建立的连接（服务端侧）。同时只服务一台：第二台收 busy 后关闭，
-/// 不排队、不静默等待（设计稿 §12.1 第 1 条）。
+/// 一条已建立的连接（服务端侧）。同时只服务一台：第二台收 busy 后关闭，不排队、不静默等待。
+/// 之后分两条路：**配对**要走 TOFU（持票设备出现→问用户→允许才登记 LS），**重连**凭已存的 LS 直接放行。
 fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle, stop: Arc<AtomicBool>) {
     if snapshot(&app).connected {
         let _ = write_plain(
@@ -673,39 +918,115 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
         return;
     }
     prepare(&mut stream);
-    let ticket = snapshot(&app).ticket;
     let mut framer = Framer::default();
-    let (mut session, peer_device) = match handshake(
-        &mut stream,
-        &mut framer,
-        &ticket,
-        false,
-        "heid-desktop",
-        "",
-    ) {
-        Ok(v) => v,
+    let state = app.state::<LinkState>();
+
+    // salt 选择：配对看一次性票还在不在有效期/没用过、按 slot 取票或短码；重连按 keyId 查存的 LS。
+    // 这里**不消费票** —— 此刻还没证明对面真握着票（要等它解得开 Auth、回了 Pong）。
+    // 拒绝一律以带「配对/票」字样的原因串返回，交给 refuse_code 归成稳定码后由下面统一发出。
+    let resolve = |mode: Mode, key_id: &str, slot: &str| -> Result<String, String> {
+        match mode {
+            Mode::Pair => {
+                let g = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
+                match g.as_ref() {
+                    None => Err("未开启配对，请在桌面点「让手机连接」".into()),
+                    Some(t) if !t.usable() => Err("配对码已过期或已用过，请重新打开".into()),
+                    Some(t) => Ok(if slot == "code" { t.code() } else { t.value().to_string() }),
+                }
+            }
+            Mode::Reconnect => {
+                let g = state.store.lock().unwrap_or_else(|p| p.into_inner());
+                g.find_ls(key_id)
+                    .map(|ls| pair::ls_to_hex(&ls))
+                    .ok_or_else(|| "这台设备未配对或已被移除，请重新扫码".into())
+            }
+        }
+    };
+
+    // 身份在 setup 里必定建好；这条连接线程独占它到握手结束（别的线程只在 init 时碰一次）
+    let id_guard = state.identity.lock().unwrap_or_else(|p| p.into_inner());
+    let id = match id_guard.as_ref() {
+        Some(i) => i,
+        None => {
+            drop(id_guard);
+            publish(&app, |s| s.last_error = "桌面身份未初始化".into());
+            return;
+        }
+    };
+
+    let hs = match server_handshake(&mut stream, &mut framer, &resolve, id) {
+        Ok(hs) => hs,
         Err(e) => {
-            // 票不匹配最常见，且此刻对端还在等 —— 给一个能看懂的码，
-            // 别让手机对着超时干转
+            // 握手没走通：把原因归成稳定码回一帧 Refused（票不匹配 / 版本 / 未配对），再记状态
             let _ = write_plain(
                 &mut stream,
-                &Msg::Refused {
-                    code: refuse_code(&e).into(),
-                    reason: e.clone(),
-                },
+                &Msg::Refused { code: refuse_code(&e).into(), reason: e.clone() },
             );
             publish(&app, |s| s.last_error = e);
             return;
         }
     };
-    // 握手两帧是明文，不计入会话计数器；第一帧密文用来验证票是否一致
-    if let Err(e) = session.send(&mut stream, &Msg::Ping {}) {
-        publish(&app, |s| s.last_error = e);
-        return;
+    // 握手已完成签名，身份锁就此放开——TOFU 可能等上一分钟，别占着它
+    drop(id_guard);
+    let mut session = hs.session;
+
+    // 对端的第一帧（我们发了 Auth，它应回 Pong）——解得开、回了 Pong 才算真握着 salt。
+    // 同样带截止时间循环收，别把路上晚到的 Pong 误判成断连。
+    match recv_msg_deadline(&mut stream, &mut session, &mut framer, Instant::now() + HANDSHAKE_DEADLINE) {
+        Ok(Msg::Pong {}) => {}
+        Ok(other) => {
+            publish(&app, |s| s.last_error = format!("握手后期望 pong，收到 {other:?}"));
+            return;
+        }
+        Err(e) => {
+            // 多半是 salt 不对（票不匹配 / 未登记的 keyId）导致它解不开 Auth 直接断了
+            publish(&app, |s| s.last_error = e);
+            return;
+        }
     }
+
+    let key_id = pair::key_id(&hs.ls);
+    if hs.mode == Mode::Pair {
+        // 持票且已证明 → 挂一条待确认、弹 TOFU，等用户决定（超时/关共享视为拒绝）
+        let req = PairReq { device: hs.peer_device.clone(), key_id: key_id.clone() };
+        {
+            *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = Some(());
+            *state.decision.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+        let _ = app.emit(EVENT_PAIR, &req);
+        if !wait_decision(&app, &state, PAIR_CONFIRM_TIMEOUT) {
+            let _ = session.send(&mut stream, &Msg::Refused {
+                code: "denied".into(),
+                reason: "桌面端拒绝了这次配对".into(),
+            });
+            clear_pending(&state);
+            publish(&app, |s| s.last_error = "配对请求被拒绝或超时".into());
+            return;
+        }
+        clear_pending(&state);
+        // 允许才登记：消费票（用后即废）+ 存 LS + 落盘
+        {
+            let mut g = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(t) = g.as_mut() {
+                t.consume();
+            }
+        }
+        {
+            let mut g = state.store.lock().unwrap_or_else(|p| p.into_inner());
+            g.upsert(pair::PairedDevice {
+                key_id: key_id.clone(),
+                ls: pair::ls_to_hex(&hs.ls),
+                name: hs.peer_device.clone(),
+                paired_at: now_millis(),
+                peer_fp: String::new(),
+            });
+        }
+        persist(&state); // 出了 store 锁再落盘：persist 内部会重新锁 store，不可重入
+    }
+
     publish(&app, |s| {
         s.connected = true;
-        s.peer_device = peer_device;
+        s.peer_device = hs.peer_device.clone();
         s.peer_addr = addr.to_string();
         s.last_error.clear();
     });
@@ -719,10 +1040,16 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
 
 /* ------------------------------------------------------------------ 客户端 */
 
+/// 手机这一趟连接要做什么。配对带一次性票或 6 位短码 + 期望指纹；重连带已存的 LS 与钉住的指纹。
+pub enum ClientIntent {
+    Pair { salt: String, slot: String, fp: String, name: String },
+    Reconnect { key_id: String, ls_hex: String, fp: String, name: String },
+}
+
 fn connect_and_pump(
     host: String,
     port: u16,
-    ticket: String,
+    intent: ClientIntent,
     device: String,
     app: AppHandle,
     stop: Arc<AtomicBool>,
@@ -736,13 +1063,24 @@ fn connect_and_pump(
     };
     prepare(&mut stream);
     let mut framer = Framer::default();
-    let (session, _) = match handshake(
+    let (salt, mode, key_id, slot, fp, name) = match &intent {
+        ClientIntent::Pair { salt, slot, fp, name } => {
+            (salt.clone(), Mode::Pair, String::new(), slot.clone(), fp.clone(), name.clone())
+        }
+        ClientIntent::Reconnect { key_id, ls_hex, fp, name } => {
+            (ls_hex.clone(), Mode::Reconnect, key_id.clone(), String::new(), fp.clone(), name.clone())
+        }
+    };
+    let (session, ls, _id_pub) = match client_handshake(
         &mut stream,
         &mut framer,
-        &ticket,
-        true,
+        &salt,
+        mode,
+        &key_id,
+        &slot,
         "heid-android",
         &device,
+        &fp,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -750,6 +1088,22 @@ fn connect_and_pump(
             return;
         }
     };
+    // 配对成功才把这把 LS + 钉住的桌面指纹落盘，之后重启就走重连、不再要票
+    if let ClientIntent::Pair { .. } = &intent {
+        let state = app.state::<LinkState>();
+        {
+            let mut g = state.store.lock().unwrap_or_else(|p| p.into_inner());
+            g.upsert(pair::PairedDevice {
+                key_id: pair::key_id(&ls),
+                ls: pair::ls_to_hex(&ls),
+                name,
+                paired_at: now_millis(),
+                peer_fp: fp,
+            });
+        }
+        persist(&state); // 出锁再落盘（persist 会重新锁 store）
+    }
+    let _ = ls;
     publish(&app, |s| {
         s.connected = true;
         s.peer_addr = format!("{host}:{port}");
@@ -826,8 +1180,47 @@ pub fn link_server_stop(app: AppHandle) -> LinkStatus {
     state.snapshot()
 }
 
-/// 手机：连桌面。阶段 0 只有手填地址 + 手填配对票这一条通道
-/// （设计稿 §7.4 的调试通道），扫码在阶段 1。
+/// 手机侧发起一趟连接的公共流程：置客户端角色、换掉上一趟的停止开关、起连接线程。
+/// 配对与重连都走这里，差别只在 `intent`。
+fn start_client(
+    app: &AppHandle,
+    host: String,
+    port: u16,
+    intent: ClientIntent,
+    device: String,
+) -> Result<LinkStatus, String> {
+    if host.trim().is_empty() {
+        return Err("地址不能为空".to_string());
+    }
+    if !(1024..=65535).contains(&port) {
+        return Err("端口要在 1024–65535 之间".to_string());
+    }
+    let host = host.trim().to_string();
+    let state = app.state::<LinkState>();
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Some(old) = replace_stop(&state, Some(Arc::clone(&stop))) {
+        old.store(true, Ordering::SeqCst);
+    }
+    publish(app, move |s| {
+        s.role = Role::Client;
+        s.listening = false;
+        s.port = port;
+        s.connected = false;
+        s.peer_device.clear();
+        s.last_error.clear();
+        /* 不写 s.ticket：那张票是"桌面共享给手机"的凭证，归服务端。
+           客户端填的票只活在连接线程里，别把它塞回会广播给桌面的状态快照。 */
+    });
+    let app_thread = app.clone();
+    std::thread::Builder::new()
+        .name("heid-link-client".into())
+        .spawn(move || connect_and_pump(host, port, intent, device, app_thread, stop))
+        .map_err(|e| format!("连接线程启动失败：{e}"))?;
+    Ok(snapshot(app))
+}
+
+/// 手机：手填地址 + 32 位配对码直连（设计稿 §7.4 的调试通道，也是扫码不可用时的兜底）。
+/// 走的是配对路径，只是没有指纹可校验（fp 传空）。
 #[tauri::command]
 pub fn link_client_connect(
     app: AppHandle,
@@ -836,35 +1229,163 @@ pub fn link_client_connect(
     ticket: String,
     device: String,
 ) -> Result<LinkStatus, String> {
-    let host = host.trim().to_string();
     let ticket = ticket.trim().to_lowercase();
-    if host.is_empty() {
-        return Err("地址不能为空".to_string());
-    }
     if !is_valid_ticket(&ticket) {
-        return Err("配对票应是 32 位十六进制，请整段复制".to_string());
+        return Err("配对码应是 32 位十六进制，请整段复制".to_string());
     }
+    start_client(
+        &app,
+        host,
+        port,
+        ClientIntent::Pair { salt: ticket, slot: "ticket".into(), fp: String::new(), name: String::new() },
+        device,
+    )
+}
+
+/// 手机：吃一段扫来/粘来的 `hide-link://pair?...` 载荷走配对（带指纹，防抢答）。
+#[tauri::command]
+pub fn link_client_pair(
+    app: AppHandle,
+    uri: String,
+    device: String,
+) -> Result<LinkStatus, String> {
+    let p = pair::PairingPayload::parse(&uri)?;
+    let intent = if is_valid_ticket(&p.ticket) {
+        ClientIntent::Pair { salt: p.ticket, slot: "ticket".into(), fp: p.fp, name: p.name }
+    } else {
+        return Err("这个配对码里没有有效的配对票".to_string());
+    };
+    start_client(&app, p.host, p.port, intent, device)
+}
+
+/// 手机：相机不可用时手输 6 位短码配对（设计稿 §7.3 的兜底，零依赖）。
+#[tauri::command]
+pub fn link_client_pair_code(
+    app: AppHandle,
+    host: String,
+    port: u16,
+    code: String,
+    device: String,
+) -> Result<LinkStatus, String> {
+    let code = code.trim().to_string();
+    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+        return Err("配对短码是 6 位数字".to_string());
+    }
+    start_client(
+        &app,
+        host,
+        port,
+        ClientIntent::Pair { salt: code, slot: "code".into(), fp: String::new(), name: String::new() },
+        device,
+    )
+}
+
+/// 手机：用本地存过的某台桌面重连（免扫）。keyId 由前端从偏好里带上，LS 与指纹从存储取。
+#[tauri::command]
+pub fn link_client_reconnect(
+    app: AppHandle,
+    host: String,
+    port: u16,
+    key_id: String,
+    device: String,
+) -> Result<LinkStatus, String> {
     let state = app.state::<LinkState>();
-    let stop = Arc::new(AtomicBool::new(false));
-    if let Some(old) = replace_stop(&state, Some(Arc::clone(&stop))) {
-        old.store(true, Ordering::SeqCst);
+    let (ls_hex, fp, name) = {
+        let g = state.store.lock().unwrap_or_else(|p| p.into_inner());
+        let dev = g
+            .devices
+            .iter()
+            .find(|d| d.key_id == key_id)
+            .ok_or("本机没有这台设备的配对记录，请重新扫码")?;
+        (dev.ls.clone(), dev.peer_fp.clone(), dev.name.clone())
+    };
+    start_client(
+        &app,
+        host,
+        port,
+        ClientIntent::Reconnect { key_id, ls_hex, fp, name },
+        device,
+    )
+}
+
+/* ------------------------------------------------------------ 桌面配对命令 */
+
+/// 桌面：生成/刷新一次配对的二维码信息（含一次性票 + 6 位短码 + 本机地址）。
+/// 每次调用都换新票并重置有效期——「点让手机连接」就是开一扇新的 2 分钟配对窗。
+#[tauri::command]
+pub fn link_pair_qr(app: AppHandle) -> Result<QrInfo, String> {
+    let state = app.state::<LinkState>();
+    let s = state.snapshot();
+    if !s.listening {
+        return Err("请先打开「共享这台电脑」".to_string());
     }
-    publish(&app, move |s| {
-        s.role = Role::Client;
-        s.listening = false;
-        s.port = port;
-        s.connected = false;
-        s.last_error.clear();
-        /* 注意：这里**不写** s.ticket。那张票是"桌面共享给手机"的凭证，
-           归服务端所有；客户端填的票只活在前端偏好里。之前两边共用一个字段，
-           手机连过一次就把桌面的配对码覆盖成错的，桌面上还照样显示。 */
+    let ticket = new_ticket();
+    *state.pairing.lock().unwrap_or_else(|p| p.into_inner()) =
+        Some(pair::PairingTicket::new(ticket.clone()));
+    *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    publish(&app, |st| {
+        st.ticket = ticket.clone();
+        st.last_error.clear();
     });
-    let app_thread = app.clone();
-    std::thread::Builder::new()
-        .name("heid-link-client".into())
-        .spawn(move || connect_and_pump(host, port, ticket, device, app_thread, stop))
-        .map_err(|e| format!("连接线程启动失败：{e}"))?;
-    Ok(snapshot(&app))
+    let host = local_ipv4();
+    let name = desktop_name();
+    let fp = state.identity_fp();
+    let payload = pair::PairingPayload { host: host.clone(), port: s.port, ticket, name: name.clone(), fp: fp.clone() };
+    Ok(QrInfo {
+        code: pair::short_code(&payload.ticket),
+        uri: payload.to_uri(),
+        host,
+        port: s.port,
+        fp,
+        name,
+    })
+}
+
+/// 前端对当前配对请求表态。只有确实挂着一条待确认时才生效，避免误点把上一次的决定带进下一次。
+fn set_decision(app: &AppHandle, ok: bool) {
+    let state = app.state::<LinkState>();
+    let has_pending = state.pending.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+    if has_pending {
+        *state.decision.lock().unwrap_or_else(|p| p.into_inner()) = Some(ok);
+    }
+}
+
+#[tauri::command]
+pub fn link_pair_approve(app: AppHandle) {
+    set_decision(&app, true);
+}
+
+#[tauri::command]
+pub fn link_pair_deny(app: AppHandle) {
+    set_decision(&app, false);
+}
+
+/// 已配对设备列表（桌面多台 / 手机一台，同一结构）。
+#[tauri::command]
+pub fn link_pairings_list(app: AppHandle) -> Vec<PairInfo> {
+    let state = app.state::<LinkState>();
+    let g = state.store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut v: Vec<PairInfo> = g
+        .devices
+        .iter()
+        .map(|d| PairInfo { key_id: d.key_id.clone(), name: d.name.clone(), paired_at: d.paired_at })
+        .collect();
+    v.sort_by(|a, b| b.paired_at.cmp(&a.paired_at));
+    v
+}
+
+/// 解除一台设备的配对（撤销后它要重新扫码）。
+#[tauri::command]
+pub fn link_pairing_revoke(app: AppHandle, key_id: String) -> bool {
+    let state = app.state::<LinkState>();
+    let removed = {
+        let mut g = state.store.lock().unwrap_or_else(|p| p.into_inner());
+        g.revoke(&key_id)
+    };
+    if removed {
+        persist(&state);
+    }
+    removed
 }
 
 #[tauri::command]
@@ -879,6 +1400,26 @@ pub fn link_client_disconnect(app: AppHandle) -> LinkStatus {
         s.peer_addr.clear();
     });
     state.snapshot()
+}
+
+/// 启动时载入/新建本地状态：落盘路径 + 桌面长期身份 + 已配对设备。两端都用（手机也存它自己那一份）。
+/// 由 setup 调用；`dir` = 各平台 app 数据目录。
+pub fn init_store(app: &AppHandle, dir: PathBuf) {
+    let state = app.state::<LinkState>();
+    let path = dir.join("link.json");
+    let mut store = pair::Store::load(&path);
+    let id = match pair::identity_from_store(&store) {
+        Ok(id) => id,
+        Err(_) => {
+            let (new_id, pkcs8) = identity::Identity::generate();
+            store.identity_pkcs8 = pair::b64_encode(&pkcs8);
+            let _ = store.save(&path);
+            new_id
+        }
+    };
+    *state.store.lock().unwrap_or_else(|p| p.into_inner()) = store;
+    *state.identity.lock().unwrap_or_else(|p| p.into_inner()) = Some(id);
+    *state.store_path.lock().unwrap_or_else(|p| p.into_inner()) = Some(path);
 }
 
 #[cfg(test)]

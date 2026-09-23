@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_LINK_PORT, autoStartFromPrefs, deviceName, isTicket, isUsablePort,
-  linkRole, normalizeStatus, parsePrefs, subscribeLinkStatus,
+  DEFAULT_LINK_PORT, autoReconnectFromPrefs, autoStartFromPrefs, deviceName, isKeyId,
+  isTicket, isUsablePort, linkRole, normalizePairReq, normalizeStatus, parsePrefs,
+  subscribeLinkStatus,
 } from './link';
 
 describe('normalizeStatus', () => {
@@ -38,8 +39,15 @@ describe('parsePrefs', () => {
     expect(parsePrefs(null).port).toBe(DEFAULT_LINK_PORT);
     expect(parsePrefs('{ not json').port).toBe(DEFAULT_LINK_PORT);
     expect(parsePrefs('{"enabled":true}')).toEqual({
-      enabled: true, port: DEFAULT_LINK_PORT, host: '', ticket: '',
+      enabled: true, port: DEFAULT_LINK_PORT, host: '', ticket: '', keyId: '', peerName: '',
     });
+  });
+
+  it('记住的设备 keyId 形状合法才采信（供免扫重连）', () => {
+    expect(parsePrefs(`{"keyId":"${'ab'.repeat(8)}"}`).keyId).toBe('ab'.repeat(8));
+    expect(parsePrefs('{"keyId":"nope"}').keyId).toBe('');
+    expect(parsePrefs('{"keyId":"abc"}').keyId).toBe('');
+    expect(parsePrefs('{"peerName":"MISAKI-PC"}').peerName).toBe('MISAKI-PC');
   });
 
   it('越界端口与不合法配对码不采信', () => {
@@ -72,6 +80,27 @@ describe('输入校验', () => {
     expect(isTicket('0123456789abcdef0123456789abcdef00')).toBe(false);
     expect(isTicket('g123456789abcdef0123456789abcdef')).toBe(false);
   });
+
+  it('keyId 必须是 16 位十六进制（LS 哈希前 8 字节）', () => {
+    expect(isKeyId('0123456789abcdef')).toBe(true);
+    expect(isKeyId('0123456789abcde')).toBe(false);
+    expect(isKeyId('0123456789abcdef00')).toBe(false);
+    expect(isKeyId('zzzzzzzzzzzzzzzz')).toBe(false);
+  });
+});
+
+describe('normalizePairReq', () => {
+  it('形状合法按原样返回', () => {
+    const r = normalizePairReq({ device: 'SM-X808U', keyId: '0123456789abcdef' });
+    expect(r.device).toBe('SM-X808U');
+    expect(r.keyId).toBe('0123456789abcdef');
+  });
+
+  it('缺字段与坏 keyId 归零，绝不让 TOFU 弹窗崩', () => {
+    expect(normalizePairReq(undefined)).toEqual({ device: '', keyId: '' });
+    expect(normalizePairReq({ device: 123, keyId: 'short' }).keyId).toBe('');
+    expect(normalizePairReq({ device: 123 }).device).toBe('');
+  });
 });
 
 describe('平台分派', () => {
@@ -84,8 +113,9 @@ describe('平台分派', () => {
     expect(deviceName()).toBe('H.I.D.E');
   });
 
-  it('非 Tauri 环境：订阅是空操作、自动开启直接返回 null', async () => {
+  it('非 Tauri 环境：订阅是空操作、自动开启与自动重连直接返回 null', async () => {
     expect(typeof subscribeLinkStatus(() => {})).toBe('function');
     expect(await autoStartFromPrefs()).toBeNull();
+    expect(await autoReconnectFromPrefs()).toBeNull();
   });
 });

@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- v1.5 设备互联阶段 1：应用内「扫一扫」配对本机 WebView 的 getUserMedia 需要 CAMERA。
+         生成的 RustWebChromeClient.onPermissionRequest 会据此在运行时申请 CAMERA 并 grant/deny，
+         不需要新写 Kotlin 桥；但权限必须在这里声明，否则走 else 分支虽 grant、系统层仍拒 → NotReadableError。 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- required=false：无相机的设备（或相机被禁用）也能装，只是扫码降级为粘贴/短码 -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -22,6 +29,19 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+
+            <!-- 上面自动生成的块只声明了 Tauri 认得的那 5 个 MIME，而匹配只看提供方报出的 MIME
+                 （实测：Files 里 .md 报 text/markdown、.py 报 text/x-python、.csv 报 text/csv，
+                 整条不匹配 → 「打开方式」里根本不出现 H.I.D.E，点文件也没反应）。
+                 补一条 text/* 通配兜住所有文本与代码文件。
+                 本块在自动生成标记之外，构建不会覆盖 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+            </intent-filter>
             <!-- tauri-file-associations. AUTO-GENERATED. DO NOT REMOVE. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -30,106 +50,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="text/plain" />
-                <data android:pathPattern=".*\\.txt" />
-                <data android:pathPattern=".*\\.log" />
-                <data android:pathPattern=".*\\.md" />
-                <data android:pathPattern=".*\\.markdown" />
-                <data android:pathPattern=".*\\.json" />
-                <data android:pathPattern=".*\\.yaml" />
-                <data android:pathPattern=".*\\.yml" />
-                <data android:pathPattern=".*\\.toml" />
-                <data android:pathPattern=".*\\.ini" />
-                <data android:pathPattern=".*\\.xml" />
-                <data android:pathPattern=".*\\.svg" />
-                <data android:pathPattern=".*\\.ts" />
-                <data android:pathPattern=".*\\.tsx" />
-                <data android:pathPattern=".*\\.js" />
-                <data android:pathPattern=".*\\.jsx" />
-                <data android:pathPattern=".*\\.py" />
-                <data android:pathPattern=".*\\.rs" />
-                <data android:pathPattern=".*\\.go" />
-                <data android:pathPattern=".*\\.java" />
-                <data android:pathPattern=".*\\.c" />
-                <data android:pathPattern=".*\\.cpp" />
-                <data android:pathPattern=".*\\.cc" />
-                <data android:pathPattern=".*\\.cxx" />
-                <data android:pathPattern=".*\\.h" />
-                <data android:pathPattern=".*\\.hpp" />
-                <data android:pathPattern=".*\\.cs" />
-                <data android:pathPattern=".*\\.rb" />
-                <data android:pathPattern=".*\\.php" />
-                <data android:pathPattern=".*\\.html" />
-                <data android:pathPattern=".*\\.htm" />
-                <data android:pathPattern=".*\\.css" />
-                <data android:pathPattern=".*\\.scss" />
-                <data android:pathPattern=".*\\.less" />
-                <data android:pathPattern=".*\\.sh" />
-                <data android:pathPattern=".*\\.bash" />
-                <data android:pathPattern=".*\\.sql" />
-                <data android:pathPattern=".*\\.swift" />
-                <data android:pathPattern=".*\\.kt" />
-                <data android:pathPattern=".*\\.kts" />
-                <data android:pathPattern=".*\\.scala" />
-                <data android:pathPattern=".*\\.vue" />
-                <data android:pathPattern=".*\\.svelte" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="text/html" />
-                <data android:pathPattern=".*\\.txt" />
-                <data android:pathPattern=".*\\.log" />
-                <data android:pathPattern=".*\\.md" />
-                <data android:pathPattern=".*\\.markdown" />
-                <data android:pathPattern=".*\\.json" />
-                <data android:pathPattern=".*\\.yaml" />
-                <data android:pathPattern=".*\\.yml" />
-                <data android:pathPattern=".*\\.toml" />
-                <data android:pathPattern=".*\\.ini" />
-                <data android:pathPattern=".*\\.xml" />
-                <data android:pathPattern=".*\\.svg" />
-                <data android:pathPattern=".*\\.ts" />
-                <data android:pathPattern=".*\\.tsx" />
-                <data android:pathPattern=".*\\.js" />
-                <data android:pathPattern=".*\\.jsx" />
-                <data android:pathPattern=".*\\.py" />
-                <data android:pathPattern=".*\\.rs" />
-                <data android:pathPattern=".*\\.go" />
-                <data android:pathPattern=".*\\.java" />
-                <data android:pathPattern=".*\\.c" />
-                <data android:pathPattern=".*\\.cpp" />
-                <data android:pathPattern=".*\\.cc" />
-                <data android:pathPattern=".*\\.cxx" />
-                <data android:pathPattern=".*\\.h" />
-                <data android:pathPattern=".*\\.hpp" />
-                <data android:pathPattern=".*\\.cs" />
-                <data android:pathPattern=".*\\.rb" />
-                <data android:pathPattern=".*\\.php" />
-                <data android:pathPattern=".*\\.html" />
-                <data android:pathPattern=".*\\.htm" />
-                <data android:pathPattern=".*\\.css" />
-                <data android:pathPattern=".*\\.scss" />
-                <data android:pathPattern=".*\\.less" />
-                <data android:pathPattern=".*\\.sh" />
-                <data android:pathPattern=".*\\.bash" />
-                <data android:pathPattern=".*\\.sql" />
-                <data android:pathPattern=".*\\.swift" />
-                <data android:pathPattern=".*\\.kt" />
-                <data android:pathPattern=".*\\.kts" />
-                <data android:pathPattern=".*\\.scala" />
-                <data android:pathPattern=".*\\.vue" />
-                <data android:pathPattern=".*\\.svelte" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="application/json" />
                 <data android:pathPattern=".*\\.txt" />
                 <data android:pathPattern=".*\\.log" />
                 <data android:pathPattern=".*\\.md" />
@@ -229,6 +149,106 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="application/json" />
+                <data android:pathPattern=".*\\.txt" />
+                <data android:pathPattern=".*\\.log" />
+                <data android:pathPattern=".*\\.md" />
+                <data android:pathPattern=".*\\.markdown" />
+                <data android:pathPattern=".*\\.json" />
+                <data android:pathPattern=".*\\.yaml" />
+                <data android:pathPattern=".*\\.yml" />
+                <data android:pathPattern=".*\\.toml" />
+                <data android:pathPattern=".*\\.ini" />
+                <data android:pathPattern=".*\\.xml" />
+                <data android:pathPattern=".*\\.svg" />
+                <data android:pathPattern=".*\\.ts" />
+                <data android:pathPattern=".*\\.tsx" />
+                <data android:pathPattern=".*\\.js" />
+                <data android:pathPattern=".*\\.jsx" />
+                <data android:pathPattern=".*\\.py" />
+                <data android:pathPattern=".*\\.rs" />
+                <data android:pathPattern=".*\\.go" />
+                <data android:pathPattern=".*\\.java" />
+                <data android:pathPattern=".*\\.c" />
+                <data android:pathPattern=".*\\.cpp" />
+                <data android:pathPattern=".*\\.cc" />
+                <data android:pathPattern=".*\\.cxx" />
+                <data android:pathPattern=".*\\.h" />
+                <data android:pathPattern=".*\\.hpp" />
+                <data android:pathPattern=".*\\.cs" />
+                <data android:pathPattern=".*\\.rb" />
+                <data android:pathPattern=".*\\.php" />
+                <data android:pathPattern=".*\\.html" />
+                <data android:pathPattern=".*\\.htm" />
+                <data android:pathPattern=".*\\.css" />
+                <data android:pathPattern=".*\\.scss" />
+                <data android:pathPattern=".*\\.less" />
+                <data android:pathPattern=".*\\.sh" />
+                <data android:pathPattern=".*\\.bash" />
+                <data android:pathPattern=".*\\.sql" />
+                <data android:pathPattern=".*\\.swift" />
+                <data android:pathPattern=".*\\.kt" />
+                <data android:pathPattern=".*\\.kts" />
+                <data android:pathPattern=".*\\.scala" />
+                <data android:pathPattern=".*\\.vue" />
+                <data android:pathPattern=".*\\.svelte" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="text/html" />
+                <data android:pathPattern=".*\\.txt" />
+                <data android:pathPattern=".*\\.log" />
+                <data android:pathPattern=".*\\.md" />
+                <data android:pathPattern=".*\\.markdown" />
+                <data android:pathPattern=".*\\.json" />
+                <data android:pathPattern=".*\\.yaml" />
+                <data android:pathPattern=".*\\.yml" />
+                <data android:pathPattern=".*\\.toml" />
+                <data android:pathPattern=".*\\.ini" />
+                <data android:pathPattern=".*\\.xml" />
+                <data android:pathPattern=".*\\.svg" />
+                <data android:pathPattern=".*\\.ts" />
+                <data android:pathPattern=".*\\.tsx" />
+                <data android:pathPattern=".*\\.js" />
+                <data android:pathPattern=".*\\.jsx" />
+                <data android:pathPattern=".*\\.py" />
+                <data android:pathPattern=".*\\.rs" />
+                <data android:pathPattern=".*\\.go" />
+                <data android:pathPattern=".*\\.java" />
+                <data android:pathPattern=".*\\.c" />
+                <data android:pathPattern=".*\\.cpp" />
+                <data android:pathPattern=".*\\.cc" />
+                <data android:pathPattern=".*\\.cxx" />
+                <data android:pathPattern=".*\\.h" />
+                <data android:pathPattern=".*\\.hpp" />
+                <data android:pathPattern=".*\\.cs" />
+                <data android:pathPattern=".*\\.rb" />
+                <data android:pathPattern=".*\\.php" />
+                <data android:pathPattern=".*\\.html" />
+                <data android:pathPattern=".*\\.htm" />
+                <data android:pathPattern=".*\\.css" />
+                <data android:pathPattern=".*\\.scss" />
+                <data android:pathPattern=".*\\.less" />
+                <data android:pathPattern=".*\\.sh" />
+                <data android:pathPattern=".*\\.bash" />
+                <data android:pathPattern=".*\\.sql" />
+                <data android:pathPattern=".*\\.swift" />
+                <data android:pathPattern=".*\\.kt" />
+                <data android:pathPattern=".*\\.kts" />
+                <data android:pathPattern=".*\\.scala" />
+                <data android:pathPattern=".*\\.vue" />
+                <data android:pathPattern=".*\\.svelte" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="application/xml" />
                 <data android:pathPattern=".*\\.txt" />
                 <data android:pathPattern=".*\\.log" />
@@ -275,19 +295,6 @@
             </intent-filter>
             
             <!-- tauri-file-associations. AUTO-GENERATED. DO NOT REMOVE. -->
-
-            <!-- 上面自动生成的块只声明了 Tauri 认得的那 5 个 MIME，而匹配只看提供方报出的 MIME
-                 （实测：Files 里 .md 报 text/markdown、.py 报 text/x-python、.csv 报 text/csv，
-                 整条不匹配 → 「打开方式」里根本不出现 H.I.D.E，点文件也没反应）。
-                 补一条 text/* 通配兜住所有文本与代码文件。
-                 本块在自动生成标记之外，构建不会覆盖 -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/*" />
-            </intent-filter>
         </activity>
 
         <provider

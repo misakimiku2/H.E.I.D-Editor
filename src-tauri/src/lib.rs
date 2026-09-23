@@ -178,7 +178,15 @@ pub fn run() {
             link::link_server_start,
             link::link_server_stop,
             link::link_client_connect,
+            link::link_client_pair,
+            link::link_client_pair_code,
+            link::link_client_reconnect,
             link::link_client_disconnect,
+            link::link_pair_qr,
+            link::link_pair_approve,
+            link::link_pair_deny,
+            link::link_pairings_list,
+            link::link_pairing_revoke,
             external::open_external,
             render::render_page,
             render::render_result,
@@ -220,13 +228,19 @@ pub fn run() {
             search::search_in_dir_progress
         ])
         .setup(|app| {
+            use tauri::Manager as _;
+            /* 设备互联持久化：载入或新建桌面长期身份 + 已配对设备（两端都建自己那一份）。
+               拿不到数据目录就跳过——互联面板会因缺状态优雅降级成"不可用"，不阻断启动。 */
+            let link_handle = app.handle().clone();
+            if let Ok(dir) = link_handle.path().app_data_dir() {
+                link::init_store(&link_handle, dir);
+            }
             #[cfg(desktop)]
             {
                 theme_icon::setup(app.handle())?;
                 launch::collect_argv(app.handle());
                 /* 主窗口以 visible:false 创建,前端会话恢复完成后自行显示(App 启动效果);
                    看门狗兜底:前端异常未显示时 4s 强制拉起,避免「窗口永不出现」 */
-                use tauri::Manager as _;
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(4));

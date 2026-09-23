@@ -595,23 +595,30 @@ rustls 用的就是 ring 后端），而 `ring::aead::CHACHA20_POLY1305` / `ring
    在这台机器上证明不了任何用户会遇到的事。真验必须用**应用自己 bind**。
    由此得出一条实现要求：桌面侧 bind 成功但 N 秒内没有任何连接尝试时，要提示「可能被 Windows 防火墙
    拦截」并给放行步骤 —— 半死状态（端口开着、包进不来）比直接报错难查得多。
-3. **手机 WebView 能不能开摄像头解二维码**（阶段 1 的前置，设计稿只写了「需 CAMERA 权限」这一半）。
+3. ✅ **手机 WebView 开摄像头解二维码 —— 已两台实测（2026-09-23，扫码器已落地）**。
    已查明的一半：Tauri 生成的 `RustWebChromeClient.onPermissionRequest`（`gen/android/app/src/main/java/
    com/nexus/editor/generated/RustWebChromeClient.kt:96-119`）**已实现** `VIDEO_CAPTURE` → 运行时申请
    `CAMERA` 并 grant/deny，所以**不需要新写 Kotlin 桥**，只要 manifest 补
-   `<uses-permission android:name="android.permission.CAMERA" />`。
-   未验的三半：① 安卓页源是 `http://tauri.localhost`（`tauri.conf.json` 的 `useHttpsScheme: false`），
-   `navigator.mediaDevices` 只在安全上下文存在 —— Chromium 把 `*.localhost` 当 potentially trustworthy，
-   推理论证成立但**没在这两台 WebView 上量过**；② 华为那台是 Chrome 99 内核，`BarcodeDetector`
-   大概率没有 → 解码库要自带（jsQR 一类，必须懒加载）；③ 摄像头预览在 `backdrop-filter` 都缺的
-   旧内核上怎么降级。①的兜底很便宜：`useHttpsScheme` 改 true 即可，但要连带重验既有资源加载。
+   `<uses-permission android:name="android.permission.CAMERA" />`（已补）。
+   三半的实测结论（Tab S8 + Mate 40 Pro 真机）：
+   ① `http://tauri.localhost` 下 `getUserMedia` **两台都能拿到流** → 安全上下文成立，**不必改 `useHttpsScheme`**；
+   ② Mate 40 Pro 的 `BarcodeDetector` **对象存在但盲检**（`detect()` 一直返回空）→ **jsQR 懒加载兜底是必需的**，
+      并启后能扫上；Tab S8 原生 `BarcodeDetector` 可用；
+   ③ 预览用 `bg-black` 实底、不依赖 `backdrop-filter`，两台正常。
+   **当时的遗留「切换摄像头手感」已于 2026-09-24 本轮重做收口**（一次开流 + 冻结帧平滑切换 + 对数捏合变焦
+   + 占用退避重试），Tab S8 已实测；Mate 40 Pro 与「黑闪/跟手」的人眼确认仍开着 ——
+   全量记在 `docs/bugs/2026-09-23-scanner-camera-switch-ux.md`。
 
 ### 每阶段的验收（设计稿 §14 的通用门禁之外，本阶段特有的一条）
 
 | 阶段 | 交付判据 | 这台机器上怎么量 |
 | --- | --- | --- |
 | 0 ✅ | 两端 hello 成功；抓包看不到明文 —— **2026-09-23 已达** | `cargo test --lib link::`（21 例）+ `npx vitest run src/lib/link.test.ts`（11 例）+ `node scripts/link-verify.mjs`（18 项运行时检查，要先起带 CDP 的 dev）。该脚本**用 Node 的 crypto 独立实现了一遍对端协议**、分别扮演手机与桌面，所以"能互通"不是 Rust 自己跟自己通 |
-| 1 扫码配对 | 扫一次码连上，重启免扫自动重连 | 阶段 1 开工前先过上面第 3 条否决性实测 |
+| 1 ✅🔧 | **免扫重连核心已完成并实测（2026-09-23）**：桌面二维码（带一次性票 + 6 位短码 + 长期身份指纹）、TOFU 确认、配对后双方各存一把从已认证 ECDH 派生的 LS、免扫自动重连、多配对单在线、票用后即废。**应用内相机扫码器也已落地并两台实测能扫上**（§7.2 三点全过，见上）。扫码器手感已于 2026-09-24 重做收口：
+一次开流（旧版为拿权限多开一枪）、切换用冻结帧过渡不再硬切黑屏、捏合改对数映射 + 每帧低通下发、
+无硬件变焦的镜头由数码放大顶上（解码只喂放大后的可见区域）、占用按退避重试不再误报「权限被拒」，
+并修掉预览被设置弹窗 `backdrop-blur` 关成一格（平板上非全屏）的真 bug。**还开着**：Mate 40 Pro 未跑本轮、
+黑闪与跟手需人眼 | `cargo test --lib link::`（38 例，含两端 TCP 真实往返）+ `node scripts/link-verify.mjs`（阶段 1 全绿：Node 独立实现验出桌面 Ed25519 身份签名 + 二维码指纹、LS 对称、免扫重连、票作废）+ 两台真机扫一扫实测（Tab S8 原生 BarcodeDetector、Mate 走 jsQR 兜底，均能扫上配对）+ `npx vitest run src/lib/scanCam.test.ts src/components/QrScanner.camera.test.tsx`（28 例：变焦数学、一次开流、占用/权限分流、捏合接线） |
 | 2 树同步 + 读写 | 手机浏览/打开/编辑/保存桌面文件 | **逃逸防护测试先于功能**：`..` / 盘符切换 / UNC / symlink 四组用例先写成 `#[cfg(test)]` |
 | 3 标签同步 | 手机看到桌面聚焦窗口的标签并接着改 | 多开两个窗口验「聚焦窗口那份」的判定 |
 | 4 实时更新 | 桌面改文件，手机秒级跟上 | 拿本仓（含 `node_modules`）当共享根，先量事件量与去抖，再谈功能 |
@@ -632,6 +639,10 @@ rustls 用的就是 ring 后端），而 `ring::aead::CHACHA20_POLY1305` / `ring
     - 扫码配对：桌面生成二维码、手机应用内扫码（系统相机不认自定义 scheme，故必须应用内做，
       需 `CAMERA` 权限 + 懒加载解码 chunk，不进主包）、TOFU 确认框、记住设备免重复扫码；
       手输 6 位配对码与手填 IP 双兜底
+      —— **2026-09-23 阶段 1 落地**：配对票（一次性 2 分钟、用后即废）、二维码带桌面长期身份指纹
+      （防同网段抢答）、TOFU 确认、配对后双方各存一把从已认证 ECDH 派生的 LS、免扫自动重连、多配对
+      单在线、6 位短码与手填 IP 兜底，全部实现并 `link-verify` 端到端实测通过；**唯独手机应用内
+      相机扫码器押后**（等 §7.2 三点否决性实测），现在手机侧走「粘贴 hide-link 配对码」这条等价入口
     - `hello` 带协议版本并强校验：安卓侧载无静默更新，两端版本会长期不一致
     - 服务端**不重写文件逻辑**：`read` 复用 `encoding::detect_and_decode`、`write` 复用既有写盘命令、
       `stat.size` 复用 `large_file::file_size`。手机拿到的编码 / BOM / 换行 / 二进制判定与桌面逐字一致，

@@ -16,12 +16,37 @@ import { isTauri } from './fileIO';
 export const DEFAULT_LINK_PORT = 47123;
 /** 与 Rust `link::EVENT` 同名 */
 export const LINK_EVENT = 'heid-link';
+/** 与 Rust `link::EVENT_PAIR` 同名：桌面收到一个持票设备、等用户确认时推这个 */
+export const LINK_PAIR_EVENT = 'heid-link-pair';
 /** 与 Rust `PROTOCOL_VERSION` 同步；不一致说明两端版本错开，要提示升级 */
 export const LINK_PROTOCOL = 1;
 
 const PREFS_KEY = 'heid-l…refs';
 
 export type LinkRole = 'off' | 'server' | 'client';
+
+/** 一条待确认的配对请求（TOFU 弹窗的载荷）。 */
+export interface LinkPairReq {
+  device: string;
+  keyId: string;
+}
+
+/** `link_pair_qr` 的返回：二维码 URI + 6 位短码 + 本机地址（供手填兜底显示）。 */
+export interface QrInfo {
+  uri: string;
+  code: string;
+  host: string;
+  port: number;
+  fp: string;
+  name: string;
+}
+
+/** 已配对设备行。 */
+export interface PairInfo {
+  keyId: string;
+  name: string;
+  pairedAt: number;
+}
 
 export interface LinkStatus {
   role: LinkRole;
@@ -85,6 +110,9 @@ export interface LinkPrefs {
   /** 手机侧记住上次连的地址与票，省一次手输 */
   host: string;
   ticket: string;
+  /** 手机侧配对成功后记住的设备 keyId（公开标识）与对端设备名，重启据此免扫自动重连 */
+  keyId: string;
+  peerName: string;
 }
 
 export const DEFAULT_PREFS: LinkPrefs = {
@@ -92,6 +120,8 @@ export const DEFAULT_PREFS: LinkPrefs = {
   port: DEFAULT_LINK_PORT,
   host: '',
   ticket: '',
+  keyId: '',
+  peerName: '',
 };
 
 /** 偏好读写：坏数据一律回落到默认值，不抛错（设置面板不该因为一处脏数据打不开） */
@@ -109,6 +139,8 @@ export function parsePrefs(raw: string | null): LinkPrefs {
     port,
     host: typeof o.host === 'string' ? o.host : '',
     ticket: typeof o.ticket === 'string' && isTicket(o.ticket) ? o.ticket : '',
+    keyId: typeof o.keyId === 'string' && isKeyId(o.keyId) ? o.keyId : '',
+    peerName: typeof o.peerName === 'string' ? o.peerName : '',
   };
 }
 
@@ -138,6 +170,11 @@ export function isUsablePort(port: number): boolean {
 /** 配对票形状：32 位十六进制（与 Rust `is_valid_ticket` 一致） */
 export function isTicket(s: string): boolean {
   return /^[0-9a-fA-F]{32}$/.test(s);
+}
+
+/** keyId 形状：16 位十六进制（与 Rust `pair::key_id` 一致，取自 LS 哈希前 8 字节） */
+export function isKeyId(s: string): boolean {
+  return /^[0-9a-fA-F]{16}$/.test(s);
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -205,6 +242,100 @@ export async function disconnectClient(): Promise<LinkStatus> {
   return normalizeStatus(await call<LinkStatus>('link_client_disconnect'));
 }
 
+/* ------------------------------------------------------------ 阶段 1：配对与重连 */
+
+/** 归一化配对请求（TOFU）。缺字段按空处理，不让弹窗白屏。 */
+export function normalizePairReq(raw: unknown): LinkPairReq {
+  const o = (raw ?? {}) as Partial<Record<keyof LinkPairReq, unknown>>;
+  return {
+    device: typeof o.device === 'string' ? o.device : '',
+    keyId: typeof o.keyId === 'string' && isKeyId(o.keyId) ? o.keyId : '',
+  };
+}
+
+function normPairings(raw: unknown): PairInfo[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((e) => {
+    const o = (e ?? {}) as Partial<Record<keyof PairInfo, unknown>>;
+    return {
+      keyId: typeof o.keyId === 'string' ? o.keyId : '',
+      name: typeof o.name === 'string' ? o.name : '',
+      pairedAt: typeof o.pairedAt === 'number' ? o.pairedAt : 0,
+    };
+  });
+}
+
+/** 桌面：开一次配对窗、拿回二维码信息（票每次刷新）。非共享状态会报错，调用方兜住。 */
+export async function pairQr(): Promise<QrInfo | null> {
+  if (!isTauri) return null;
+  return call<QrInfo>('link_pair_qr');
+}
+
+export async function approvePair(): Promise<void> {
+  if (!isTauri) return;
+  await call('link_pair_approve');
+}
+
+export async function denyPair(): Promise<void> {
+  if (!isTauri) return;
+  await call('link_pair_deny');
+}
+
+export async function pairingsList(): Promise<PairInfo[]> {
+  if (!isTauri) return [];
+  return normPairings(await call<unknown>('link_pairings_list'));
+}
+
+export async function revokePairing(keyId: string): Promise<boolean> {
+  if (!isTauri) return false;
+  return call<boolean>('link_pairing_revoke', { keyId });
+}
+
+/** 手机：吃一段 `hide-link://pair?...`（扫码/粘贴得到）走配对。 */
+export async function pairUri(uri: string, device: string): Promise<LinkStatus> {
+  if (!isTauri) return { ...EMPTY_STATUS };
+  return normalizeStatus(await call<LinkStatus>('link_client_pair', { uri, device }));
+}
+
+/** 手机：相机不可用时手输 6 位短码配对（要另填 host/port）。 */
+export async function pairCode(
+  host: string,
+  port: number,
+  code: string,
+  device: string,
+): Promise<LinkStatus> {
+  if (!isTauri) return { ...EMPTY_STATUS };
+  return normalizeStatus(await call<LinkStatus>('link_client_pair_code', { host, port, code, device }));
+}
+
+/** 手机：用记住的 host + keyId 免扫重连。 */
+export async function reconnect(
+  host: string,
+  port: number,
+  keyId: string,
+  device: string,
+): Promise<LinkStatus> {
+  if (!isTauri) return { ...EMPTY_STATUS };
+  return normalizeStatus(await call<LinkStatus>('link_client_reconnect', { host, port, keyId, device }));
+}
+
+/** 订阅配对请求（桌面 TOFU）。返回退订函数。 */
+export function subscribePairRequests(cb: (r: LinkPairReq) => void): () => void {
+  if (!isTauri) return () => {};
+  let unlisten: (() => void) | null = null;
+  let cancelled = false;
+  void (async () => {
+    const { listen } = await import('@tauri-apps/api/event');
+    const fn = await listen<unknown>(LINK_PAIR_EVENT, (e) => cb(normalizePairReq(e.payload)));
+    if (cancelled) fn();
+    else unlisten = fn;
+  })().catch(() => {});
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}
+
 /** 订阅状态变更。返回退订函数；非 Tauri 环境返回空操作。 */
 export function subscribeLinkStatus(cb: (s: LinkStatus) => void): () => void {
   if (!isTauri) return () => {};
@@ -241,5 +372,21 @@ export async function autoStartFromPrefs(): Promise<LinkStatus | null> {
     } catch {
       return null;
     }
+  }
+}
+
+/**
+ * 手机启动时按记住的设备免扫重连（设计稿 §7.1 第 4 条）。只在安卓、且有 host + keyId 时尝试；
+ * 失败不弹错、不清记录（IP 变了这次连不上，下次还试），把原因留在状态里由面板显示。
+ * 桌面不需要（它的"自动"是 autoStartFromPrefs 那侧）。
+ */
+export async function autoReconnectFromPrefs(): Promise<LinkStatus | null> {
+  if (!isTauri || !IS_ANDROID_APP) return null;
+  const prefs = loadPrefs();
+  if (!prefs.host || !prefs.keyId) return null;
+  try {
+    return await reconnect(prefs.host, prefs.port, prefs.keyId, deviceName());
+  } catch {
+    return null;
   }
 }
