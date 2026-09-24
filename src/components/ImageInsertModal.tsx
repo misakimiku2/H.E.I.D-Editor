@@ -280,7 +280,7 @@ export const ImageInsertModal = React.memo<{
                 else fileInputRef.current?.click();
               }}
               className={cn(
-                "w-full py-2.5 rounded-lg text-xs font-medium border border-dashed transition-colors flex items-center justify-center gap-2",
+                "w-full py-2.5 rounded-lg text-xs font-medium border border-dashed transition-colors flex items-center justify-center gap-2 pointer-coarse:min-h-[48px] pointer-coarse:text-sm",
                 isDarkMode
                   ? "border-zinc-600 hover:bg-zinc-700/50 text-zinc-300"
                   : "border-zinc-300 hover:bg-zinc-50 text-zinc-600"
@@ -315,7 +315,7 @@ export const ImageInsertModal = React.memo<{
                 onKeyDown={(e) => { if (e.key === 'Enter') addUrl(); }}
                 placeholder="https://example.com/image.png"
                 className={cn(
-                  "flex-1 min-w-0 px-3 py-2 rounded-lg text-xs outline-none border transition-colors",
+                  "flex-1 min-w-0 px-3 py-2 rounded-lg text-xs outline-none border transition-colors pointer-coarse:min-h-[48px] pointer-coarse:text-sm",
                   isDarkMode
                     ? "bg-zinc-900/60 border-zinc-600 focus:border-indigo-400 text-zinc-200 placeholder:text-zinc-500"
                     : "bg-white border-zinc-300 focus:border-indigo-400 text-zinc-800 placeholder:text-zinc-400"
@@ -324,7 +324,7 @@ export const ImageInsertModal = React.memo<{
               <button
                 onClick={addUrl}
                 className={cn(
-                  "px-3 rounded-lg text-xs font-medium pointer-coarse:min-h-[44px] transition-colors shrink-0",
+                  "px-3 rounded-lg text-xs font-medium pointer-coarse:min-h-[48px] pointer-coarse:text-sm transition-colors shrink-0",
                   "bg-indigo-600 hover:bg-indigo-500 text-white"
                 )}
               >
@@ -373,7 +373,7 @@ export const ImageInsertModal = React.memo<{
           <button
             onClick={onClose}
             className={cn(
-              "px-3 py-1.5 text-xs rounded-lg pointer-coarse:min-h-[44px] pointer-coarse:text-sm transition-colors",
+              "px-3 py-1.5 text-xs rounded-lg pointer-coarse:min-h-[48px] pointer-coarse:text-sm transition-colors",
               isDarkMode ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-300" : "bg-zinc-200 hover:bg-zinc-300 text-zinc-600"
             )}
           >
@@ -383,7 +383,7 @@ export const ImageInsertModal = React.memo<{
             onClick={confirm}
             disabled={images.length === 0}
             className={cn(
-              "px-4 py-1.5 text-xs rounded-lg font-medium pointer-coarse:min-h-[44px] pointer-coarse:text-sm transition-colors bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              "px-4 py-1.5 text-xs rounded-lg font-medium pointer-coarse:min-h-[48px] pointer-coarse:text-sm transition-colors bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
             )}
           >
             {images.length > 0 ? t('image.insertCount', { n: images.length }) : t('image.insert')}

@@ -158,7 +158,7 @@ function ThemeCard({ theme, selected, isDarkMode, onSelect }: {
       </div>
       <div
         className={cn(
-          'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium pointer-coarse:min-h-[44px] pointer-coarse:px-3 pointer-coarse:text-sm',
+          'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium pointer-coarse:min-h-[48px] pointer-coarse:px-3 pointer-coarse:text-sm',
           isDarkMode ? 'bg-zinc-900/60 text-zinc-200' : 'bg-zinc-50 text-zinc-700'
         )}
       >

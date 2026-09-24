@@ -292,7 +292,7 @@ export const SvgCanvas = React.memo<{
   }), [isDarkMode]);
 
   const btn = cn(
-    'px-1.5 py-0.5 rounded-md text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
+    'px-1.5 py-0.5 rounded-md text-[11px] transition-colors pointer-coarse:min-h-[48px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
     isDarkMode ? 'bg-zinc-800/90 text-zinc-300 hover:bg-zinc-700' : 'bg-white/90 text-zinc-600 hover:bg-zinc-100',
   );
 

@@ -888,7 +888,7 @@ export default function QrScanner({
           type="button"
           onClick={onClose}
           aria-label={t('link.scanClose')}
-          className={cn('flex h-11 w-11 items-center justify-center rounded-full bg-black/45 text-white', !IS_TOUCH_PRIMARY && 'h-9 w-9')}
+          className={cn('flex h-12 w-12 items-center justify-center rounded-full bg-black/45 text-white', !IS_TOUCH_PRIMARY && 'h-9 w-9')}
         >
           <X size={20} />
         </button>

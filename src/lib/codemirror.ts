@@ -3,10 +3,22 @@
  * 编辑器外观/高亮主题在 src/lib/editorThemes.ts（含设置持久化的主题注册表）。
  */
 import type { Extension } from '@codemirror/state';
+import { StreamLanguage } from '@codemirror/language';
 
 type LanguageLoader = () => Promise<Extension>;
 
 const jsLoader = () => import('@codemirror/lang-javascript');
+
+/**
+ * legacy-modes / 自维护语法的共用入口：取模块上的某个 `StreamParser` 包成 LanguageSupport。
+ * 传入完整 import() Promise 而不是模块名字符串，是为了让打包器看得见静态路径——
+ * 每种 mode 仍是独立 chunk（clike 由 C#/Kotlin/Scala 共用一个）。
+ */
+async function streamMode(mod: Promise<{ [name: string]: unknown }>, name: string): Promise<Extension> {
+  const m = await mod;
+  const parser = m[name] as Parameters<typeof StreamLanguage.define>[0];
+  return StreamLanguage.define(parser);
+}
 
 const LANGUAGE_LOADERS: Record<string, LanguageLoader> = {
   javascript: async () => (await jsLoader()).javascript(),
@@ -30,7 +42,26 @@ const LANGUAGE_LOADERS: Record<string, LanguageLoader> = {
     const m = await import('@codemirror/lang-markdown');
     return m.markdown({ base: m.markdownLanguage });
   },
+  /* ---- 以下为 v1.5（ROADMAP 51）补齐的第三档：官方 lang-go + legacy-modes 的 stream 着色器
+     + 两个仓库内自维护语法。stream 的 token 名直接映射到 @lezer/highlight 的 tag，
+     所以现有「代码配色主题」逐字生效，不需要另注册样式 ---- */
+  go: async () => (await import('@codemirror/lang-go')).go(),
+  bash: () => streamMode(import('@codemirror/legacy-modes/mode/shell'), 'shell'),
+  dockerfile: () => streamMode(import('@codemirror/legacy-modes/mode/dockerfile'), 'dockerFile'),
+  toml: () => streamMode(import('@codemirror/legacy-modes/mode/toml'), 'toml'),
+  ruby: () => streamMode(import('@codemirror/legacy-modes/mode/ruby'), 'ruby'),
+  swift: () => streamMode(import('@codemirror/legacy-modes/mode/swift'), 'swift'),
+  csharp: () => streamMode(import('@codemirror/legacy-modes/mode/clike'), 'csharp'),
+  kotlin: () => streamMode(import('@codemirror/legacy-modes/mode/clike'), 'kotlin'),
+  scala: () => streamMode(import('@codemirror/legacy-modes/mode/clike'), 'scala'),
+  scss: () => streamMode(import('@codemirror/legacy-modes/mode/css'), 'sCSS'),
+  less: () => streamMode(import('@codemirror/legacy-modes/mode/css'), 'less'),
+  ini: () => streamMode(import('./streamLangs'), 'ini'),
+  makefile: () => streamMode(import('./streamLangs'), 'makefile'),
 };
+
+/** 已接着色器的语言键。README 里的语言数以此为准（实测键数，不写估计数） */
+export const SUPPORTED_LANGUAGES = Object.keys(LANGUAGE_LOADERS);
 
 const languageExtCache = new Map<string, Extension>();
 

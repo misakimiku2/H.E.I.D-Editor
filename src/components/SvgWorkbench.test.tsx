@@ -247,12 +247,12 @@ describe('SvgWorkbench 编辑模式', () => {
     expect(onContentChange.mock.calls[0][0]).not.toContain('transform=');
   });
 
-  it('触屏档 ± 按钮撑到 44×44（桌面保持紧凑）', () => {
+  it('触屏档 ± 按钮撑到 48×48（桌面保持紧凑）', () => {
     const h = mount({ content: POS_SRC });
     selectRect(h);
     const btn = stepBtn(h, 'x', 1);
-    expect(btn.className).toContain('pointer-coarse:h-11');
-    expect(btn.className).toContain('pointer-coarse:w-11');
+    expect(btn.className).toContain('pointer-coarse:h-12');
+    expect(btn.className).toContain('pointer-coarse:w-12');
     expect(btn.className).toContain('h-6');
   });
 

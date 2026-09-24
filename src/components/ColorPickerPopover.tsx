@@ -174,7 +174,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
         aria-valuemin={0}
         aria-valuemax={360}
         aria-valuenow={Math.round(hsv.h)}
-        className="relative h-3 rounded-full mt-2.5 cursor-pointer touch-none pointer-coarse:h-7"
+        className="relative h-3 rounded-full mt-2.5 cursor-pointer touch-none pointer-coarse:h-12 pointer-coarse:py-2.5 pointer-coarse:bg-clip-content"
         style={{ background: 'linear-gradient(to right, #f00 0%, #ff0 17%, #0f0 33%, #0ff 50%, #00f 67%, #f0f 83%, #f00 100%)' }}
         onPointerDown={e => startDrag(e, 'hue', applyHue)}
         onPointerMove={e => moveDrag(e, applyHue)}
@@ -191,7 +191,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(alpha * 100)}
-        className="relative h-3 rounded-full mt-2.5 cursor-pointer touch-none pointer-coarse:h-7"
+        className="relative h-3 rounded-full mt-2.5 cursor-pointer touch-none pointer-coarse:h-12 pointer-coarse:py-2.5 pointer-coarse:bg-clip-content"
         style={{
           backgroundColor: '#fff',
           backgroundImage: 'linear-gradient(45deg, #ccc 25%, transparent 25%), linear-gradient(-45deg, #ccc 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ccc 75%), linear-gradient(-45deg, transparent 75%, #ccc 75%)',
@@ -213,7 +213,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
       {/* 当前色预览 + Hex 输入 */}
       <div className="flex items-center gap-2 mt-2.5">
         <div
-          className="w-8 h-8 rounded border shrink-0 pointer-coarse:h-11 pointer-coarse:w-11"
+          className="w-8 h-8 rounded border shrink-0 pointer-coarse:h-12 pointer-coarse:w-12"
           style={{
             borderColor: isDarkMode ? '#52525b' : '#d4d4d8',
             backgroundColor: '#fff',
@@ -232,7 +232,7 @@ export const ColorPickerPopover: React.FC<Props> = ({ color, anchor, isDarkMode,
           aria-label={t('colorDot.hex')}
           spellCheck={false}
           className={cn(
-            'flex-1 min-w-0 h-8 px-2 rounded border text-xs font-mono outline-none pointer-coarse:h-11 pointer-coarse:px-3 pointer-coarse:text-sm',
+            'flex-1 min-w-0 h-8 px-2 rounded border text-xs font-mono outline-none pointer-coarse:h-12 pointer-coarse:px-3 pointer-coarse:text-sm',
             isDarkMode ? 'border-zinc-600 bg-zinc-900 text-zinc-200 focus:border-blue-500' : 'border-zinc-300 bg-white text-zinc-800 focus:border-blue-500',
           )}
         />

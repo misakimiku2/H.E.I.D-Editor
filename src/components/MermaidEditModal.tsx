@@ -238,7 +238,7 @@ export function MermaidEditModal({ initialCode, isDarkMode, onClose, onSave }: M
               onClick={() => setFitWidth((v) => !v)}
               title={fitWidth ? t('md.mm.actualSize') : t('md.mm.fitWidth')}
               className={cn(
-                'flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors',
+                'flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors pointer-coarse:min-h-[48px] pointer-coarse:text-sm',
                 isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600',
               )}
             >
@@ -251,7 +251,7 @@ export function MermaidEditModal({ initialCode, isDarkMode, onClose, onSave }: M
               onClick={() => setConfirm({ kind: 'reset' })}
               title={t('md.mermaidFillTemplate')}
               className={cn(
-                'flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors',
+                'flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors pointer-coarse:min-h-[48px] pointer-coarse:text-sm',
                 isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600',
               )}
             >
@@ -362,7 +362,7 @@ export function MermaidEditModal({ initialCode, isDarkMode, onClose, onSave }: M
           <button
             onClick={onClose}
             className={cn(
-              'px-4 h-8 rounded-md text-xs font-medium pointer-coarse:h-11 pointer-coarse:text-sm transition-colors border',
+              'px-4 h-8 rounded-md text-xs font-medium pointer-coarse:h-12 pointer-coarse:text-sm transition-colors border',
               isDarkMode ? 'border-zinc-700 text-zinc-300 hover:bg-zinc-800' : 'border-zinc-300 text-zinc-600 hover:bg-zinc-100',
             )}
           >

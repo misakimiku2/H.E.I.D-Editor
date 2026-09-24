@@ -1785,7 +1785,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
               key={kind}
               onClick={() => handleTableBarAction(kind)}
               className={cn(
-                'h-11 flex-1 px-2 text-sm font-medium whitespace-nowrap transition-colors',
+                'h-12 flex-1 px-2 text-sm font-medium whitespace-nowrap transition-colors',
                 isDarkMode ? 'text-zinc-300 active:bg-zinc-700' : 'text-zinc-600 active:bg-zinc-100'
               )}
             >

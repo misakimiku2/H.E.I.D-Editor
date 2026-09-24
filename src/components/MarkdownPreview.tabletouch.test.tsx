@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * 触屏表格结构工具条：点选单元格浮出、四个动作写回源码的结果、触点尺寸与停靠位置
- * （v1.4.1 把这条自 v1.1.0 起就存在、却从未量过的触屏路径抬到 ≥44dp、钉到键盘之上并补上覆盖）。
+ * （v1.4.1 把这条自 v1.1.0 起就存在、却从未量过的触屏路径抬到 ≥44dp、钉到键盘之上并补上覆盖；v1.5 随弹窗层一起提到 48dp 档）。
  * 停靠用例盯的是平板实测踩到的坑：键盘弹起会把按「点击那一刻的可视框」算出的浮层压到键盘底下，
  * 等于按钮消失。桌面的悬停边线 +/− 单按钮是另一条路径，见 handleTableTool。
  */
@@ -85,13 +85,13 @@ describe('触屏表格结构工具条', () => {
       .toEqual(['md.rowAdd', 'md.rowDel', 'md.colAdd', 'md.colDel']);
   });
 
-  it('四个动作各 60×44dp：整条定宽 240、按钮 h-11，不低于 v1.4 的触屏档', () => {
+  it('四个动作各 60×48dp：整条定宽 240、按钮 h-12（v1.5 把弹窗层统一到 48dp 档）', () => {
     mount();
     tapCell(1, 0);
     const b = bar()!;
     expect(b.className).toContain('w-[240px]');
     for (const btn of Array.from(b.querySelectorAll('button'))) {
-      expect(btn.className).toContain('h-11');
+      expect(btn.className).toContain('h-12');
       expect(btn.className).toContain('flex-1');
     }
   });

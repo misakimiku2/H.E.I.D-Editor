@@ -17,7 +17,7 @@ interface BottomToolbarProps {
 
 /**
  * 手机端底部工具栏（拇指区）：打开 / 撤销 / 保存 / 重做 / 查找。
- * 触控目标 ≥44px；预览切换已移至顶栏（v1.4 用户反馈）。
+ * 触控目标 = 工具栏高（`--heid-phone-toolbar`，52px）；预览切换已移至顶栏（v1.4 用户反馈）。
  */
 export function BottomToolbar({
   isDarkMode, isDirty, canUndo, canRedo, saving,

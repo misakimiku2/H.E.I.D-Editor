@@ -203,8 +203,9 @@ export function DiffModal({
         "relative w-[min(960px,92vw)] h-[min(620px,88vh)] rounded-xl border shadow-2xl flex flex-col overflow-hidden",
         panel
       )}>
-        {/* header：标题 + 类别切换（外部修改 / 软件内编辑，各带未处理角标）+ 关闭 */}
-        <div className={cn("h-11 border-b flex items-center px-4 gap-2 shrink-0", softBorder)}>
+        {/* header：标题 + 类别切换（外部修改 / 软件内编辑，各带未处理角标）+ 关闭
+            行高用 min-h：触屏档里面的按钮撑到 48dp（ROADMAP 52②），写死 h-11 会把它们裁掉 */}
+        <div className={cn("min-h-11 border-b flex items-center px-4 gap-2 shrink-0", softBorder)}>
           <GitCompare size={15} className="shrink-0 opacity-70" />
           <span className="text-sm font-semibold shrink-0">{t('diff.title')}</span>
           <div className={cn(
@@ -219,7 +220,7 @@ export function DiffModal({
                 key={k}
                 onClick={() => switchKind(k)}
                 className={cn(
-                  "px-2.5 h-6 text-[11px] font-medium flex items-center gap-1.5 transition-colors",
+                  "px-2.5 h-6 text-[11px] font-medium flex items-center gap-1.5 transition-colors pointer-coarse:min-h-[48px] pointer-coarse:px-4 pointer-coarse:text-sm",
                   kind === k
                     ? (isDarkMode ? "bg-zinc-600/70 text-zinc-100" : "bg-zinc-200 text-zinc-800")
                     : (isDarkMode ? "text-zinc-400 hover:bg-zinc-700/50" : "text-zinc-500 hover:bg-zinc-100")
@@ -247,7 +248,7 @@ export function DiffModal({
           <button
             onClick={onClose}
             className={cn(
-              "p-1.5 rounded-md transition-colors",
+              "p-1.5 rounded-md transition-colors flex items-center justify-center pointer-coarse:min-h-[48px] pointer-coarse:min-w-[48px]",
               isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-100 text-zinc-500"
             )}
             title={t('common.close')}
@@ -282,7 +283,7 @@ export function DiffModal({
                       key={entry.id}
                       onClick={() => setSelected({ path: group.path, id: entry.id })}
                       className={cn(
-                        "w-full px-3 py-1.5 flex items-center gap-2 text-[11px] pointer-coarse:min-h-[44px] pointer-coarse:text-xs transition-colors text-left border-l-2",
+                        "w-full px-3 py-1.5 flex items-center gap-2 text-[11px] pointer-coarse:min-h-[48px] pointer-coarse:text-sm transition-colors text-left border-l-2",
                         isSel
                           ? cn("border-blue-500", isDarkMode ? "bg-zinc-700/70" : "bg-zinc-100")
                           : cn("border-transparent", isDarkMode ? "hover:bg-zinc-700/40" : "hover:bg-zinc-50")
@@ -347,7 +348,7 @@ export function DiffModal({
                 disabled={maxEntries <= MIN_DIFF_ENTRIES}
                 title={t('diff.decreaseTip', { min: MIN_DIFF_ENTRIES })}
                 className={cn(
-                  "w-6 h-6 flex items-center justify-center transition-colors disabled:opacity-30",
+                  "w-6 h-6 flex items-center justify-center transition-colors disabled:opacity-30 pointer-coarse:h-12 pointer-coarse:w-12",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
                 )}
               >
@@ -364,7 +365,7 @@ export function DiffModal({
                 disabled={maxEntries >= MAX_DIFF_ENTRIES}
                 title={t('diff.increaseTip', { max: MAX_DIFF_ENTRIES })}
                 className={cn(
-                  "w-6 h-6 flex items-center justify-center transition-colors disabled:opacity-30",
+                  "w-6 h-6 flex items-center justify-center transition-colors disabled:opacity-30 pointer-coarse:h-12 pointer-coarse:w-12",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-300" : "hover:bg-zinc-100 text-zinc-600"
                 )}
               >
@@ -376,7 +377,7 @@ export function DiffModal({
             onClick={() => effectiveSelection && setConfirming({ kind, action: 'accept', ...effectiveSelection })}
             disabled={!effectiveSelection}
             className={cn(
-              "px-3 h-7 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40",
+              "px-3 h-7 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40 pointer-coarse:h-12 pointer-coarse:px-4 pointer-coarse:text-sm",
               isDarkMode
                 ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-200"
                 : "bg-zinc-200 hover:bg-zinc-300 text-zinc-700"
@@ -389,7 +390,7 @@ export function DiffModal({
             onClick={() => effectiveSelection && setConfirming({ kind, action: 'revert', ...effectiveSelection })}
             disabled={!effectiveSelection}
             className={cn(
-              "px-3 h-7 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40 text-white",
+              "px-3 h-7 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40 text-white pointer-coarse:h-12 pointer-coarse:px-4 pointer-coarse:text-sm",
               "bg-red-600 hover:bg-red-500"
             )}
             title={t(kind === 'external' ? 'diff.revertTip' : 'diff.revertTipInternal')}

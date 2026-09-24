@@ -126,7 +126,7 @@ export function ImageViewer({ src, alt, isDarkMode, onClose }: { src: string; al
   }, [dragging]);
 
   const btn = cn(
-    'px-2 py-1 rounded-md text-xs transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
+    'px-2 py-1 rounded-md text-xs transition-colors pointer-coarse:min-h-[48px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
     isDarkMode ? 'bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700' : 'bg-white/85 text-zinc-700 hover:bg-zinc-200',
   );
 

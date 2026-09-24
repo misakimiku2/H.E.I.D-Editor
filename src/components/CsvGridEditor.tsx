@@ -1226,8 +1226,8 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
 
   return (
     <div className="flex flex-col h-full min-w-0 overflow-hidden">
-      {/* 编辑栏：地址框 + 内容输入 + 表头开关（触屏：行高与字号加大，按钮热区 ≥44px） */}
-      <div className={cn('flex items-stretch border-b shrink-0 text-xs', TOUCH && 'min-h-[44px]',
+      {/* 编辑栏：地址框 + 内容输入 + 表头开关（触屏：行高与字号加大，按钮热区 ≥48px） */}
+      <div className={cn('flex items-stretch border-b shrink-0 text-xs', TOUCH && 'min-h-[48px]',
         dark ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-zinc-100')}>
         <div
           className={cn('w-14 flex items-center justify-center border-r shrink-0 tabular-nums',
@@ -1242,6 +1242,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           data-testid="csv-formula-input"
           rows={Math.min(5, Math.max(1, (editing ? editing.value : '').split('\n').length))}
           className={cn('flex-1 min-w-0 px-2 py-1.5 bg-transparent outline-none resize-none leading-[20px]',
+            TOUCH && 'min-h-[48px]',
             TOUCH && 'text-sm',
             dark ? 'text-zinc-200 placeholder:text-zinc-600' : 'text-zinc-800 placeholder:text-zinc-400')}
           value={editing ? editing.value : displayText(cellValue(focus.r, focus.c))}
@@ -1270,7 +1271,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         <button
           data-testid="csv-autofit-widths"
           className={cn('shrink-0 border-l cursor-pointer transition-colors flex items-center justify-center',
-            TOUCH ? 'w-11' : 'px-2.5',
+            TOUCH ? 'w-12 min-h-[48px]' : 'px-2.5',
             dark ? 'border-zinc-700 text-zinc-400 hover:text-blue-200' : 'border-zinc-200 text-zinc-500 hover:text-blue-700')}
           title={t('csv.autoFitTable')}
           onClick={() => {
@@ -1295,7 +1296,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         <button
           data-testid="csv-wrap-toggle"
           className={cn('shrink-0 border-l flex items-center justify-center transition-colors',
-            TOUCH ? 'w-11 text-sm' : 'px-2.5 text-[11px]',
+            TOUCH ? 'w-12 min-h-[48px] text-sm' : 'px-2.5 text-[11px]',
             dark ? 'border-zinc-700' : 'border-zinc-200',
             wrap
               ? (dark ? 'bg-zinc-700/60 text-blue-300' : 'bg-blue-100 text-blue-700')
@@ -1315,7 +1316,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           <input
             data-testid="csv-filter-input"
             aria-label={t('csv.filterAria')}
-            className={cn(TOUCH ? 'w-28 text-sm' : 'w-24 text-[11px]',
+            className={cn(TOUCH ? 'w-28 text-sm min-h-[48px]' : 'w-24 text-[11px]',
               'bg-transparent outline-none',
               dark ? 'placeholder:text-zinc-600' : 'placeholder:text-zinc-400')}
             value={filter}
@@ -1329,7 +1330,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
           {(filter || sort) && (
             <button
               data-testid="csv-view-reset"
-              className={cn(TOUCH ? 'p-2.5' : 'p-0.5', 'rounded flex items-center justify-center',
+              className={cn(TOUCH ? 'p-2.5 min-h-[48px] min-w-[48px]' : 'p-0.5', 'rounded flex items-center justify-center',
                 dark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500')}
               title={t('csv.sortClear')}
               onClick={() => { setFilter(''); setSort(null); }}
@@ -1340,7 +1341,7 @@ export const CsvGridEditor = React.memo<CsvGridEditorProps>(function CsvGridEdit
         </div>
         <button
           className={cn('shrink-0 border-l transition-colors flex items-center justify-center',
-            TOUCH ? 'min-w-[44px] px-2 text-sm' : 'px-2.5 text-[11px]',
+            TOUCH ? 'min-w-[48px] min-h-[48px] px-2 text-sm' : 'px-2.5 text-[11px]',
             headerOn
               ? (dark ? 'border-zinc-700 bg-zinc-700/60 text-blue-300' : 'border-zinc-200 bg-blue-100 text-blue-700')
               : (dark ? 'border-zinc-700 text-zinc-500 hover:text-zinc-300' : 'border-zinc-200 text-zinc-500 hover:text-zinc-700'))}

@@ -327,7 +327,7 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
                 </button>
               </div>
               <details className="px-5 py-1">
-                <summary className="text-[10px] cursor-pointer opacity-60 pointer-coarse:text-xs">{t('link.advancedTicket')}</summary>
+                <summary className="text-[10px] cursor-pointer opacity-60 pointer-coarse:flex pointer-coarse:min-h-[48px] pointer-coarse:items-center pointer-coarse:text-sm">{t('link.advancedTicket')}</summary>
                 <div className={rowCls}>
                   <span className={labelCls}>{t('link.ticket')}</span>
                   <input
@@ -441,7 +441,7 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
               <button type="button" onClick={onShowQr} className={cn(btnGhost, 'text-[10px] min-h-0 px-2 py-1')}>
                 {t('link.refreshCode')}
               </button>
-              <div className={cn('flex items-center gap-1.5', IS_TOUCH_PRIMARY && 'min-h-[44px]')}>
+              <div className={cn('flex items-center gap-1.5', IS_TOUCH_PRIMARY && 'min-h-[48px]')}>
                 <span className="text-[10px] opacity-70">{t('link.ticket')}</span>
                 <button type="button" onClick={onCopyTicket} className="font-mono text-[11px] truncate max-w-[150px] underline decoration-dotted">
                   {s?.ticket || '—'}

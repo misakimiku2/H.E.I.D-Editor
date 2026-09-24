@@ -39,7 +39,7 @@ export function OtherPlatformPanel({ version, downloadPage, isDarkMode }: OtherP
     isDarkMode ? 'text-zinc-500' : 'text-zinc-500');
   const btnCls = cn(
     'px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1',
-    'pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px] pointer-coarse:gap-2',
+    'pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[48px] pointer-coarse:gap-2',
     isDarkMode ? 'border-zinc-600 text-zinc-400 hover:bg-zinc-700' : 'border-zinc-300 text-zinc-500 hover:bg-zinc-100'
   );
   const copy = () => {

@@ -1669,7 +1669,7 @@ export default function App() {
         </button>
 
         {/* 文件夹树入口：桌面保持 PanelLeft 图标开关。平板把打开/关闭文件夹从主菜单
-            提取为菜单栏常驻图标按钮（与菜单栏其他按钮同为纯图标、44px 触控目标）：
+            提取为菜单栏常驻图标按钮（与菜单栏其他按钮同为纯图标、48px 触控目标）：
             无根目录=打开文件夹（唤起系统目录选择）；有根目录=点击开合树+旁置关闭 */}
         {IS_TOUCH_PRIMARY ? (
           <>
@@ -2624,7 +2624,7 @@ export default function App() {
               <button
                 onClick={() => setAboutOpen(false)}
                 className={cn(
-                  "absolute top-3 right-3 p-1 rounded-md transition-colors",
+                  "absolute top-3 right-3 p-1 rounded-md transition-colors flex items-center justify-center pointer-coarse:h-12 pointer-coarse:w-12 pointer-coarse:top-1.5 pointer-coarse:right-1.5",
                   isDarkMode ? "hover:bg-zinc-700 text-zinc-400" : "hover:bg-zinc-200 text-zinc-500"
                 )}
                 title={t('common.close')}
@@ -2685,7 +2685,7 @@ export default function App() {
                             .catch(() => { /* 剪贴板被系统拒绝：按钮保持原样，用户仍可手动选中地址 */ });
                         }}
                         className={cn(
-                          "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px]",
+                          "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[48px]",
                           isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
                         )}
                       >
@@ -2699,7 +2699,7 @@ export default function App() {
                   {updater.phase === 'available' && updater.source === 'manual' && (
                     <button
                       onClick={() => { IS_ANDROID_APP ? updater.goDownload() : void updater.install(); }}
-                      className="px-3 py-1 rounded-md text-[10px] font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px] pointer-coarse:py-2"
+                      className="px-3 py-1 rounded-md text-[10px] font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[48px] pointer-coarse:py-2"
                     >
                       {t('update.newVersion', { v: updater.latestVersion ?? '' })} ·
                       {IS_ANDROID_APP ? t('update.goDownload') : t('update.installNow')}
@@ -2709,7 +2709,7 @@ export default function App() {
                     <button
                       onClick={updater.checkManually}
                       className={cn(
-                        "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px] pointer-coarse:gap-2",
+                        "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[48px] pointer-coarse:gap-2",
                         isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
                       )}
                     >
@@ -2726,7 +2726,7 @@ export default function App() {
                         <button
                           onClick={() => { setAboutOpen(false); openReleaseNotesTab(latestNotes); }}
                           className={cn(
-                            "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[44px] pointer-coarse:gap-2",
+                            "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors flex items-center gap-1 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[48px] pointer-coarse:gap-2",
                             isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
                           )}
                         >

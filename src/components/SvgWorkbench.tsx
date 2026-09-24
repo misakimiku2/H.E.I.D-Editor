@@ -224,7 +224,7 @@ export const SvgWorkbench = React.memo<{
   }), [isDarkMode]);
 
   const btn = cn(
-    'px-1.5 py-0.5 rounded-md text-[11px] transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
+    'px-1.5 py-0.5 rounded-md text-[11px] transition-colors pointer-coarse:min-h-[48px] pointer-coarse:px-3.5 pointer-coarse:text-sm',
     isDarkMode ? 'bg-zinc-800/90 text-zinc-300 hover:bg-zinc-700' : 'bg-white/90 text-zinc-600 hover:bg-zinc-100',
   );
 
@@ -233,7 +233,7 @@ export const SvgWorkbench = React.memo<{
   const toggleBtn = onToggleEdit && (
     <button
       type="button"
-      className={cn('absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border px-1.5 py-1 text-[11px] shadow-sm transition-colors pointer-coarse:min-h-[44px] pointer-coarse:px-3 pointer-coarse:text-sm',
+      className={cn('absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border px-1.5 py-1 text-[11px] shadow-sm transition-colors pointer-coarse:min-h-[48px] pointer-coarse:px-3 pointer-coarse:text-sm',
         svgEdit
           ? 'border-sky-500/60 bg-sky-500/15 text-sky-500 hover:bg-sky-500/25'
           : isDarkMode ? 'border-zinc-600/60 bg-zinc-800/90 text-zinc-400 hover:bg-zinc-700' : 'border-zinc-200 bg-white/90 text-zinc-500 hover:bg-zinc-100')}

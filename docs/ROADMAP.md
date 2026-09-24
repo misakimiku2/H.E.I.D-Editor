@@ -940,6 +940,31 @@ node_modules 里 40 次写入**一帧都不产生**、风暴之后主路还在�
       所以每种新语言都要有一条断言"扩展确实拿到了非 null"的测试，不能靠看截图收口
     - 补到哪一步才允许把「30+」写回 README：按 ①②③ 实际落地的种数算，并重新实测
       `LANGUAGE_LOADERS` 的键数，别再写估计数
+    - **✅ 2026-09-25 落地：13 种全补上，`LANGUAGE_LOADERS` 实测 31 个键**（README 两处按 31 改写）
+    - **原计划的三档分配不成立，按实际依赖重分了**：`@codemirror/legacy-modes@6.5.4`（官方、
+      2026-09-02 仍在更新）一家覆盖 **10 种** —— shell / dockerfile / toml / ruby / swift /
+      clike(C#、Kotlin、Scala) / css(SCSS、Less)。**它没有 ini 也没有 makefile**，
+      所以「② 走 legacy-modes 的 INI / Makefile」这句是当初没核实就写下的。
+      npm 上唯一的 `codemirror-lang-makefile` 是 0.1.1、最后发布停在 2024-06、单一维护人 →
+      按本条门禁「不引入无人维护的包」不取。两者改为仓库内自维护 `src/lib/streamLangs.ts`。
+      社区包一个都没引：③ 整档被 legacy-modes 吃掉了。Go 走官方 `@codemirror/lang-go@6.0.1`
+    - **安装包增量实测**（口径就是本条要求的「增量」而不是主包 gzip）：把 `codemirror.ts` 临时退回
+      HEAD 版另建一份 `dist-baseline` 对比 → 新增 10 个 chunk，assets 合计
+      11404.5 → 11509.5 KB raw（**+105 KB**）、4004.0 → 4044.3 KB gzip（**+40.3 KB**），
+      150 KB 门禁内；首屏（`index.html` 实际引用的 1 JS + 1 CSS）830.7 → 834.0 KB gzip
+      （+3.3 KB，是 `StreamLanguage` 进了主包）。README 顺带勘正：首屏 814 → 834 KB、chunk 284 → 296
+    - **测试口径**（`src/lib/codemirror.test.ts`，7 例）：不止断言非 null —— 逐语言拿一段样例过
+      真实解析管线，用**应用自己的配色主题**取 class，断言「注释 / 关键字 / 字符串 / 数字」这些
+      不同类别各自着色且互不同色（同色等于没区分，与纯文本无异）；外加断言没有
+      `Unknown highlighting tag` 警告。README 的语言数由测试守住：写了别的数字就红
+    - **两条会反复踩的实现账**：**①** stream 着色器的 token 名直接映射 `@lezer/highlight` 的 tag，
+      `definition` / `function` 这类**是修饰函数不是标签**——裸用不报错，节点直接从语法树里消失，
+      表现和「这个 token 压根没着色」逐字相同；要修饰语义只能用传统别名 `def`（= `variableName.definition`）。
+      **②** `simpleMode` **行首不重置状态**（它没有 sol 钩子），任何 `push` 都会漏到下一行 ——
+      要逐行判定状态的语法（Makefile 的 Tab 配方行）不能用它，得写手工 `StreamParser`
+    - **如实记下的短板**：legacy-modes 的 dockerfile 只给注释与指令两类 token，参数不着色；
+      Makefile 配方行的命令原文不着色（只认 `$(...)` / 引号串 / 行尾注释）。都是上游语法的天花板，
+      不是接错线
 
 52. **② 弹窗层 48dp 提档**（自 v1.4.2 移入）
     - 清单：设置 / 关于 / Diff / 图片插入 / 确认框、CSV 网格菜单、Markdown 表格结构条，
@@ -949,6 +974,39 @@ node_modules 里 40 次写入**一帧都不产生**、风暴之后主路还在�
       出问题时两头都查不清
     - 量的方法：`touch-target-audit` 在本应用报的约 60 条子 48dp 项绝大多数是噪声（标签内 `svg`、
       脏点、`cm-gutterElement` 行），**按改动面单独 dump rect 量**，不要引用它的总数
+    - **✅ 2026-09-25 落地并模拟器实测**。做法与结论：
+    - **范围按「44 档清零」定，不止清单那八处**：静态扫出的 44 档字面量（`min-h-[44px]` /
+      `min-w-[44px]` / `pointer-coarse:h-11|w-11` / `TOUCH ? 'w-11'`）全仓一次抬到 48，
+      连带 SVG 检查器·画布·工作台、ImageViewer、UrlImportModal、MermaidEditModal、
+      DeviceLinkSection 漏网的一处、QrScanner 的 44×44 圆按钮。留一半改一半会造出
+      「设置 48 / SVG 面板 44」两套档——53 那颗点就是这么来的。
+      守卫：`src/lib/touchSize.test.ts` 静态扫源码，44 档再出现就红
+    - **量的工具新写了 `scripts/popup-touch-audit.mjs`**：连 adb 转发出来的 WebView 调试端口，
+      只量**当前这一屏**实际会点到的控件，低于 48dp 列出来并以退出码 1 收口；
+      噪声按 52 的既有判断滤掉（标签条 `[data-tab-id]`、编辑器内部、拖拽把手）。
+      状态切换用 `scripts/cdp-audit.mjs` 点界面，文件用 MediaStore `content://` 走 VIEW intent 打开
+    - **实测（x86_64 debug 包 / 平板壳 2560×1600 @320dpi = 1280 CSS px / dpr 2）—— 六处违例全靠 dump rect 才现形，静态数 class 数不出来**：
+      CSV 编辑栏容器写 `min-h-[48px]` 但带 1px `border-b`，`items-stretch` 的子里只剩 **47dp**
+      （下限要写在各控件上，不是写在行上）；CSV 行筛选输入 112×**20dp**；Diff 页脚 ± 按钮 24×24、
+      接受/撤销 67×28 与 91×28；关于弹窗的关闭 × 22×22；设置·设备互联「高级：手填 32 位配对码」
+      的 `<summary>` 718×**16dp**；取色器色相/不透明度轨道 242×**28dp**（改成 48dp 热区靠
+      `h-12 + py-2.5 + bg-clip-content`，视觉粗细保持原样）。
+      复测：CSV 网格、设置（含「高级配对码」展开）、关于 + 获取另一版（点「打开下载页」后的面板）、
+      Diff（含页脚接受/撤销与 ±）、网址导入、SVG 工作台、取色器各屏「最小边 ≥48dp」全绿。
+      **两层这次没能开到位、只改了 class 没上机量**：确认框（Diff 的撤销确认要先有时间线条目才启用，
+      当前装机包的时间线是空的）与图片插入弹窗（平板壳上没找到「插入图片」入口，它写在移动端顶栏）。
+      两者的按钮与已量到的 AlertDialog / ImageInsertModal 底部按钮是同一套写法
+    - **两台壳都量了**（前几批的口径）：平板壳 1280×800 CSS px（dpr 2）与手机壳 412×732（dpr 2.625，
+      `phone35`）。手机壳上重点量了「关于」——它本来就只剩十几像素余量（v1.4.2 加 max-h + overflow-y-auto
+      的原因），抬档后实测面板高 708、上下各留 12px、内部无裁切 ✅；CSV 网格 / 设置 / 高级配对码
+      在手机壳同样 ≥48dp
+    - 顺带把「弹窗不得溢出可视框」并进 `popup-touch-audit.mjs` 的判据。写第一版时把越界量算成了
+      `max(0, top)`（等于把面板离顶多远当成越界），取色器被误报「溢出 196dp」——
+      正确是 `max(0, -top)`。**新加的门禁自己也要先验一遍再信**
+    - **量出来但本条不动的，另记**：markdown 大纲栏「展开大纲」把手 20×44dp、
+      `App.tsx` 侧栏收合把手 `h-11 w-5`（44 高但只有 20dp 宽）——都在主界面不在弹窗层；
+      标签条（44 高、关闭 × 28×28）维持 v1.4 的原判断不做
+
 
 59. **安卓 release 包上，「网址导入」会把加载错误页当正文导入**（2026-09-23 做 v1.5 前置实测时撞出来的，
     与本版主题无关，随 v1.5.0 一起修）

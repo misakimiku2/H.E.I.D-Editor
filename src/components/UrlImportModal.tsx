@@ -55,7 +55,7 @@ export function UrlImportModal({ isDarkMode, onImported, onClose }: UrlImportMod
   };
 
   const inputCls = cn(
-    "w-full px-3 py-2 rounded-lg text-xs outline-none border transition-colors",
+    "w-full px-3 py-2 rounded-lg text-xs outline-none border transition-colors pointer-coarse:min-h-[48px] pointer-coarse:text-sm",
     isDarkMode
       ? "bg-zinc-900/60 border-zinc-600 focus:border-indigo-400 text-zinc-200 placeholder:text-zinc-500"
       : "bg-white border-zinc-300 focus:border-indigo-400 text-zinc-800 placeholder:text-zinc-400",
@@ -83,7 +83,7 @@ export function UrlImportModal({ isDarkMode, onImported, onClose }: UrlImportMod
             onClick={() => void submit()}
             disabled={busy}
             className={cn(
-              "px-3 rounded-lg text-xs font-medium pointer-coarse:min-h-[44px] transition-colors shrink-0 flex items-center gap-1.5 disabled:opacity-50",
+              "px-3 rounded-lg text-xs font-medium pointer-coarse:min-h-[48px] pointer-coarse:text-sm transition-colors shrink-0 flex items-center gap-1.5 disabled:opacity-50",
               "bg-indigo-600 hover:bg-indigo-500 text-white",
             )}
           >

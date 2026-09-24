@@ -6,7 +6,7 @@
 
 **Highlighting Intelligent Document Editor**
 
-秒开的轻量代码 / 文档编辑器 —— Windows 安装包约 7 MB，安卓手机与平板同为一等公民；深浅色主题，18 种语言语法高亮，Markdown / CSV / SVG / 图片开箱即用
+秒开的轻量代码 / 文档编辑器 —— Windows 安装包约 7 MB，安卓手机与平板同为一等公民；深浅色主题，31 种语言语法高亮，Markdown / CSV / SVG / 图片开箱即用
 
 [![Release](https://img.shields.io/github/v/release/misakimiku2/H.E.I.D-Editor?logo=github)](https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest)
 [![CI](https://github.com/misakimiku2/H.E.I.D-Editor/actions/workflows/ci.yml/badge.svg)](https://github.com/misakimiku2/H.E.I.D-Editor/actions/workflows/ci.yml)
@@ -25,7 +25,7 @@
 
 ### 代码编辑 · 迷你地图 · 粘性滚动
 
-VS Code 风格的编辑体验：Canvas 语法着色迷你地图（点击/拖拽导航）、滚动时顶部固定当前作用域链、行号拖选、代码折叠、自动补全、括号匹配。语言包按需加载——首屏只拉 1 个 JS + 1 个 CSS（gzip ≈ 814 KB），其余 284 个 chunk 用到才取。
+VS Code 风格的编辑体验：Canvas 语法着色迷你地图（点击/拖拽导航）、滚动时顶部固定当前作用域链、行号拖选、代码折叠、自动补全、括号匹配。语言包按需加载——首屏只拉 1 个 JS + 1 个 CSS（gzip ≈ 834 KB），其余 296 个 chunk 用到才取。
 
 行内出现 `#1e1e1e` 这类颜色字面量时会画一个取色圆点，点开是取色器，选完以最小补丁写回源码。
 
@@ -80,7 +80,7 @@ VS Code 风格的编辑体验：Canvas 语法着色迷你地图（点击/拖拽�
 
 **编辑器核心**
 
-- 18 种语言的**语法高亮**（TypeScript / JavaScript / TSX / JSX / Python / Rust / Java / C / C++ / CSS / HTML / JSON / SQL / YAML / XML / SVG / PHP / Markdown），语言包按需加载；另有 13 种（Go / Shell / C# / Ruby / Swift / Kotlin / Scala / SCSS / Less / TOML / INI / Dockerfile / Makefile）能识别类型并在状态栏正确标注，但暂未接着色器，按纯文本渲染
+- 31 种语言的**语法高亮**（TypeScript / JavaScript / TSX / JSX / Python / Rust / Go / Java / C / C++ / C# / Kotlin / Scala / Ruby / Swift / PHP / CSS / SCSS / Less / HTML / JSON / YAML / TOML / XML / SVG / SQL / Shell / Dockerfile / INI / Makefile / Markdown），语言包按需加载；CSV 有专门的表格视图，纯文本本就不需要着色器
 - 迷你地图（Canvas 语法着色，点击/拖拽导航）、粘性滚动（作用域链 + 点击跳转）、代码折叠、行号拖选
 - 括号匹配 / 自动闭合、选中高亮匹配、自动补全
 - 颜色字面量行内取色圆点 + 取色器（色相 / 饱和度 / 透明度 / 十六进制），改完以最小补丁写回源码
