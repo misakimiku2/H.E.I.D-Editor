@@ -10,11 +10,12 @@
 //! - 配对票从不上网，只作为 HKDF 的 salt 参与派生（见 [`derive_keys`]）；
 //! - 读超时与"半帧"必须分开处理，否则会在帧中间丢同步（见 [`Framer`]）。
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -29,6 +30,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 mod identity;
 /// 配对凭证纯逻辑：一次性票 / 长期链路密钥 LS / keyId / 6 位短码 / 二维码载荷 / 落盘存储。
 mod pair;
+/// 共享根与路径逃逸防护（阶段 2）：`relPath` 只能落在根内。
+mod roots;
+/// 远程文件命令面（阶段 2）：`list` / `stat` / `read` / `write`，不碰网络也不碰会话。
+mod fsrv;
 
 /// 协议版本。`hello` 里强校验：安卓侧载无静默更新，两端版本会长期不一致，
 /// 不匹配必须明确拒绝而不是"尽力兼容"。
@@ -49,6 +54,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TICKET_BYTES: usize = 16;
 const INFO_C2S: &[u8] = b"heid-link-v1 c2s";
 const INFO_S2C: &[u8] = b"heid-link-v1 s2c";
+/// bind 成功之后，多久没有任何连接尝试就提一次「可能被防火墙拦截」（设计稿 §11.1）
+const BIND_QUIET_HINT: Duration = Duration::from_secs(15);
 /// 前端订阅的状态事件名
 pub const EVENT: &str = "heid-link";
 /// 阶段 1 的配对请求（TOFU）事件名：桌面收到一个持票设备、等用户点允许/拒绝时推这个
@@ -100,6 +107,13 @@ pub enum Msg {
     Refused { code: String, reason: String },
     /// 正常收尾
     Bye {},
+    /// 应用层请求（阶段 2 起）。`id` 由发起方自增、只在本连接内有意义；
+    /// `params` 是 JSON 文本而不是结构体 —— 命令面的形状归 `fsrv` 管，
+    /// 帧层不认识任何具体命令，加命令不用动这里。
+    Req { id: u64, method: String, params: String },
+    /// 对 `Req` 的应答。`ok=false` 时 `code` 是稳定标识、`error` 给人看；
+    /// `data` 同样是 JSON 文本。
+    Res { id: u64, ok: bool, code: String, error: String, data: String },
 }
 
 /// 加密帧的信封。`seq` 与 nonce 计数器同值，作为协议层的顺序断言：
@@ -592,6 +606,17 @@ pub struct LinkStatus {
     pub last_error: String,
     /// 本端协议版本（对端的那一份由握手校验，不匹配直接拒，不进这个快照）
     pub protocol: u32,
+    /// 桌面当前的共享范围（人话形态，已去掉 `\\?\` 前缀）。手机侧恒为空。
+    /// 这条是设计稿 §5.2 的硬要求：用户必须看得见手机端能读到哪些文件。
+    pub root_display: String,
+    /// 对端设备 id = 这次握手派生出的链路密钥 LS 的 keyId。
+    /// 手机侧的 `hide-remote://<deviceId>/…` 用它当身份键（不是 IP —— 换网后 IP 会变，
+    /// 已打开的标签就会指向另一台机器）。
+    pub peer_key_id: String,
+    /// bind 成功但迟迟没有任何连接尝试 → 提示「可能被 Windows 防火墙拦截」。
+    /// 这条是设计稿 §11.1 的实现要求：「端口开着、包进不来」这种半死状态比直接报错难查得多，
+    /// 而这在本机环境（有历史 node 放行规则）测不出用户侧结论，只能靠应用自己 bind 时才成立。
+    pub firewall_hint: bool,
 }
 
 /// `protocol` 必须是本地常量而不是 0：前端拿它自证"我这一端说的是哪版协议"。
@@ -607,6 +632,9 @@ impl Default for LinkStatus {
             ticket: String::new(),
             last_error: String::new(),
             protocol: PROTOCOL_VERSION,
+            root_display: String::new(),
+            peer_key_id: String::new(),
+            firewall_hint: false,
         }
     }
 }
@@ -635,6 +663,10 @@ pub struct LinkState {
     /// 有一条配对请求正等用户决定（serve_conn 挂上、轮询 decision）
     pending: Mutex<Option<()>>,
     decision: Mutex<Option<bool>>,
+    /// 桌面共享根（canonicalize 之后）。None = 还没选根，此时所有远程文件命令都以 `noroot` 拒
+    shared_root: Mutex<Option<PathBuf>>,
+    /// 手机侧的活连接；前端 `link_request` 走它把请求塞进发出队列
+    conn: Mutex<Option<Arc<Conn>>>,
 }
 
 impl LinkState {
@@ -652,6 +684,119 @@ impl LinkState {
             .as_ref()
             .map(|i| i.fingerprint())
             .unwrap_or_default()
+    }
+}
+
+/* ------------------------------------------------------------------ 客户端请求通路 */
+
+/// 一条已建立的客户端连接（手机侧）。前端命令与维持线程之间只经这三样东西交接：
+/// 发出队列、等待中的请求表、以及「还活着」旗标。
+///
+/// 为什么不由命令线程直接往 socket 写：`Session` 里的发送帧计数器必须和写出顺序严格一致
+/// （见 [`Session::nonce_of`]），两个线程各写各的会立刻把 nonce 与流顺序错开。
+/// 所以socket 只有维持线程一个主人，命令线程把请求放进队列、由它在下一轮 poll 里发出。
+pub struct Conn {
+    outbox: Mutex<VecDeque<OutReq>>,
+    pending: Mutex<HashMap<u64, Arc<Slot>>>,
+    seq: AtomicU64,
+    alive: AtomicBool,
+}
+
+struct OutReq {
+    id: u64,
+    method: String,
+    params: String,
+}
+
+/// 一次请求的落点：`Condvar` 唤醒等待的命令线程，不靠轮询。
+#[derive(Default)]
+struct Slot {
+    done: Mutex<Option<Result<String, String>>>,
+    cv: Condvar,
+}
+
+/// 远程命令的等待上限。6MB 的读取在局域网里是亚秒级，但手机可能在信号边缘，
+/// 宁可明确报「超时」也不要让前端的保存按钮一直转。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+impl Conn {
+    fn new() -> Arc<Conn> {
+        Arc::new(Conn {
+            outbox: Mutex::new(VecDeque::new()),
+            pending: Mutex::new(HashMap::new()),
+            seq: AtomicU64::new(1),
+            alive: AtomicBool::new(true),
+        })
+    }
+
+    /// 发一条远程命令并等结果。在 [`run_pump`] 转出这帧之前它只是队列里的一条记录。
+    ///
+    /// 加锁顺序要紧：`deliver` 是先 `pending` 后 `done`，所以这里凡是握着 `done`
+    /// 的守卫就绝不再去碰 `pending`，取走结果后先放下守卫再摘表项。
+    fn call(&self, method: &str, params: String) -> Result<String, String> {
+        let id = self.seq.fetch_add(1, Ordering::SeqCst);
+        let slot = Arc::new(Slot::default());
+        self.pending.lock().unwrap_or_else(|p| p.into_inner()).insert(id, Arc::clone(&slot));
+        self.outbox.lock().unwrap_or_else(|p| p.into_inner()).push_back(OutReq {
+            id,
+            method: method.to_string(),
+            params,
+        });
+        let mut g = slot.done.lock().unwrap_or_else(|p| p.into_inner());
+        let until = Instant::now() + REQUEST_TIMEOUT;
+        loop {
+            if let Some(r) = g.take() {
+                drop(g);
+                self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+                return r;
+            }
+            if !self.alive.load(Ordering::SeqCst) {
+                drop(g);
+                self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+                return Err("链路已断开，这次没有送达桌面".to_string());
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                drop(g);
+                self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+                return Err("桌面 30 秒内没有回话，请检查连接".to_string());
+            }
+            g = match slot.cv.wait_timeout_while(g, left, |v| v.is_none()) {
+                Ok((g, _)) => g,
+                Err(_) => return Err("等待被中断".to_string()),
+            };
+        }
+    }
+
+    /// 维持线程用：取走本回合要发的请求
+    fn take_outbox(&self) -> Vec<OutReq> {
+        let mut g = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
+        g.drain(..).collect()
+    }
+
+    /// 维持线程用：把应答交给等待者。未知 id（已超时被摘掉）直接丢弃。
+    fn deliver(&self, id: u64, result: Result<String, String>) {
+        if let Some(slot) = self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id) {
+            *slot.done.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
+            slot.cv.notify_all();
+        }
+    }
+
+    /// 连接结束时唤醒所有还在等的人，别让命令线程等到超时才反应过来
+    fn shutdown(&self, why: &str) {
+        self.alive.store(false, Ordering::SeqCst);
+        let drained: Vec<Arc<Slot>> = self
+            .pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        for slot in drained {
+            *slot.done.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(Err(format!("链路已断开：{why}")));
+            slot.cv.notify_all();
+        }
     }
 }
 
@@ -778,13 +923,17 @@ fn desktop_name() -> String {
 
 /* ------------------------------------------------------------------ 连接维持 */
 
-/// 握手后的维持循环：心跳、断连判定、停止开关观察。
-/// 两端共用，只有 `we_initiate` 不同（影响退出时是否主动发 bye）。
+/// 握手后的维持循环：心跳、断连判定、停止开关观察，以及**应用层消息的分派**。
+/// 两端共用，只有 `role` 不同：服务端答 `Req`，客户端发 `Req` 并收 `Res` / `Event`。
+///
+/// 为什么分派也在这一个线程里做、不在命令线程里各开一路：见 [`Conn`] —— socket 只有一个主人，
+/// 发送帧计数器才可能和写出顺序保持一致。
 fn run_pump(
     mut stream: TcpStream,
     mut session: Session,
     app: &AppHandle,
     stop: &AtomicBool,
+    role: Role,
 ) {
     let mut framer = Framer::default();
     let mut last_ping = Instant::now();
@@ -794,6 +943,19 @@ fn run_pump(
         if stop.load(Ordering::SeqCst) {
             let _ = session.send(&mut stream, &Msg::Bye {});
             return;
+        }
+        // 客户端：把前端排进来的远程命令发出去（一个回合全发，不一次只发一条）
+        if role == Role::Client {
+            let conn = client_conn(app);
+            if let Some(conn) = conn.as_ref() {
+                for req in conn.take_outbox() {
+                    let OutReq { id, method, params } = req;
+                    if let Err(e) = session.send(&mut stream, &Msg::Req { id, method, params }) {
+                        mark_error(app, e);
+                        return;
+                    }
+                }
+            }
         }
         match session.recv(&mut stream, &mut framer) {
             Ok(Some(Msg::Pong {})) => {
@@ -806,9 +968,29 @@ fn run_pump(
                     return;
                 }
             }
+            Ok(Some(Msg::Req { id, method, params })) => {
+                if role != Role::Server {
+                    mark_error(app, "手机端是客户端，不该收到请求帧".to_string());
+                    return;
+                }
+                let root = shared_root(app);
+                let msg = match fsrv::handle(root.as_deref(), &method, &params) {
+                    Ok(data) => Msg::Res { id, ok: true, code: String::new(), error: String::new(), data },
+                    Err((code, error)) => Msg::Res { id, ok: false, code, error, data: String::new() },
+                };
+                if let Err(e) = session.send(&mut stream, &msg) {
+                    mark_error(app, e);
+                    return;
+                }
+            }
+            Ok(Some(Msg::Res { id, ok, code, error, data })) => {
+                match client_conn(app) {
+                    Some(conn) => conn.deliver(id, if ok { Ok(data) } else { Err(format!("{code}: {error}")) }),
+                    None => mark_error(app, "没有活连接却收到应答帧".to_string()),
+                }
+            }
             Ok(Some(Msg::Bye {})) => return,
             Ok(Some(other)) => {
-                // 阶段 0 不该收到别的消息；真收到了说明版本判断有漏
                 mark_error(app, format!("收到本阶段不支持的消息：{other:?}"));
                 return;
             }
@@ -837,6 +1019,16 @@ fn run_pump(
     }
 }
 
+/// 手机侧当前的活连接（未连接时为 None）
+fn client_conn(app: &AppHandle) -> Option<Arc<Conn>> {
+    app.state::<LinkState>().conn.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// 桌面当前的共享根
+fn shared_root(app: &AppHandle) -> Option<PathBuf> {
+    app.state::<LinkState>().shared_root.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
 fn prepare(stream: &mut TcpStream) {
     stream.set_read_timeout(Some(POLL)).ok();
     stream.set_nodelay(true).ok();
@@ -844,11 +1036,40 @@ fn prepare(stream: &mut TcpStream) {
 
 /* ------------------------------------------------------------------ 服务端 */
 
+/// bind 监听套接字，带两次短重试。
+///
+/// 为什么要重试：`link_server_stop` 只是置停止位，accept 线程最快也要一个 POLL 周期才退出，
+/// 那一刻监听套接字仍在，用户「关了马上再开」就会撞 10048。
+///
+/// 为什么重试完仍要**明确报错而不换端口**（设计稿 §12.1 第 3 条）：静默换端口会让手机上
+/// 记着的地址失效，比直接报错难查得多。Windows 上还有一条本轮实测到的成因：上一台设备的
+/// 连接留在 TIME_WAIT 时，std 的监听套接字按 SO_EXCLUSIVEADDRUSE 绑定会直接被拒 ——
+/// 本机实测 45 秒还没散，短重试救不了，所以报错文案必须自己把下一步说清楚。
+fn bind_listener(port: u16) -> Result<TcpListener, String> {
+    let mut kind = io::ErrorKind::Other;
+    for attempt in 0..3 {
+        match TcpListener::bind(("0.0.0.0", port)) {
+            Ok(l) => return Ok(l),
+            Err(e) => {
+                kind = e.kind();
+                if attempt < 2 {
+                    std::thread::sleep(Duration::from_millis(120));
+                }
+            }
+        }
+    }
+    Err(match kind {
+        io::ErrorKind::AddrInUse | io::ErrorKind::AddrNotAvailable => format!(
+            "端口 {port} 现在占着：可能是上一台设备的连接还没被系统放掉（Windows 会留一会儿），等一分钟再试；还不行就换一个端口。"
+        ),
+        other => format!("端口 {port} 绑定失败：{other}"),
+    })
+}
+
 /// 起服务端。阻塞 I/O 一律离开主线程；这条 accept 线程会活到用户关掉开关，
 /// 所以用独立 `std::thread` 而不是 blocking 池的槽位（池槽位该留给短任务）。
 fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
-    let listener =
-        TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("端口 {port} 绑定失败：{e}"))?;
+    let listener = bind_listener(port)?;
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("监听套接字设置失败：{e}"))?;
@@ -879,9 +1100,15 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
     std::thread::Builder::new()
         .name("heid-link-accept".into())
         .spawn(move || {
+            // 从 bind 成功起算，到点还没有任何连接尝试就提一次防火墙（同一次监听只提一次，
+            // 真来了一条连接即清除；反复弹同一条提示只会让人以为程序在瞎说）
+            let bound = Instant::now();
+            let mut hinted = false;
             while !stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, addr)) => {
+                        hinted = false;
+                        publish(&app_thread, |s| s.firewall_hint = false);
                         let app = app_thread.clone();
                         let stop = Arc::clone(&stop);
                         if std::thread::Builder::new()
@@ -892,7 +1119,13 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
                             mark_error(&app_thread, "无法为来到的连接起线程");
                         }
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(POLL),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        if !hinted && bound.elapsed() >= BIND_QUIET_HINT {
+                            hinted = true;
+                            publish(&app_thread, |s| s.firewall_hint = true);
+                        }
+                        std::thread::sleep(POLL)
+                    }
                     Err(e) => {
                         publish(&app_thread, |s| s.last_error = format!("accept 失败：{e}"));
                         std::thread::sleep(Duration::from_millis(200));
@@ -1028,13 +1261,15 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
         s.connected = true;
         s.peer_device = hs.peer_device.clone();
         s.peer_addr = addr.to_string();
+        s.peer_key_id = key_id.clone();
         s.last_error.clear();
     });
-    run_pump(stream, session, &app, &stop);
+    run_pump(stream, session, &app, &stop, Role::Server);
     publish(&app, |s| {
         s.connected = false;
         s.peer_device.clear();
         s.peer_addr.clear();
+        s.peer_key_id.clear();
     });
 }
 
@@ -1103,16 +1338,40 @@ fn connect_and_pump(
         }
         persist(&state); // 出锁再落盘（persist 会重新锁 store）
     }
-    let _ = ls;
+    // 对端设备 id：配对时用刚算出、刚存盘的那把 LS 的 keyId；重连时用当初存下的那个 keyId。
+    // 两者必须同源，否则重连一次之后 `hide-remote://<deviceId>/…` 就换了一个键，
+    // 手机上已经打开的标签会指向一台「不存在」的设备。
+    // （每次重连都重新生成临时 X25519，所以 `ls` 本身每趟都在变，只有存下来的 keyId 稳定。）
+    let peer_key_id = match &intent {
+        ClientIntent::Pair { .. } => pair::key_id(&ls),
+        ClientIntent::Reconnect { key_id, .. } => key_id.clone(),
+    };
+    // 这条连接的远程命令通路：挂上 state，前端 `link_request` 才找得到它
+    let conn = Conn::new();
+    {
+        let state = app.state::<LinkState>();
+        *state.conn.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&conn));
+    }
     publish(&app, |s| {
         s.connected = true;
         s.peer_addr = format!("{host}:{port}");
+        s.peer_key_id = peer_key_id;
         s.last_error.clear();
     });
-    run_pump(stream, session, &app, &stop);
+    run_pump(stream, session, &app, &stop, Role::Client);
+    conn.shutdown("连接已结束");
+    {
+        let state = app.state::<LinkState>();
+        let mut g = state.conn.lock().unwrap_or_else(|p| p.into_inner());
+        // 只摘自己这一条：可能上一趟连接的尾巴还没走完，新趟已经挂上来了
+        if g.as_ref().map(|c| Arc::ptr_eq(c, &conn)).unwrap_or(false) {
+            *g = None;
+        }
+    }
     publish(&app, |s| {
         s.connected = false;
         s.peer_addr.clear();
+        s.peer_key_id.clear();
     });
 }
 
@@ -1176,6 +1435,7 @@ pub fn link_server_stop(app: AppHandle) -> LinkStatus {
         s.connected = false;
         s.peer_device.clear();
         s.peer_addr.clear();
+        s.firewall_hint = false;
     });
     state.snapshot()
 }
@@ -1402,6 +1662,45 @@ pub fn link_client_disconnect(app: AppHandle) -> LinkStatus {
     state.snapshot()
 }
 
+/* ------------------------------------------------- 阶段 2：共享根与远程命令 */
+
+/// 桌面设置 / 清除共享范围。前端把文件树当前的根（`heid-tree-root`）原样交进来，
+/// 桌面侧 canonicalize 之后才存 —— **手机上永远只出现相对路径，绝对路径不出桌面**。
+#[tauri::command]
+pub fn link_set_root(app: AppHandle, path: Option<String>) -> Result<LinkStatus, String> {
+    let state = app.state::<LinkState>();
+    let root = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        None => None,
+        Some(p) => Some(roots::canonical_root(Path::new(p))?),
+    };
+    let display = root.as_deref().map(display_path).unwrap_or_default();
+    *state.shared_root.lock().unwrap_or_else(|p| p.into_inner()) = root;
+    publish(&app, |s| s.root_display = display);
+    Ok(snapshot(&app))
+}
+
+/// 手机侧发一条远程文件命令，返回结果的 JSON 文本（形状由 [`fsrv`] 里各命令的定义决定）。
+///
+/// async 命令 + `spawn_blocking`：等应答最长 30 秒，而同步命令跑在主线程上，
+/// 那样会把整个窗口冻成「未响应」（同 `http.rs:86` 的理由）。
+#[tauri::command]
+pub async fn link_request(app: AppHandle, method: String, params: String) -> Result<String, String> {
+    let conn = client_conn(&app).ok_or("手机上还没有连着桌面，请先完成配对")?;
+    tauri::async_runtime::spawn_blocking(move || conn.call(&method, params))
+        .await
+        .map_err(|e| format!("远程命令任务失败：{e}"))?
+}
+
+/// 给人看的根路径：去掉 Windows `canonicalize` 加的 `\\?\` 前缀。
+/// 那只是 Win32 命名空间的标记，出现在设置面板里只会让人以为路径坏了。
+fn display_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or_else(|| s.into_owned()),
+    }
+}
+
 /// 启动时载入/新建本地状态：落盘路径 + 桌面长期身份 + 已配对设备。两端都用（手机也存它自己那一份）。
 /// 由 setup 调用；`dir` = 各平台 app 数据目录。
 pub fn init_store(app: &AppHandle, dir: PathBuf) {
@@ -1424,3 +1723,7 @@ pub fn init_store(app: &AppHandle, dir: PathBuf) {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod roots_tests;
+#[cfg(test)]
+mod fsrv_tests;

@@ -22,6 +22,15 @@ export const NARROW_QUERY = '(max-width: 767.98px)';
  * 例：content://com.android.../document/primary%3ADownload%2Fnotes.md → notes.md
  */
 export function displayNameFromPath(path: string): string {
+  /* 远程文件 `hide-remote://<设备>/<相对路径>`：末段是逐段编码过的，解码一次取名字 */
+  if (path.startsWith('hide-remote://')) {
+    const tail = path.slice('hide-remote://'.length).split('/').pop() ?? '';
+    try {
+      return decodeURIComponent(tail) || path;
+    } catch {
+      return tail || path;
+    }
+  }
   if (path.startsWith('content://')) {
     let seg = path.slice('content://'.length);
     const docIdx = seg.indexOf('/document/');
@@ -48,6 +57,12 @@ export function displayNameFromPath(path: string): string {
  */
 export function dirNameOf(path: string): string {
   if (path.startsWith('content://')) return '';
+  /* 远程路径按 `/` 分段（段内的 `/` 已被编成 %2F），去掉末段就是所在目录；
+     只到设备名那一层时没有目录语义，与 content:// 同一处理 */
+  if (path.startsWith('hide-remote://')) {
+    const rest = path.slice('hide-remote://'.length);
+    return rest.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  }
   const idx = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
   if (idx < 0) return '';
   return path.slice(0, idx);

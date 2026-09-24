@@ -1,3 +1,4 @@
+import { pickLister } from '../lib/remoteTree';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown, ChevronLeft, ChevronRight, FileText, Folder, FolderX, FolderOpen,
@@ -56,7 +57,7 @@ interface FileTreeSidebarProps {
   onFileDeleted: (path: string) => void;
 }
 
-const lister: DirLister | null = getDirLister(
+const platformLister: DirLister | null = getDirLister(
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window,
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window && /Android/i.test(window.navigator.userAgent),
 );
@@ -491,6 +492,10 @@ export function FileTreeSidebar({
     return m;
   }, [tabs]);
 
+  /* 目录提供者按**根目录的形态**选，不按运行平台选：远程根（hide-remote://）在手机上
+     也要走 link 通道，而平台那一份此刻指的是 SAF。根变化即换实现，树本身不用知道对面是谁 */
+  const lister = useMemo(() => pickLister(rootPath ?? null, platformLister), [rootPath]);
+
   const ensureChildren = useCallback(async (node: TreeNode) => {
     if (!lister) return;
     try {
@@ -499,7 +504,7 @@ export function FileTreeSidebar({
     } catch (e: any) {
       setTree(prev => (prev ? withError(prev, node.path, e?.message ?? String(e)) : prev));
     }
-  }, []);
+  }, [lister]);
 
   const treeRef = useRef<TreeNode | null>(null);
   treeRef.current = tree;
@@ -525,7 +530,7 @@ export function FileTreeSidebar({
       });
       return next;
     });
-  }, []);
+  }, [lister]);
 
   /* 抽屉首次打开时恢复根目录列表（启动本身不产生 I/O） */
   useEffect(() => {
@@ -568,7 +573,7 @@ export function FileTreeSidebar({
       if (timer) clearTimeout(timer);
       unwatch?.();
     };
-  }, [open, rootPath, refreshTree]);
+  }, [open, rootPath, refreshTree, lister]);
 
   const handleDirClick = useCallback((node: TreeNode) => {
     setTree(prev => (prev ? toggleDir(prev, node.path) : prev));

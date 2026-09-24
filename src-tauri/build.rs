@@ -50,6 +50,8 @@ fn main() {
             "link_pair_deny",
             "link_pairings_list",
             "link_pairing_revoke",
+            "link_set_root",
+            "link_request",
         ])),
     )
     .expect("failed to run tauri-build");

@@ -22,6 +22,8 @@ interface SettingsDialogProps {
   /** 手机端整页形态：铺满窗口，顶栏返回、底栏操作，不用遮罩关闭；
       平板与桌面仍是居中弹窗（平板屏幕够大，弹窗的信息密度更合适） */
   asPage?: boolean;
+  /** 设备互联里「浏览这台电脑的文件」：转发给 App 去开文件树 */
+  onBrowseRemote?: (rootPath: string) => void;
 }
 
 /**
@@ -169,7 +171,7 @@ function ThemeCard({ theme, selected, isDarkMode, onSelect }: {
   );
 }
 
-export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage }: SettingsDialogProps) {
+export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage, onBrowseRemote }: SettingsDialogProps) {
   const t = useT();
 
   useEffect(() => {
@@ -522,7 +524,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
           ))}
 
           {sectionNode(Usb, t('settings.section.deviceLink'), (
-            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} />
+            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} onBrowseRemote={onBrowseRemote} />
           ))}
         </div>
 

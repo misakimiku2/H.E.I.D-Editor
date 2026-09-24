@@ -186,6 +186,8 @@ pub fn run() {
             link::link_pair_approve,
             link::link_pair_deny,
             link::link_pairings_list,
+            link::link_set_root,
+            link::link_request,
             link::link_pairing_revoke,
             external::open_external,
             render::render_page,

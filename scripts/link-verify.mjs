@@ -10,6 +10,8 @@
  *   A 应用当服务端：Node 当手机走「配对 + 允许 TOFU + 验桌面指纹 + LS 对称 + 免扫重连 + 票用后即废」
  *   B 应用当客户端：Node 当桌面（带身份、发 Auth）；含「期望指纹不符 → 应用中止」
  *   C 配对票不匹配、D 入参校验、E 未登记 keyId 的重连被拒
+ *   F 阶段 2：已加密连接上跑 list / stat / read / write，结果逐条与磁盘核对，
+ *     含保存冲突回传桌面最新内容、四类逃逸被拒、超限文件拒开、没设根时拒答
  *
  * 用法：先 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223 npm run tauri:dev`，
  * 再 `node scripts/link-verify.mjs`。跑之前先 link_server_stop（上一轮点开的共享不会随 dev 重启释放）。
@@ -18,6 +20,8 @@ import http from 'node:http';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/, '');
@@ -76,8 +80,14 @@ async function cdpSession() {
     if (!parsed.ok) throw new Error(`${cmd} 失败：${parsed.e}`);
     return parsed.v;
   };
+  /** 直接在页面里求值（要动 localStorage 时用，不经过命令通道） */
+  const evalJs = async (expr) => {
+    const r = await send('Runtime.evaluate', { expression: `(async()=>{${expr}})()`, awaitPromise: true, returnByValue: true });
+    if (r.exceptionDetails) throw new Error('页面求值失败：' + (r.exceptionDetails.exception?.description || ''));
+    return r.result?.result?.value;
+  };
   const close = () => ws.close();
-  return { invoke, close };
+  return { invoke, evalJs, close };
 }
 
 async function waitStatus(invoke, pred, timeoutMs = 8000) {
@@ -223,7 +233,8 @@ async function phoneHandshake(port, { mode, saltStr, ticket, keyId = '', slot = 
   writeFrame(conn, seal(c2s, 0, Buffer.from(JSON.stringify({ seq: 0, msg: { t: 'pong' } }))));
   const ls = deriveLS(shared);
   const fpMatch = !expectFp || fp === expectFp;
-  return { conn, ls, fp, sigOk, fpMatch, cipherHead: first.head, mode, ticket };
+  // keys 带出去才好在握手之后继续发应用帧：两个方向的 seq 0 已被 pong / Auth 用掉
+  return { conn, ls, fp, sigOk, fpMatch, cipherHead: first.head, mode, ticket, keys: { c2s, s2c } };
 }
 
 /* ---------------------------------------------------- A：应用当服务端（手机视角） */
@@ -397,15 +408,284 @@ async function badInputs(invoke) {
   }
 }
 
+/* ------------------------------------------------- 阶段 2：命令面走真实连接 */
+
+/** 配一次对并允许 TOFU，返回握手后的连接。与 A 段同一套流程，只是不带 A 那些断言。 */
+async function pairedPhone(invoke, port) {
+  const qr = await invoke('link_pair_qr');
+  const p = parsePairUri(qr.uri);
+  const pair = await phoneHandshake(port, { mode: 'pair', saltStr: p.ticket, ticket: p.ticket, expectFp: p.fp });
+  for (let i = 0; i < 40; i++) {
+    try { await invoke('link_pair_approve'); } catch { /* pending 还没挂上 */ }
+    const st = await waitStatus(invoke, (x) => x.connected, 1000);
+    if (st.connected) return pair;
+    await sleep(150);
+  }
+  throw new Error('TOFU 允许之后仍未进入已连接');
+}
+
+async function stage2Files(invoke) {
+  log('\n=== F. 阶段 2：真实加密链路上的 list / stat / read / write ===');
+  /* 用 47124 而不是 A/D 的 47123：Windows 上上一台设备的连接留在 TIME_WAIT 时，
+     按 SO_EXCLUSIVEADDRUSE 绑定的监听套接字会被拒绑（本机实测 45 秒未散，
+     已由 link.rs::bind_listener 换成可操作文案）。本段的成败不该取决于上一段跑没跑过。 */
+  const PORT = 47124;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'heid-stage2-'));
+  const root = path.join(base, 'shared');
+  fs.mkdirSync(root);
+  fs.mkdirSync(path.join(root, 'sub'));
+  const ORIGINAL = '# 桌面原有内容\r\n第二行\r\n';
+  fs.writeFileSync(path.join(root, 'notes.md'), ORIGINAL);
+  fs.writeFileSync(path.join(root, 'sub/b.txt'), 'gb\n');
+  fs.writeFileSync(path.join(base, 'outside.md'), '根外的文件');
+  const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+
+  await invoke('link_server_start', { port: PORT });
+  const st = await invoke('link_set_root', { path: root });
+  const norm = (x) => String(x ?? '').replace(/[\\/]+$/, '').toLowerCase();
+  ok('共享范围明示给前端（设置面板要显示它）', norm(st.rootDisplay) === norm(root), `rootDisplay=${st.rootDisplay}`);
+  const pair = await pairedPhone(invoke, PORT);
+  const connStatus = await invoke('link_status');
+  ok('已连接状态带出对端 deviceId（hide-remote 的键）', /^[0-9a-f]{16}$/.test(connStatus.peerKeyId || ''), connStatus.peerKeyId);
+
+  /* 应用帧序号从 1 起：握手已用掉两个方向的 0（手机回 pong、桌面发 Auth） */
+  let tx = 1, rx = 1, idc = 0;
+  const send = (msg) => {
+    writeFrame(pair.conn, seal(pair.keys.c2s, tx, Buffer.from(JSON.stringify({ seq: tx, msg }))));
+    tx += 1;
+  };
+  const ask = async (method, params) => {
+    const id = ++idc;
+    send({ t: 'req', id, method, params: JSON.stringify(params) });
+    for (;;) {
+      const f = await readFrame(pair.conn, 8000);
+      const env = JSON.parse(open(pair.keys.s2c, rx, f.payload).toString());
+      rx += 1;
+      if (env.msg.t === 'ping') { send({ t: 'pong' }); continue; }
+      if (env.msg.t === 'res' && env.msg.id === id) {
+        return { ...env.msg, data: env.msg.data ? JSON.parse(env.msg.data) : null };
+      }
+      throw new Error(`等 res(${id}) 时收到 ${JSON.stringify(env.msg)}`);
+    }
+  };
+
+  const listed = await ask('list', { relDir: '' });
+  const names = (listed.data?.entries ?? []).map((e) => e.name);
+  ok('list 根目录：目录在前、含 notes.md',
+    listed.ok === true && names[0] === 'sub' && names.includes('notes.md'), JSON.stringify(names));
+  ok('list 目录条目不带假尺寸',
+    (listed.data?.entries ?? []).every((e) => (e.isDir ? e.size === 0 : e.size > 0)));
+
+  const read1 = await ask('read', { relPath: 'notes.md' });
+  ok('read 换行符原样带回（归一是前端 openedFromDecoded 的事）', read1.data?.text === ORIGINAL, JSON.stringify(read1.data?.text));
+  const onDisk = fs.readFileSync(path.join(root, 'notes.md'));
+  ok('read 的基线哈希 = 磁盘字节的 SHA-256', read1.data?.hash === sha(onDisk));
+  ok('read 的编码与二进制判定与桌面同源', read1.data?.encoding === 'utf-8' && read1.data?.binary === false);
+  const sub = await ask('read', { relPath: 'sub/b.txt' });
+  ok('子目录里的文件按相对路径可达', sub.ok === true && sub.data?.text === 'gb\n');
+
+  const WROTE = '# 从手机改的\r\n新行\r\n';
+  const w1 = await ask('write', { relPath: 'notes.md', text: WROTE, encoding: 'utf-8', bom: false, baseHash: read1.data.hash });
+  ok('write 基线一致 → 落盘且不判冲突', w1.ok === true && w1.data?.conflict === false);
+  ok('桌面上真的看见了新内容（逐字节核对）', fs.readFileSync(path.join(root, 'notes.md'), 'utf8') === WROTE);
+  ok('write 回传的新基线 = 新字节的哈希', w1.data?.hash === sha(Buffer.from(WROTE, 'utf8')));
+
+  /* 冲突：手机拿旧基线写，桌面必须一个字都不写，并把最新那份带回给 diff 时间线 */
+  const DESKTOP_NEW = '# 桌面上又改了一次';
+  fs.writeFileSync(path.join(root, 'notes.md'), DESKTOP_NEW);
+  const w2 = await ask('write', { relPath: 'notes.md', text: '# 手机上改的', encoding: 'utf-8', bom: false, baseHash: w1.data.hash });
+  ok('基线不符 → 判冲突而不是覆盖', w2.ok === true && w2.data?.conflict === true);
+  ok('冲突带回桌面最新内容', w2.data?.serverText === DESKTOP_NEW, JSON.stringify(w2.data?.serverText));
+  ok('判冲突时桌面内容一字未动', fs.readFileSync(path.join(root, 'notes.md'), 'utf8') === DESKTOP_NEW);
+  const w3 = await ask('write', { relPath: 'notes.md', text: 'x', encoding: 'utf-8', bom: false, baseHash: w2.data.serverHash });
+  ok('换成带回的新基线后同一次保存就能落盘', w3.ok === true && w3.data?.conflict === false);
+  const w4 = await ask('write', { relPath: 'notes.md', text: 'x', encoding: 'utf-8', bom: false, baseHash: '' });
+  ok('没有基线的写入被拒（而不是静默覆盖）', w4.ok === false && w4.code === 'badparams', w4.error);
+
+  /* 逃逸：这一层写错就等于把整个磁盘交给局域网 */
+  const esc = [
+    ['read 上跳一层', 'read', { relPath: '../outside.md' }, 'badpath'],
+    ['read 借子目录上跳', 'read', { relPath: 'sub/../../base/outside.md' }, 'badpath'],
+    ['read 绝对路径', 'read', { relPath: 'C:/Windows/win.ini' }, 'absolute'],
+    ['read UNC', 'read', { relPath: '\\\\server\\share\\x' }, 'absolute'],
+    ['write 出根', 'write', { relPath: '../outside.md', text: 'x', encoding: 'utf-8', baseHash: 'aa' }, 'badpath'],
+    ['list 出根', 'list', { relDir: '..' }, 'badpath'],
+  ];
+  for (const [name, method, params, want] of esc) {
+    const r = await ask(method, params);
+    ok(`${name} 被拒（${want}）`, r.ok === false && r.code === want, `${r.code} ${r.error ?? ''}`);
+  }
+  ok('根外文件逐字未变', fs.readFileSync(path.join(base, 'outside.md'), 'utf8') === '根外的文件');
+
+  /* 上限、缺失与越界之外 */
+  const big = path.join(root, 'huge.bin');
+  fs.writeFileSync(big, Buffer.alloc(0));
+  fs.truncateSync(big, 7 * 1024 * 1024);
+  const bigStat = await ask('stat', { relPath: 'huge.bin' });
+  ok('stat 报得出超限文件的尺寸', bigStat.ok === true && bigStat.data?.size === 7 * 1024 * 1024, `size=${bigStat.data?.size}`);
+  ok('超限文件不为其读全文件算哈希', bigStat.data?.hash === '');
+  const bigRead = await ask('read', { relPath: 'huge.bin' });
+  ok('超限文件拒绝远程打开', bigRead.ok === false && bigRead.code === 'toobig', bigRead.error);
+  const miss = await ask('read', { relPath: 'nope.md' });
+  ok('不存在的路径报 notfound', miss.ok === false && miss.code === 'notfound');
+  const unknown = await ask('delete', {});
+  ok('命令面之外的方法被拒', unknown.ok === false && unknown.code === 'unknown');
+
+  await invoke('link_set_root', { path: null });
+  const noroot = await ask('list', { relDir: '' });
+  ok('清除共享范围后一律拒答（noroot）', noroot.ok === false && noroot.code === 'noroot');
+
+  await invoke('link_server_stop');
+  pair.conn.destroy();
+  fs.rmSync(base, { recursive: true, force: true });
+}
+
+/** 按连接持续成帧的读取器。
+    `readFrame` 每次挂一个新 listener、只取一帧，一次 data 事件里夹着的**第二帧会被丢掉**——
+    前端并发两笔远程命令会合并进同一个 TCP 段，所以服务端这一侧必须自己缓冲。 */
+function frameReader(sock) {
+  let buf = Buffer.alloc(0);
+  const frames = [];
+  const waiters = [];
+  sock.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    for (;;) {
+      if (buf.length < 4) break;
+      const len = buf.readUInt32BE(0);
+      if (buf.length < 4 + len) break;
+      frames.push(buf.subarray(4, 4 + len));
+      buf = buf.subarray(4 + len);
+    }
+    while (waiters.length && frames.length) waiters.shift()({ payload: frames.shift() });
+  });
+  return (timeoutMs = 5000) =>
+    new Promise((res, rej) => {
+      if (frames.length) return res({ payload: frames.shift() });
+      const t = setTimeout(() => rej(new Error('读取帧超时')), timeoutMs);
+      waiters.push((f) => { clearTimeout(t); res(f); });
+    });
+}
+
+/* ------------------------------- 阶段 2 手机侧：应用当客户端发远程命令 */
+
+/** Node 当「会答远程命令的桌面」：握手后收 req、按 fsrv 的形状回 res，并记下收到的一切。 */
+function nodeFileServer(port, { saltStr, identity }) {
+  const seen = { methods: [], ids: [] };
+  let live = null; // 已建立的连接：测试要能真的掐掉它，server.close() 只挡新连接
+  const server = net.createServer(async (sock) => {
+    live = sock;
+    try {
+      const next = frameReader(sock);
+      const { payload } = await next();
+      const hello = JSON.parse(payload.toString());
+      const mine = newKeyPair();
+      writeFrame(sock, Buffer.from(JSON.stringify({ t: 'welcome', ver: 1, pub: mine.rawPub.toString('base64') })));
+      const shared = sharedSecret(mine, hello.pub);
+      const { c2s, s2c } = keysFrom(shared, saltStr);
+      const idPub = identity.rawPub;
+      const sig = identity.sign(authMessage(SRV4, Buffer.from(hello.pub, 'base64'), mine.rawPub, idPub));
+      writeFrame(sock, seal(s2c, 0, Buffer.from(JSON.stringify({ seq: 0, msg: { t: 'auth', id: idPub.toString('base64'), sig: sig.toString('base64') } }))));
+      let cseq = 0; // 应用第一帧密文是 pong（seq 0），之后每个 req 递增
+      let sseq = 1; // 本端密文序号：0 已被 auth 用掉
+      for (;;) {
+        const { payload: raw } = await next(30_000);
+        const env = JSON.parse(open(c2s, cseq, raw).toString());
+        cseq = env.seq + 1;
+        const m = env.msg;
+        if (m.t !== 'req') continue;
+        seen.methods.push(m.method);
+        seen.ids.push(m.id);
+        const p = JSON.parse(m.params || '{}');
+        let out;
+        if (m.method === 'list') {
+          out = { ok: true, data: JSON.stringify({ entries: [{ name: 'notes.md', isDir: false, size: 4, mtimeMs: 111 }], truncated: false }) };
+        } else if (m.method === 'read' && p.relPath === 'notes.md') {
+          out = { ok: true, data: JSON.stringify({ text: '# hi', encoding: 'utf-8', bom: false, lossy: false, binary: false, hash: 'hash-of-notes', size: 4, mtimeMs: 111 }) };
+        } else if (m.method === 'read') {
+          out = { ok: false, code: 'badpath', error: '路径不合法：不允许上级目录' };
+        } else if (m.method === 'write') {
+          // 故意回成"桌面也改过"，看前端能不能把它接到 diff 时间线而不是报保存失败
+          out = { ok: true, data: JSON.stringify({ conflict: true, hash: 'h2', size: 9, mtimeMs: 222, serverHash: 'srv-h', serverText: '桌面上改的', serverEncoding: 'utf-8', serverBom: false, serverBinary: false }) };
+        } else {
+          out = { ok: false, code: 'unknown', error: '桌面不支持的命令' };
+        }
+        writeFrame(sock, seal(s2c, sseq, Buffer.from(JSON.stringify({
+          seq: sseq,
+          msg: { t: 'res', id: m.id, ok: out.ok, code: out.code ?? '', error: out.error ?? '', data: out.data ?? '' },
+        }))));
+        sseq += 1;
+      }
+    } catch { /* 对端断开即收摊 */ }
+  });
+  return new Promise((res) => server.listen(port, '127.0.0.1', () => res({
+    server, seen, drop: () => live && live.destroy(),
+  })));
+}
+
+async function appAsClientFiles(invoke) {
+  log('\n=== G. 阶段 2 手机侧：应用作为客户端发 list / read / write ===');
+  const PORT = 47903;
+  const TICKET = '0123456789abcdef0123456789abcdef';
+  const { server, seen, drop } = await nodeFileServer(PORT, { saltStr: TICKET, identity: newEd25519() });
+  /* 桌面恒为服务端是产品设定：开关记着「开」时，页面每次挂载都会 autoStartFromPrefs 起监听，
+     那会把这一段的客户端角色抢回去（表现为「连不上也不报错」，因为 publish 顺手清了 lastError）。
+     本段是故意把桌面当手机用的，所以先把持久化的开关关掉，再停掉可能在听的监听。 */
+  await evalJs(`const k='heid-link-prefs';const p=JSON.parse(localStorage.getItem(k)||'{}');p.enabled=false;localStorage.setItem(k,JSON.stringify(p));return true;`);
+  await invoke('link_server_stop');
+  await invoke('link_client_connect', { host: '127.0.0.1', port: PORT, ticket: TICKET, device: 'SM-X808U' });
+  const up = await waitStatus(invoke, (x) => x.connected || x.lastError, 8000);
+  ok('客户端连上并进入已连接', up.connected === true, up.lastError || up.peerAddr);
+  ok('已连接状态带出对端 deviceId（远程路径的键）', /^[0-9a-f]{16}$/.test(up.peerKeyId || ''), up.peerKeyId);
+
+  const listed = JSON.parse(await invoke('link_request', { method: 'list', params: JSON.stringify({ relDir: '' }) }));
+  ok('远程 list 走通队列→发送→应答→唤醒等待者',
+    listed.entries?.[0]?.name === 'notes.md' && listed.truncated === false, JSON.stringify(listed));
+  const read1 = JSON.parse(await invoke('link_request', { method: 'read', params: JSON.stringify({ relPath: 'notes.md' }) }));
+  ok('远程 read 带回解码结果与基线哈希', read1.text === '# hi' && read1.hash === 'hash-of-notes');
+
+  /* 两笔并发：错配 id 的话，其中一笔会拿到另一笔的载荷 */
+  const both = await Promise.all([
+    invoke('link_request', { method: 'read', params: JSON.stringify({ relPath: 'notes.md' }) }),
+    invoke('link_request', { method: 'write', params: JSON.stringify({ relPath: 'notes.md', baseHash: 'stale' }) }),
+  ]);
+  ok('并发两笔各回各的（按 id 配对，不是按到达顺序）',
+    JSON.parse(both[0]).text === '# hi' && JSON.parse(both[1]).conflict === true, JSON.stringify(both).slice(0, 90));
+  const conflict = JSON.parse(both[1]);
+  ok('冲突是一笔成功应答并带回桌面内容', conflict.serverText === '桌面上改的' && conflict.serverHash === 'srv-h');
+
+  let rejected = '';
+  try { await invoke('link_request', { method: 'read', params: JSON.stringify({ relPath: '../x' }) }); }
+  catch (e) { rejected = String(e?.message ?? e); }
+  /* invoke 的包装会自己加「link_request 失败：」前缀，所以看的是码在不在最前面那段 */
+  ok('失败以「码: 原因」的形状抛给前端（remote.ts 按码分流）', /badpath: 路径不合法/.test(rejected), rejected);
+
+  /* 断链后不得让前端等满 30 秒超时 */
+  const t0 = Date.now();
+  server.close();
+  drop();
+  await new Promise((res) => {
+    const iv = setInterval(() => invoke('link_status').then((s) => { if (!s.connected) { clearInterval(iv); res(); } }), 100);
+    setTimeout(() => { clearInterval(iv); res(); }, 6000);
+  });
+  let after = '';
+  try { await invoke('link_request', { method: 'list', params: '{}' }); } catch (e) { after = String(e?.message ?? e); }
+  const waited = Date.now() - t0;
+  ok('断开后的请求立刻报错而不是等超时', /(没.{0,3}连着|断开|未连接)/.test(after) && waited < 12_000, `${waited}ms · ${after}`);
+  await invoke('link_client_disconnect');
+}
+
 /* ---------------------------------------------------------------- main */
 
 // 兜底看门狗：无论如何 100 秒内退出，免得某个 await 卡住把 dev 拖住
-setTimeout(() => { log('\nWATCHDOG: 超时，强制退出'); process.exit(2); }, 100_000).unref();
+setTimeout(() => { log('\nWATCHDOG: 超时，强制退出'); process.exit(2); }, 180_000).unref();
 
 log('main: 连接 CDP…');
-const { invoke, close } = await cdpSession();
+const { invoke, evalJs, close } = await cdpSession();
 log('main: CDP 就绪，开始用例');
+/* LINK_VERIFY_ONLY=G 只跑某一段：调试时不必等 A–F 的四十秒，也避开前一段留下的状态 */
+const ONLY = (process.env.LINK_VERIFY_ONLY || '').split(',').map((x) => x.trim()).filter(Boolean);
 async function safe(name, fn) {
+  if (ONLY.length && !ONLY.some((k) => name.includes(k))) return;
   try { await fn(); } catch (e) { ok(`${name} 未抛异常`, false, String(e?.message ?? e)); }
 }
 try {
@@ -413,6 +693,8 @@ try {
   try { await invoke('link_client_disconnect'); } catch { /* */ }
   await safe('入参校验', () => badInputs(invoke));
   await safe('A 应用当服务端', () => appAsServer(invoke));
+  await safe('F 阶段 2 命令面', () => stage2Files(invoke));
+  await safe('G 阶段 2 手机侧通路', () => appAsClientFiles(invoke));
   await safe('B 应用当客户端', () => appAsClient(invoke));
   await safe('C 指纹不符', () => wrongFp(invoke));
   await safe('D 未登记 keyId', () => unknownKeyId(invoke));

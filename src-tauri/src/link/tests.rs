@@ -467,3 +467,124 @@ fn 状态序列化成驼峰且角色是小写串() {
     assert_eq!(v["peerDevice"], "");
     assert_eq!(v["lastError"], "");
 }
+
+/* -------------------------------------------- 阶段 2：命令面走真实 TCP */
+
+/// `list` / `read` / `write` / 逃逸拒绝，全部经过一遍**真实 TCP + 真实 AEAD 会话**：
+/// 命令面单测（`fsrv_tests`）不带网络，帧层单测不带命令，两边各自绿不代表接得上。
+#[test]
+fn 远程命令走完整加密链路往返() {
+    use super::roots_tests::Temp;
+    let t = Temp::new("tcp-fsrv");
+    let root = t.root();
+    let ticket_v = ticket();
+    let (_, pkcs8, fp) = test_identity();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let pk = pkcs8.clone();
+    let tv = ticket_v.clone();
+    let srv_root = root.clone();
+
+    // 服务端：握手 → 收请求 → 交给命令面 → 原样带 id 回响应，直到对端说再见
+    let srv = std::thread::spawn(move || -> Vec<String> {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(800))).ok();
+        let id = identity::Identity::from_pkcs8(&pk).unwrap();
+        let mut f = Framer::default();
+        let hs = server_handshake(&mut s, &mut f, &|_, _, _| Ok(tv.clone()), &id).unwrap();
+        let mut sess = hs.session;
+        let _ = recv_msg_deadline(&mut s, &mut sess, &mut f, Instant::now() + Duration::from_secs(2));
+        let mut seen = Vec::new();
+        loop {
+            let msg = match recv_msg_deadline(&mut s, &mut sess, &mut f, Instant::now() + Duration::from_secs(3))
+            {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            match msg {
+                Msg::Bye {} => break,
+                Msg::Req { id, method, params } => {
+                    seen.push(format!("{method}:{id}"));
+                    let msg = match fsrv::handle(Some(&srv_root), &method, &params) {
+                        Ok(data) => Msg::Res { id, ok: true, code: String::new(), error: String::new(), data },
+                        Err((code, error)) => Msg::Res { id, ok: false, code, error, data: String::new() },
+                    };
+                    sess.send(&mut s, &msg).unwrap();
+                }
+                other => {
+                    seen.push(format!("unexpected:{other:?}"));
+                    break;
+                }
+            }
+        }
+        seen
+    });
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_millis(800))).ok();
+    let mut cf = Framer::default();
+    let (mut csess, _ls, _) = client_handshake(
+        &mut c, &mut cf, &ticket_v, Mode::Pair, "", "ticket", "heid-android", "SM-X808U", &fp,
+    )
+    .unwrap();
+
+    let mut next = 0u64;
+    let mut ask = |method: &str, params: &str| -> Result<serde_json::Value, String> {
+        next += 1;
+        let id = next;
+        csess.send(&mut c, &Msg::Req { id, method: method.into(), params: params.into() }).unwrap();
+        loop {
+            match csess.recv(&mut c, &mut cf).unwrap() {
+                Some(Msg::Res { id: rid, ok, code, error, data }) => {
+                    assert_eq!(rid, id, "响应必须回到发起它的那条请求上（帧序不能错配）");
+                    return if ok {
+                        Ok(serde_json::from_str(&data).expect("响应载荷应是 JSON"))
+                    } else {
+                        Err(format!("{code}:{error}"))
+                    };
+                }
+                Some(other) => panic!("客户端在等应答却收到 {other:?}"),
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    };
+
+    let listed = ask("list", r#"{"relDir":""}"#).expect("列根目录应成功");
+    let names: Vec<&str> = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"readme.md"), "实际：{names:?}");
+
+    let read = ask("read", r#"{"relPath":"readme.md"}"#).expect("读文件应成功");
+    assert_eq!(read["text"], "# hi");
+    let base = read["hash"].as_str().unwrap().to_string();
+
+    let written_params = serde_json::json!({
+        "relPath": "readme.md", "text": "# 手机上改的", "encoding": "utf-8", "bom": false, "baseHash": base
+    })
+    .to_string();
+    let written = ask("write", &written_params).expect("带正确基线的写入应成功");
+    assert_eq!(written["conflict"], false);
+    assert_eq!(std::fs::read(root.join("readme.md")).unwrap(), "# 手机上改的".as_bytes());
+
+    // 基线错了：必须判成冲突且一个字都不落盘
+    let again = ask(
+        "write",
+        r#"{"relPath":"readme.md","text":"不该被写入","encoding":"utf-8","bom":false,"baseHash":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
+    )
+    .expect("冲突本身是一次成功应答");
+    assert_eq!(again["conflict"], true);
+    assert_eq!(again["serverText"], "# 手机上改的");
+    assert_eq!(std::fs::read(root.join("readme.md")).unwrap(), "# 手机上改的".as_bytes());
+
+    // 逃逸：链路上加密得好好的，命令面照样要拒
+    let escaped = ask("read", r#"{"relPath":"../outside/secret.txt"}"#).unwrap_err();
+    assert!(escaped.starts_with("badpath:"), "逃逸必须以 badpath 拒掉，实际：{escaped}");
+
+    csess.send(&mut c, &Msg::Bye {}).unwrap();
+    let seen = srv.join().unwrap();
+    assert_eq!(seen, vec!["list:1", "read:2", "write:3", "write:4", "read:5"], "服务端要按序收到这五笔");
+}

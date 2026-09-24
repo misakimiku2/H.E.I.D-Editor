@@ -70,6 +70,17 @@ async function invoke<T>(cmd: string, args: Record<string, unknown>): Promise<T>
 
 /** 查文件字节数（打开前的分层路由判定；非 Tauri 桌面环境返回 null） */
 export async function fileSize(path: string): Promise<number | null> {
+  if (path.startsWith('hide-remote://')) {
+    /* 远程同样要过尺寸闸门，否则会在一个几百 MB 的文件上把链路占死到超时。
+       拿不到就报"未知"而不是猜一个：真实原因会在随后的 read 里以稳定码浮出来 */
+    try {
+      const { parseRemotePath, remoteStat } = await import('./remote');
+      const ref = parseRemotePath(path);
+      return ref ? (await remoteStat(ref.rel)).size : null;
+    } catch {
+      return null;
+    }
+  }
   if (!isTauri) return null;
   try {
     return await invoke<number>('file_size', { path });

@@ -621,7 +621,7 @@ rustls 用的就是 ring 后端），而 `ring::aead::CHACHA20_POLY1305` / `ring
 并修掉预览被设置弹窗 `backdrop-blur` 关成一格（平板上非全屏）的真 bug。**已两台复测通过**
 （2026-09-24：黑闪与卡顿随「换镜头」动作一并消失，Mate 靠 8K 交付尺寸选中主摄）；
 捏合判定「够用、谈不上很流畅、扫码够了」，不再花一轮 → `docs/bugs/2026-09-23-scanner-camera-switch-ux.md` | `cargo test --lib link::`（38 例，含两端 TCP 真实往返）+ `node scripts/link-verify.mjs`（阶段 1 全绿：Node 独立实现验出桌面 Ed25519 身份签名 + 二维码指纹、LS 对称、免扫重连、票作废）+ 两台真机扫一扫实测（Tab S8 原生 BarcodeDetector、Mate 走 jsQR 兜底，均能扫上配对）+ `npx vitest run src/lib/scanCam.test.ts src/components/QrScanner.camera.test.tsx`（36 例：变焦数学、一次开流、选主摄、占用/权限分流、探测期不给看画面、捏合接线） |
-| 2 树同步 + 读写 | 手机浏览/打开/编辑/保存桌面文件 | **逃逸防护测试先于功能**：`..` / 盘符切换 / UNC / symlink 四组用例先写成 `#[cfg(test)]` |
+| 2 树同步 + 读写 ✅🔧 | **已完成（2026-09-24）**：`roots::resolve_rel` 四组逃逸用例先写失败再实现、`list`/`stat`/`read`/`write` 走已实测的 AEAD 会话、`hide-remote://` 前端全链路、设置面板「共享范围明示 + 防火墙提示」。**真机那一项没做**：本机两个 AVD 都没有网络路由（下详） | `cargo test --lib link::`（**64 例**：roots 10 + fsrv 16 + 帧/握手既有 38，含 `远程命令走完整加密链路往返` 那条双端真实 TCP）+ `npx vitest run`（**1018 例**，含 `remote.test.ts` 48、`remoteTree.test.ts` 8、`FileTreeSidebar.remote.test.tsx` 5）+ `node scripts/link-verify.mjs`（**58 项 PASS / 0 FAIL**，其中 F 段 29 项是**跑着的应用**当服务端、逐条与磁盘核对；G 段 8 项是应用当客户端发远程命令）|
 | 3 标签同步 | 手机看到桌面聚焦窗口的标签并接着改 | 多开两个窗口验「聚焦窗口那份」的判定 |
 | 4 实时更新 | 桌面改文件，手机秒级跟上 | 拿本仓（含 `node_modules`）当共享根，先量事件量与去抖，再谈功能 |
 | 5 离线队列 | 拔网线编辑不丢，恢复后回写或明确请确认 | **真关 WiFi**，不用代码模拟；进程被杀用「设置里强行停止」再开 |
@@ -631,7 +631,7 @@ rustls 用的就是 ring 后端），而 `ring::aead::CHACHA20_POLY1305` / `ring
 原地升级、保留 SAF 授权；换 debug 包要卸载，会清掉授权 —— 阶段 0 起就固定用 release 包测，
 顺带把 §11.2 那条一直验到发版。装机统一走 `scripts/android-install.sh`（`install-only` 跳过构建）。
 
-### 下一会话开工单：阶段 2（树同步 + 读写）
+### 阶段 2 收口记录（2026-09-24）与三条按实测改掉的口径
 
 **先做三条低成本收尾**（都属于阶段 1，别带着它们开工下一阶段）：
 
@@ -643,34 +643,60 @@ rustls 用的就是 ring 后端），而 `ring::aead::CHACHA20_POLY1305` / `ring
    「够用、谈不上很流畅、扫码够了」，不再花一轮。三条收尾全部结清，直接进阶段 2。
 3. ~~Tab S8 补机型档案种子~~ —— Tab S8 只有两颗后置、探测本来就便宜，复测无问题，不必补。
 
-**然后进阶段 2，顺序是硬的**：
+**交付**：`src-tauri/src/link/roots.rs`（`resolve_rel` + `is_within`）、`link/fsrv.rs`（四条命令，
+不碰网络也不碰会话）、`link.rs` 的 `Msg::Req/Res` + `run_pump` 按角色分派 + `Conn`
+（发出队列 / 待应答表 / Condvar 唤醒）、命令 `link_set_root` / `link_request`；前端 `lib/remote.ts`
+（身份键编解码 + 稳定码分流）、`lib/remoteTree.ts`（`DirLister` 第三实现 + **按根选路** `pickLister`）、
+以及 `platform.ts` / `fileIO.ts` / `largeFile.ts` / `useFileActions.ts` / `FileTreeSidebar.tsx` / `App.tsx` 的分支。
 
-1. **逃逸防护测试先于实现**（设计稿 §4.3，本方案唯一「写错就把整个磁盘暴露给局域网」的地方）：
-   新建 `src-tauri/src/link/roots.rs` 的 `resolve_rel()`，先把四组 `#[cfg(test)]` 写成失败再实现——
-   `..` 穿越 / Windows 盘符切换（`C:`→`D:`）/ UNC（`\\server\share`）/ symlink 指向根外。
-   Windows 语义要单独当心：大小写不敏感比较、`C:` 与 `C:\` 的驱动器相对路径、`\\?\` 前缀、
-   以及**必须 `canonicalize` 之后再前缀校验**（reparse point 只有解析后才露出真目标）。
-2. 命令面 `list` / `stat` / `read` / `write`，走已实测的 AEAD 会话，零新增依赖；
-   `write` 带 `hash` + `mtimeMs` 基线，不一致返回 `conflict` + 服务端最新内容（§5.4，不做自动三方合并）。
-3. 前端 `hide-remote://<deviceId>/<relPath>` 分支：`platform.ts`（displayName/dirName）、
-   `fileIO.ts`（read/write/save，远程保存不走 SAF 新建文档）、`largeFile.ts`（fileSize/classify）、
-   `fileTree.ts` 的 `remoteDirLister`、`FileTreeSidebar` 的「远程设备」根（**v1 保持单根**）。
-   冲突复用既有 diff 时间线（`diffTimeline.ts`）。
-4. 设置面板两条明示：**当前共享范围**（「手机端可访问 `D:\projects\notes`」）+
-   bind 成功但 N 秒内无任何连接时提示「可能被 Windows 防火墙拦截」并给放行步骤
-   —— 半死状态比直接报错难查，这条是 §7.2 第 2 条留下的实现要求，本机环境验不出用户侧结论，
-   只验通路本身（这台机器有历史 node 放行规则，别拿它当防火墙证据）。
-5. 能力边界如实标注，不做：>32MB 远程打开、跨文件搜索含远程、手机端系统级操作（置灰）。
+三条与设计稿字面不一致的地方，都是实现时按「一件事只留一个口径」改的，设计稿不再回头改：
 
-**验收**：`cargo test --lib link::` 含四组逃逸用例 + 双端 `list/stat/read/write` 真实 TCP 往返；
-前端 vitest 覆盖 `hide-remote://` 的 displayName/dirName/size 分支；真机在共享根里打开一个 md、
-编辑、保存回桌面，并**人为制造一次冲突**看 diff 能不能逐条采纳。
+1. **换行符不进协议**（§4.2 的 `read` 载荷原本有 `eol`）。桌面侧 eol 的权威判据本就是前端的
+   `detectLineEnding` + 落盘前 `applyLineEnding`，远程读取又走同一个 `openedFromDecoded`——
+   服务端再算一份只会多出第二个口径，两份还可能不一致。所以 `read` 原样带回 CRLF，归一交给前端；
+   `write` 收到的 `text` 已是调用方按 eol 还原过的最终字节。
+2. **基线只用内容哈希，不带 `baseMtimeMs`**（§4.2/§5.4 写的是「hash + mtimeMs」）。
+   mtime 判等在桌面刚保存过的那一秒内分不出新旧，拿它判等会**静默覆盖桌面的改动**；内容哈希不会。
+   `mtimeMs` 仍在 `stat`/`read` 里带回，只用于展示。基线为空串的写入直接以 `badparams` 拒——
+   没有基线就落盘等于毁数据。
+3. **远程上限 6MB 而不是 32MB**。32MB 是桌面「只读分块预览」那条线，而 §5.3 明确不做远程分块预览，
+   加上单帧 8MB 上限，超 6MB 的文件即使传过来也只能进一个既不能编辑又不能分窗读的死角
+   （6MB = 编辑器 200 万字符可编辑线在 CJK 下的最坏字节数）。`stat` 照实报尺寸，`read` 以 `toobig` 拒。
 
-**若阶段 2 卡住**：v1.5.0 还欠 51（语言高亮覆盖）与 52②（弹窗层 48dp 提档），都是独立小项，可以先做。
+**本轮查出的两条实现级事实**（都会反复用到）：
 
-**设备实测的固定动作**（每轮都照做，否则又会烧掉十几轮假阴性）：截图给模型会被缩放，
-必须先裁 ≤1100px 宽、亲眼读坐标、再换算 crop 偏移；夜里两台都会 doze，先确认 `mWakefulness`；
-探测/切镜头期间不要显示定格画面（会被读成卡死）。
+- **加一条 `#[tauri::command]` 要同时改四处**：`link.rs` 实现、`lib.rs` 的 `generate_handler!`、
+  `build.rs` 的命令清单、`capabilities/default.json` 的 `allow-<命令名>`（`build.rs` 头部注释早已写明，
+  本轮仍然漏了第三、四处）。只漏 `build.rs` 时它会 panic 并打印全部已知权限（很长，容易误读成 ACL 语法错）；
+  **只漏 `capabilities` 时没有任何编译错误**，运行时表现为「link_set_root not allowed. Command not found」。
+  是 `scripts/link-verify.mjs` 的 F 段把它当失败暴露出来的——这类「命令注册了但没授权」单测查不出来。
+- **同一端口关共享后短时间内绑不回来**：`link_server_stop` 确实释放了监听（实测 `netstat` 无 LISTENING 残留，
+  满足「关闭即释放端口」），但上一台设备的连接留在 TIME_WAIT 时，std 的监听套接字按
+  `SO_EXCLUSIVEADDRUSE` 绑定会被直接拒——**实测 45 秒未散**，短重试救不了。
+  按决策 §12.1-3「不许静默换端口」办成可操作文案（`bind_listener`）：说清是端口被占、等一分钟或换一个端口。
+
+**验收判据里没做到的那一条**：「真机在共享根里打开一个 md、编辑、保存回桌面」——
+本机两个 AVD（`phone35`、`aurora35`）客户机**完全没有网络路由**（`ping 10.0.2.2` 与 `ping 8.8.8.8`
+都是 `connect: Network is unreachable`），拿它们跑局域网等于什么都没验，所以这一条**没有**在本轮冒充通过。
+模拟器上做了两件与网络无关且确实会翻车的事：x86_64 debug 包装进 `aurora35`，① 页面入口脚本哈希
+== 本轮 `dist/index.html` 的哈希（装的是这一版前端）；② `link_request` 在安卓侧回的是
+「手机上还没有连着桌面」而**不是**「not allowed」，`link_set_root` 同样被授权——即上面那条四处登记的坑
+在 APK 这一侧也过掉了。**真实 Android 客户端的局域网往返仍未验过**，留给阶段 3 连着桌面标签同步一起上真机。
+
+### 下一会话开工单：阶段 3（桌面当前标签同步）
+
+1. 服务端进程级单例收各窗口上报的标签：前端每次标签变化上报（`relPath`/title/language/dirty/mdView/光标），
+   Rust 按 Tauri 焦点事件取「聚焦窗口那份」。**多开两个窗口**才能验判定，只测单窗口等于没测。
+2. `tabs` / `tabOpen` 接进 `fsrv`；**脏标签不接管**（§2.5）：手机侧列表里置灰 + 说明「桌面上有未保存的修改」。
+3. 根外文件白名单（§6.3）：条目是**具体文件的规范化绝对路径**，每次 `read`/`write`/`stat` 重新
+   `canonicalize` 后要求「等于白名单某一条」，不给目录 / 通配 / 前缀匹配；关标签即摘除。
+   与 `roots.rs` 同级，**测试先行**，至少四组：白名单命中、目录冒充文件、symlink 指向白名单外、关标签后失效。
+4. 推送通道 `event {type:'tabs'}`：帧层的 `Msg` 本轮**故意没加 Event 变体**（没有发送方就是死代码），
+   阶段 3/4 落地时一起补，`run_pump` 客户端分支届时接。
+5. 手机端「设备」页：不属于文件树（语义是标签页）。新触点与 52② 那一轮一起量到 48dp。
+
+**若阶段 3 卡住**：v1.5.0 还欠 51（语言高亮覆盖）与 52②（弹窗层 48dp 提档），都是独立小项，可以先做。
+
 
 
 42. **链路基座与扫码配对**

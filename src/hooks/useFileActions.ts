@@ -9,7 +9,7 @@ import type { RefObject } from 'react';
 import {
   pickAndReadFile, readLocalPath, saveFileToDisk, androidPickFiles, isTauri, READ_EXTENSIONS,
   openedFromBytes,
-  type OpenedFile,
+  type OpenedFile, type RemoteConflict,
 } from '../lib/fileIO';
 import {
   LARGE_FILE_CHARS, makeNewUntitled, makeLargePreviewTab, nextTabId,
@@ -18,6 +18,7 @@ import {
 import {
   classifyBySize, fileSize, formatBytes, LARGE_FILE_MAX_BYTES,
 } from '../lib/largeFile';
+import { REMOTE_MAX_FILE_BYTES } from '../lib/remote';
 import { detectLanguageFromPath } from '../lib/codemirror';
 import { displayNameFromPath, IS_ANDROID_APP } from '../lib/platform';
 import { applyLineEnding, type LineEnding } from '../lib/lineEndings';
@@ -41,6 +42,9 @@ export interface FileActionsOptions {
   pendingDiscardRef: RefObject<PendingDiscardConfirm | null>;
   exitingRef: RefObject<boolean>;
   updateKnownDiskContent: (path: string, content: string) => void;
+  /* 远程保存撞上「桌面期间也改过」：桌面那一份交给 diff 时间线由用户逐条采纳。
+     不自动三方合并——两边都是有效修改，程序替用户选哪边都可能毁掉工作 */
+  onRemoteConflict: (path: string, conflict: RemoteConflict) => void;
   /* 自动保存设置（App 层持有 settings 状态，只传相关字段） */
   autosaveEnabled: boolean;
   autosaveIntervalSec: number;
@@ -48,7 +52,7 @@ export interface FileActionsOptions {
 }
 
 export function useFileActions({
-  editor, askDiscardConfirm, pendingDiscardRef, exitingRef, updateKnownDiskContent,
+  editor, askDiscardConfirm, pendingDiscardRef, exitingRef, updateKnownDiskContent, onRemoteConflict,
   autosaveEnabled, autosaveIntervalSec, t,
 }: FileActionsOptions) {
   const { tabsRef, setTabs, activeTab, setActiveTabId, setActiveTabIdRef, recordContentChange, updateTabContent, deleteTab } = editor;
@@ -74,6 +78,15 @@ export function useFileActions({
       : undefined;
     try {
       const size = await fileSize(path);
+      /* 远程文件超上限是个死角（没有分块预览协议，桌面那套是 desktop-only 的），
+         既不能编辑也不能只读浏览——直接说清楚比读一半再降级诚实 */
+      if (size != null && path.startsWith('hide-remote://') && size > REMOTE_MAX_FILE_BYTES) {
+        appAlert(t('remote.errTooLarge', {
+          size: formatBytes(size),
+          max: formatBytes(REMOTE_MAX_FILE_BYTES),
+        }));
+        return;
+      }
       if (size != null) {
         const cls = classifyBySize(size);
         if (cls === 'reject') {
@@ -108,7 +121,7 @@ export function useFileActions({
           return;
         }
         setTabs(prev => prev.map(t => t.id === existing.id
-          ? { ...t, content: file.content, originalContent: file.content, isDirty: false, encoding: file.encoding, bom: file.bom, eol: file.eol, originalEol: file.eol }
+          ? { ...t, content: file.content, originalContent: file.content, isDirty: false, encoding: file.encoding, bom: file.bom, eol: file.eol, originalEol: file.eol, remoteBaseHash: file.remoteBaseHash }
           : t
         ));
         setActiveTabIdRef.current(existing.id);
@@ -133,6 +146,7 @@ export function useFileActions({
         originalEol: file.eol,
         binary: file.binary,
         large: file.content.length > LARGE_FILE_CHARS,
+        remoteBaseHash: file.remoteBaseHash,
         jumpRequest,
       };
       setTabs(prev => [...prev, newTab]);
@@ -280,6 +294,13 @@ export function useFileActions({
     setSaving(true);
     try {
       const result = await saveFileToDisk(tab, tab.content, saveAs, opts?.silent ?? false);
+      const conflict = result.remoteConflict;
+      if (conflict) {
+        /* 桌面一个字都没写。基线换成桌面当前那份：用户采纳完再存，不会撞上同一次冲突 */
+        setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, remoteBaseHash: conflict.serverHash } : t));
+        if (tab.path) onRemoteConflict(tab.path, conflict);
+        return false;
+      }
       if (result.ok) {
         const savedPath = result.savedPath ?? tab.path;
         const savedTitle = savedPath ? displayNameFromPath(savedPath) : tab.title;
@@ -294,6 +315,7 @@ export function useFileActions({
               ...t,
               originalContent: t.content, isDirty: false, path: savedPath, title: savedTitle,
               originalEol: t.eol, encoding: tab.encoding, bom: tab.bom,
+              remoteBaseHash: result.remoteBaseHash ?? t.remoteBaseHash,
               language: savedLang,
               mdView: becameMarkdown ? 'split' : t.mdView,
             }

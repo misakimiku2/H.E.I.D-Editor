@@ -58,6 +58,12 @@ export interface LinkStatus {
   ticket: string;
   lastError: string;
   protocol: number;
+  /** 桌面当前的共享范围（人话形态）；手机侧恒空。开启态必须让用户看得见暴露了什么 */
+  rootDisplay: string;
+  /** 对端设备 id（LS 的 keyId）。远程标签的身份键 `hide-remote://<它>/…` 用它，不能用 IP */
+  peerKeyId: string;
+  /** bind 成功但迟迟没有连接尝试：大概率是 Windows 防火墙 */
+  firewallHint: boolean;
 }
 
 export const EMPTY_STATUS: LinkStatus = {
@@ -70,6 +76,9 @@ export const EMPTY_STATUS: LinkStatus = {
   ticket: '',
   lastError: '',
   protocol: 0,
+  rootDisplay: '',
+  peerKeyId: '',
+  firewallHint: false,
 };
 
 /** Rust 侧 `Refused.code` 的稳定取值；UI 按它出双语标签，原始 reason 作次要信息 */
@@ -100,6 +109,9 @@ export function normalizeStatus(raw: unknown): LinkStatus {
     ticket: typeof o.ticket === 'string' ? o.ticket : '',
     lastError: typeof o.lastError === 'string' ? o.lastError : '',
     protocol: typeof o.protocol === 'number' ? o.protocol : 0,
+    rootDisplay: typeof o.rootDisplay === 'string' ? o.rootDisplay : '',
+    peerKeyId: typeof o.peerKeyId === 'string' ? o.peerKeyId : '',
+    firewallHint: o.firewallHint === true,
   };
 }
 
@@ -223,6 +235,13 @@ export async function stopServer(): Promise<LinkStatus> {
 export async function fetchTicket(): Promise<string> {
   if (!isTauri) return '';
   return call<string>('link_ticket');
+}
+
+/** 桌面把文件树当前的根报给链路层当共享范围（设计稿 §2.3：不让用户再选第二遍）。
+    传 null 即清除；手机端不用（手机恒为客户端，不暴露任何文件） */
+export async function setSharedRoot(path: string | null): Promise<void> {
+  if (!isTauri) return;
+  await call<unknown>('link_set_root', { path }).catch(() => {});
 }
 
 export async function connectTo(

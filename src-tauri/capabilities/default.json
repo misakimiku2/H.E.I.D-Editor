@@ -25,6 +25,8 @@
     "allow-link-pair-deny",
     "allow-link-pairings-list",
     "allow-link-pairing-revoke",
+    "allow-link-set-root",
+    "allow-link-request",
     "allow-open-external",
     "allow-render-page",
     "allow-take-launch-paths",

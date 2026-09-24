@@ -36,10 +36,10 @@ import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDo
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
-import { autoReconnectFromPrefs, autoStartFromPrefs } from './lib/link';
+import { autoReconnectFromPrefs, autoStartFromPrefs, setSharedRoot } from './lib/link';
 import { LANGUAGE_LABELS, detectLanguageFromPath } from './lib/codemirror';
 import {
-  EOL_LABELS, applyLineEnding, type LineEnding,
+  EOL_LABELS, applyLineEnding, normalizeToLf, type LineEnding,
 } from './lib/lineEndings';
 import { ENCODING_OPTIONS, encodingLabel } from './lib/encoding';
 import { clearRecentFiles } from './lib/recentFiles';
@@ -75,7 +75,7 @@ import { TopAppBar } from './components/mobile/TopAppBar';
 import { BottomToolbar } from './components/mobile/BottomToolbar';
 import { StatusStrip } from './components/mobile/StatusStrip';
 import { TabSheet } from './components/mobile/TabSheet';
-import { androidCreateDoc, androidWriteUri, formatFileSize, isTauri, writeLocalPath } from './lib/fileIO';
+import { androidCreateDoc, androidWriteUri, formatFileSize, isTauri, writeLocalPath, type RemoteConflict } from './lib/fileIO';
 import {
   INITIAL_WELCOME_ID, makeReleaseNotesTab, makeUntitledTab, makeWelcomeTab,
   RELEASE_NOTES_TAB_ID,
@@ -191,6 +191,19 @@ export default function App() {
     }));
   }, [diff.appendExternalEntry, editor.recordContentChange, editor.setTabs, editor.tabsRef]);
 
+  /* 远程保存撞上「桌面期间也改过」：走与桌面外部修改完全同一套时间线语义
+     （before = 我们读到的那份基线，after = 桌面当前那份），不另造一个冲突弹窗——
+     这套 UI 用户在桌面上已经认识了 */
+  const handleRemoteConflict = useCallback((path: string, c: RemoteConflict) => {
+    const after = normalizeToLf(c.serverText);
+    const tab = editor.tabsRef.current.find(t => t.path === path);
+    diff.appendExternalEntry(path, tab ? normalizeToLf(tab.originalContent) : after, after, Date.now());
+    editor.setTabs(prev => prev.map(t => t.path === path
+      ? { ...t, originalContent: after, isDirty: t.content !== after || t.eol !== t.originalEol }
+      : t));
+    appAlert(t('remote.conflict'));
+  }, [diff.appendExternalEntry, editor.recordContentChange, editor.setTabs, editor.tabsRef, t]);
+
   /* 浏览器模式与安卓（fs watch 不支持且 SAF 无真实路径）不监听外部，但内部时间线照常记录 */
   const watchedPaths = useMemo(
     () => (isTauri && !IS_ANDROID_APP ? editor.referencedPaths : []),
@@ -208,6 +221,7 @@ export default function App() {
     pendingDiscardRef,
     exitingRef,
     updateKnownDiskContent,
+    onRemoteConflict: handleRemoteConflict,
     autosaveEnabled: settings.autosaveEnabled,
     autosaveIntervalSec: settings.autosaveIntervalSec,
     t,
@@ -623,7 +637,18 @@ export default function App() {
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   const [treeOpen, setTreeOpen] = useState(false);
   const [treeRootPath, setTreeRootPath] = useState<string | null>(() => loadTreeRoot());
-  useEffect(() => { saveTreeRoot(treeRootPath); }, [treeRootPath]);
+  useEffect(() => {
+    /* 远程根不落盘：重启后那条连接多半已经没了，存下来只会换来开机一棵读不出内容的树。
+       这里既不写也不清，之前记的本地根下次启动照旧恢复 */
+    if (treeRootPath?.startsWith('hide-remote://')) return;
+    saveTreeRoot(treeRootPath);
+  }, [treeRootPath]);
+
+  /* 桌面把文件树当前的根如实报给链路层当共享范围（设计稿 §2.3：不让用户再选第二遍）。
+     手机端不报：它恒为客户端，一台手机上都没有暴露过任何文件 */
+  useEffect(() => {
+    if (isTauri && !IS_ANDROID_APP) void setSharedRoot(treeRootPath);
+  }, [treeRootPath]);
 
   /* ---- 文件树管理操作的标签页同步与危险确认（管理命令在 FileTreeSidebar 内执行） ---- */
 
@@ -895,6 +920,13 @@ export default function App() {
   const handleTreeRootChange = useCallback((p: string | null) => {
     setTreeRootPath(p);
     if (!p) setTreeOpen(false);
+  }, []);
+  /* 手机「浏览这台电脑的文件」：远程根由已连接设备的 id 直接构成，没有"再选一次目录"
+     这一步（共享范围就是桌面文件树那个根）；顺手收掉设置页，抽屉才看得见 */
+  const openRemoteTree = useCallback((p: string) => {
+    setTreeRootPath(p);
+    setTreeOpen(true);
+    setSettingsOpen(false);
   }, []);
 
   /* ---- 网址导入：转换结果以 Markdown 新标签页打开（分屏视图，标脏） ---- */
@@ -2524,6 +2556,7 @@ export default function App() {
             onChange={setSettings}
             onClose={() => setSettingsOpen(false)}
             asPage={isPhone}
+            onBrowseRemote={openRemoteTree}
           />
         )}
 

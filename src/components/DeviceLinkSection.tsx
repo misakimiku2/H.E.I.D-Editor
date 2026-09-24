@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Copy, Loader2, QrCode, ShieldAlert, Smartphone, Usb, X } from 'lucide-react';
+import { Camera, Copy, FolderTree, Loader2, QrCode, ShieldAlert, Smartphone, Usb, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
@@ -10,6 +10,7 @@ import {
   revokePairing, savePrefs, startServer, stopServer, subscribeLinkStatus, subscribePairRequests,
   type LinkPairReq, type LinkStatus, type PairInfo, type QrInfo,
 } from '../lib/link';
+import { makeRemotePath } from '../lib/remote';
 
 /* 二维码只在桌面开配对窗时才用得到，懒加载独立 chunk（与「关于」里的 QrImage 同库同策略） */
 const QrImage = lazy(() => import('./QrImage'));
@@ -21,6 +22,8 @@ interface DeviceLinkSectionProps {
   /** 与 SettingsDialog 同源的行样式，避免这里另写一份尺寸定义后与别处漂移 */
   rowCls: string;
   labelCls: string;
+  /** 手机点「浏览这台电脑的文件」：把远程根交给 App 去开文件树抽屉 */
+  onBrowseRemote?: (rootPath: string) => void;
 }
 
 /**
@@ -30,7 +33,7 @@ interface DeviceLinkSectionProps {
  * 阶段 1：桌面生成 `hide-link://pair` 二维码 + 6 位短码兜底；手机用应用内「扫一扫」配对，
  * 配对后记住设备、启动免扫重连。粘贴配对码 / 短码是相机不可用时的等价入口，不是过渡方案。
  */
-export function DeviceLinkSection({ dark, rowCls, labelCls }: DeviceLinkSectionProps) {
+export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote }: DeviceLinkSectionProps) {
   const t = useT();
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -211,8 +214,17 @@ export function DeviceLinkSection({ dark, rowCls, labelCls }: DeviceLinkSectionP
         <>
           {enabled ? (
             <>
-              {/* 已连着：只给断开，不再摆一堆输入框占地方 */}
+              {/* 已连着：进远程文件树 + 断开，不再摆一堆输入框占地方 */}
               <div className={cn(rowCls, 'justify-end gap-2')}>
+                <button
+                  type="button"
+                  disabled={!s?.peerKeyId}
+                  onClick={() => s?.peerKeyId && onBrowseRemote?.(makeRemotePath(s.peerKeyId, ''))}
+                  className={btnPrimary}
+                >
+                  <FolderTree size={14} />
+                  {t('link.browseRemote')}
+                </button>
                 <button type="button" onClick={onDisconnect} disabled={busy} className={btnGhost}>
                   {t('link.disconnect')}
                 </button>
@@ -339,6 +351,26 @@ export function DeviceLinkSection({ dark, rowCls, labelCls }: DeviceLinkSectionP
               />
             </button>
           </div>
+          {/* 共享范围明示（设计稿 §5.2）：开着共享时用户必须看得见手机端能读到哪些文件 */}
+          {enabled && (
+            <div className={rowCls}>
+              <span className={labelCls}>{t('link.shareScope')}</span>
+              <span
+                title={status?.rootDisplay || undefined}
+                className={cn('min-w-0 flex-1 truncate text-xs', !status?.rootDisplay && 'opacity-60')}
+              >
+                {status?.rootDisplay || t('link.shareScopeNone')}
+              </span>
+            </div>
+          )}
+          {/* bind 成功但没人来连：这是「端口开着、包进不来」的半死状态，比直接报错难查，
+              所以由桌面自己提，而不是等用户来回猜是哪台设备的问题 */}
+          {enabled && status?.firewallHint && (
+            <p className="mx-5 my-1 flex gap-1.5 rounded-lg bg-amber-500/10 p-2 text-[10px] leading-relaxed text-amber-600 pointer-coarse:text-xs">
+              <ShieldAlert size={13} className="mt-0.5 shrink-0" />
+              <span>{t('link.firewallHint')}</span>
+            </p>
+          )}
           <div className={rowCls}>
             <span className={labelCls}>{t('link.port')}</span>
             <input

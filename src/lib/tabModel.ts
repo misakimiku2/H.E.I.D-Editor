@@ -53,6 +53,9 @@ export interface FileTab extends CsvTabState {
   originalEol: LineEnding;
   /** 疑似二进制文件（检测含 NUL），只读预览 */
   binary?: boolean;
+  /** 远程标签的内容基线：最近一次 read / write 由桌面带回的哈希，保存时带回做冲突判定。
+      本地标签不用（本地由外部文件监听自己比对磁盘） */
+  remoteBaseHash?: string;
   /** 大文件（超降级阈值）：关闭语法高亮/小地图等保证流畅 */
   large?: boolean;
   /** 大文件只读分块预览（32~512MB 第二层）：content 恒为空，正文由 LargeFileViewer 分窗读取 */

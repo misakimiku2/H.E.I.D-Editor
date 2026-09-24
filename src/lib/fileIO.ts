@@ -38,6 +38,19 @@ export interface OpenedFile {
   bom: boolean;
   eol: LineEnding;
   binary?: boolean;
+  /** 远程文件的内容基线哈希（保存时带回做冲突判定）；本地文件不带 */
+  remoteBaseHash?: string;
+}
+
+/** 远程身份键（`hide-remote://…`）走的是另一条读/写通道，前缀知识只在这里判定一次。
+    前缀对但内容不合法的必须当场抛错，不能让它掉进本地分支去按文件系统读——
+    那副景象是「文件不存在」，而真正的问题是这条路径越界了。 */
+async function remoteRefOf(path: string): Promise<{ deviceId: string; rel: string } | null> {
+  if (!path.startsWith('hide-remote://')) return null;
+  const { parseRemotePath } = await import('./remote');
+  const ref = parseRemotePath(path);
+  if (!ref) throw new Error('远程路径不合法');
+  return ref;
 }
 
 /** 从解码结果构造 OpenedFile：文本统一 LF 归一，原始换行符记入 eol */
@@ -125,6 +138,17 @@ export async function androidWriteUri(uri: string, content: string, encoding: st
 /* 桌面（Tauri Windows/桌面平台）读取：Rust 侧 encoding_rs 检测编码；force 指定编码重新解码 */
 export async function readLocalPath(path: string, forceEncoding?: string): Promise<OpenedFile> {
   let name = displayNameFromPath(path);
+  /* 远程文件（v1.5 阶段 2）：解码在桌面上做完再传过来，所以编码 / BOM / 二进制判定
+     与桌面逐字一致——这正是服务端复用 detect_and_decode 的意义，
+     不要退回下面那条 JS 启发式检测的降级路径 */
+  const remote = await remoteRefOf(path);
+  if (remote) {
+    const { remoteRead } = await import('./remote');
+    const r = await remoteRead(remote.rel, forceEncoding);
+    const file = openedFromDecoded(r, { name, path, handle: null });
+    file.remoteBaseHash = r.hash;
+    return file;
+  }
   /* 数字型 content URI（如 content://media/.../file/1000000018）解析不出可读名，走原生桥查 DISPLAY_NAME */
   if (path.startsWith('content://')) {
     const bridge = (window as any).HeidBridge;
@@ -193,6 +217,18 @@ export async function readDroppedFile(file: File): Promise<OpenedFile> {
 export interface SaveResult {
   ok: boolean;
   savedPath: string | null;
+  /** 远程保存成功后桌面回传的新基线 */
+  remoteBaseHash?: string;
+  /** 桌面在我们写入之前已经改过这个文件：一个字都没落盘，等用户裁决 */
+  remoteConflict?: RemoteConflict;
+}
+
+/** 远程写入撞上的「桌面那一份」——形状够前端把 diff 时间线喂起来 */
+export interface RemoteConflict {
+  serverText: string;
+  serverHash: string;
+  serverEncoding: string;
+  serverBom: boolean;
 }
 
 /* 桌面：Tauri 命令按编码写盘；其余场景 UTF-8 由调用方处理 */
@@ -211,6 +247,32 @@ export async function writeLocalPath(path: string, content: string, encoding = '
 export async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = false, silent = false): Promise<SaveResult> {
   /* 编辑器内是 LF，落盘前按标签页的目标换行符还原 */
   const content = applyLineEnding(contentLf, tab.eol);
+  /* 远程标签：写回桌面，**不走 SAF 新建文档**（那是"在手机里落一份"的语义，
+     而另存为才该落本地）。基线不匹配时桌面一个字都不写，把冲突原样带回给用户裁决 */
+  const remote = saveAs ? null : await remoteRefOf(tab.path ?? '');
+  if (remote) {
+    const { remoteWrite, isRemoteError } = await import('./remote');
+    try {
+      const r = await remoteWrite({
+        relPath: remote.rel, text: content, encoding: tab.encoding, bom: tab.bom,
+        baseHash: tab.remoteBaseHash ?? '',
+      });
+      if (r.conflict) {
+        return {
+          ok: false, savedPath: null,
+          remoteConflict: {
+            serverText: r.serverText ?? '', serverHash: r.serverHash ?? '',
+            serverEncoding: r.serverEncoding ?? 'utf-8', serverBom: r.serverBom ?? false,
+          },
+        };
+      }
+      return { ok: true, savedPath: tab.path ?? null, remoteBaseHash: r.hash };
+    } catch (e) {
+      console.error('Remote save failed:', tab.path, e);
+      if (!silent) appAlert(isRemoteError(e) ? e.message : String(e));
+      return { ok: false, savedPath: null };
+    }
+  }
   /* 安卓：写盘走 SAF 桥（按编码编码字节）；另存为/无路径时先经系统新建文档取得可写 URI */
   if (IS_ANDROID_APP) {
     let target = tab.path;
