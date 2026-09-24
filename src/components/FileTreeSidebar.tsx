@@ -1,4 +1,6 @@
 import { pickLister } from '../lib/remoteTree';
+import { isRemotePath, parseRemotePath } from '../lib/remote';
+import { dirTouched, mountPointTouched, subscribeFileChanges } from '../lib/remoteChanges';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown, ChevronLeft, ChevronRight, FileText, Folder, FolderX, FolderOpen,
@@ -511,13 +513,18 @@ export function FileTreeSidebar({
   const refreshSeqRef = useRef(0);
 
   /**
-   * 重载所有已加载目录并同批合并（父先子后）：手动刷新按钮、外部变更 watcher、
+   * 重载已加载目录并同批合并（父先子后）：手动刷新按钮、外部变更 watcher、
    * 树内管理操作后共用。展开态由 withRefreshedChildren 保留；并发时旧批次
    * （seq 落后）丢弃不回写，避免慢 I/O 的旧结果覆盖新状态。
+   *
+   * `only` 是远程根那侧的收窄判据：桌面的 watcher 给不出「变了哪几层」，只能整棵重载，
+   * 而桌面的推送给得出。传了就只重列这些目录，一个都不在已加载之列时**一次请求都不发**。
    */
-  const refreshTree = useCallback(async () => {
+  const refreshTree = useCallback(async (only?: string[]) => {
     if (!lister || !treeRef.current) return;
-    const dirs = loadedDirPaths(treeRef.current);
+    const all = loadedDirPaths(treeRef.current);
+    const dirs = only ? all.filter(p => only.includes(p)) : all;
+    if (!dirs.length) return;
     const seq = ++refreshSeqRef.current;
     const results = await Promise.allSettled(dirs.map(p => lister.list(p)));
     if (seq !== refreshSeqRef.current) return;
@@ -544,6 +551,27 @@ export function FileTreeSidebar({
   useEffect(() => {
     setTree(prev => (rootPath && prev?.path !== rootPath ? null : prev));
   }, [rootPath]);
+
+  /* 远程根（阶段 4）：桌面推来一帧文件变更，只重列**受影响的那几层**。
+     桌面自己那份 watcher 给不出"哪几层变了"（通知里不带类型，也不区分文件与目录），
+     只能整棵重载；远程这一路桌面是按目录合并着推的，于是就真能只刷那几层。
+     换根单独处理：那是另一棵树 —— 留着旧的展开态只会让人以为看的还是原来那份内容。 */
+  useEffect(() => {
+    if (!open || !isRemotePath(rootPath)) return;
+    const rootRel = parseRemotePath(rootPath)?.rel ?? '';
+    return subscribeFileChanges({
+      onDirs: dirs => {
+        const t = treeRef.current;
+        if (!t) return;
+        const hit = loadedDirPaths(t).filter(p => {
+          const rel = parseRemotePath(p)?.rel ?? '';
+          return dirTouched(rel, dirs) || (rel === rootRel && mountPointTouched(rootRel, dirs));
+        });
+        if (hit.length) void refreshTree(hit);
+      },
+      onRootChanged: () => setTree(null),
+    });
+  }, [open, rootPath, refreshTree]);
 
   const handleRefresh = useCallback(() => {
     void refreshTree();

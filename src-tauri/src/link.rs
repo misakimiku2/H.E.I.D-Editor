@@ -11,6 +11,9 @@
 //! - 读超时与"半帧"必须分开处理，否则会在帧中间丢同步（见 [`Framer`]）。
 
 use std::collections::{HashMap, VecDeque};
+// 只有桌面侧的 `fs` 推送槽用得上（`Push::dirs` 本身是 desktop-only）
+#[cfg(desktop)]
+use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -36,6 +39,10 @@ mod roots;
 mod board;
 /// 远程文件命令面（阶段 2）：`list` / `stat` / `read` / `write`，不碰网络也不碰会话。
 mod fsrv;
+/// 桌面文件变更 → 手机的推送内容（阶段 4）。只有桌面有本地递归监听这回事，
+/// 且它复用搜索侧的目录黑名单（`search` 本身就是 desktop-only）。
+#[cfg(desktop)]
+mod watch;
 
 /// 协议版本。`hello` 里强校验：安卓侧载无静默更新，两端版本会长期不一致，
 /// 不匹配必须明确拒绝而不是"尽力兼容"。
@@ -687,6 +694,10 @@ pub struct LinkState {
     conn: Mutex<Option<Arc<Conn>>>,
     /// 桌面侧这条连接的推送队列（阶段 3 的 `event {type:'tabs'}`）。连接建立时挂上、结束时摘掉
     push: Mutex<Option<Arc<Push>>>,
+    /// 桌面侧那份递归监听（阶段 4）。存在的唯一条件是「有设备在线且它要看的那棵树已定」，
+    /// 断开或换根即释放/重建 —— 见 [`sync_fs_watch`]
+    #[cfg(desktop)]
+    fs_watch: Mutex<Option<watch::Handle>>,
 }
 
 /// 推给手机前端的对端事件载荷：`typ` 与帧里的 `event.type` 同名，`data` 是 JSON 文本。
@@ -835,6 +846,12 @@ impl Conn {
 #[derive(Default)]
 pub struct Push {
     items: Mutex<VecDeque<Msg>>,
+    /// `fs` 那一类单独存：它带的是「哪些目录变了」这个**集合**，来一批并进来一批。
+    /// 走 `items` 的话会被"同一类型只留一条"吃掉后一帧的目录（阶段 4 工单点名不能照抄的那条），
+    /// 而集合天然可合并、长度由 `watch::MAX_PUSH_DIRS` 在出口处统一管。
+    /// 只有桌面侧会有文件变更可推（手机是那棵树的远端读者），故整个字段 desktop-only。
+    #[cfg(desktop)]
+    dirs: Mutex<BTreeSet<String>>,
 }
 
 impl Push {
@@ -849,10 +866,38 @@ impl Push {
         }
     }
 
+    /// 挂一批文件变更（阶段 4）。载荷在 [`Push::take`] 时才序列化，所以泵线程被一次
+    /// 大文件读拖住的这几秒里攒下的若干窗口会合成一帧，而不是排成一串各自一帧。
+    #[cfg(desktop)]
+    pub fn queue_fs(&self, dirs: &[String]) {
+        let mut g = self.dirs.lock().unwrap_or_else(|p| p.into_inner());
+        // 已经退化成"整棵树都动了"就不必再攒名字了
+        if g.len() > watch::MAX_PUSH_DIRS {
+            return;
+        }
+        g.extend(dirs.iter().cloned());
+    }
+
     /// 维持线程用：取走本回合要发的帧
     fn take(&self) -> Vec<Msg> {
-        let mut g = self.items.lock().unwrap_or_else(|p| p.into_inner());
-        g.drain(..).collect()
+        let mut out: Vec<Msg> = {
+            let mut g = self.items.lock().unwrap_or_else(|p| p.into_inner());
+            g.drain(..).collect()
+        };
+        #[cfg(desktop)]
+        let dirs: Vec<String> = {
+            let mut g = self.dirs.lock().unwrap_or_else(|p| p.into_inner());
+            // 整份取走：留在队列里下一回合又发一遍，手机端就会为同一批目录重列两次
+            std::mem::take(&mut *g).into_iter().collect()
+        };
+        #[cfg(desktop)]
+        if !dirs.is_empty() {
+            // 装得下就报目录清单，装不下就退化成不带载荷的一条 —— 后者手机端会整个重取，
+            // 宁可多列几层也不能漏掉变化，所以退化方向只有一个
+            let data = watch::payload_of(dirs.iter().map(|s| s.as_str())).unwrap_or_default();
+            out.push(Msg::Event { typ: EVENT_FS.to_string(), data });
+        }
+        out
     }
 }
 
@@ -1026,6 +1071,7 @@ fn run_pump(
         if role == Role::Server {
             if let Some(push) = server_push(app) {
                 for msg in push.take() {
+                    eprintln!("[heid-fsDBG] 泵要发 {msg:?}");
                     if let Err(e) = session.send(&mut stream, &msg) {
                         mark_error(app, e);
                         return;
@@ -1125,6 +1171,67 @@ fn notify(app: &AppHandle, typ: &str) {
         push.queue(typ);
     }
 }
+
+/// 让监听跟着「现在暴露的是哪一棵树」走：有设备在线、且聚焦窗口确实开着文件树，才建；
+/// 断开、换根、换成一台没开树的窗口 → 立刻释放。
+///
+/// 换根走"先释放再重建"而不是原地改：重建的实测成本是 0.2~0.3 ms（递归 watch 建立），
+/// 而原地维护一份会漂移的绑定要处理"旧根还剩几个事件在飞"这种划不来的边角。
+/// 空档里丢的那点变化，手机端下一次列举本来就会收敛。
+///
+/// 建不起来时只记一条状态提示、不影响读写：实时更新是锦上添花，文件读写不是。
+#[cfg(desktop)]
+fn sync_fs_watch(app: &AppHandle) {
+    let state = app.state::<LinkState>();
+    let online = state.push.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+    let want = if online {
+        state.board.lock().unwrap_or_else(|p| p.into_inner()).root()
+    } else {
+        None
+    };
+    let mut cur = state.fs_watch.lock().unwrap_or_else(|p| p.into_inner());
+    eprintln!(
+        "[heid-fsDBG] sync online={online} want={want:?} had={:?}",
+        cur.as_ref().map(|h| h.root().to_path_buf())
+    );
+    if match (cur.as_ref(), &want) {
+        (Some(h), Some(r)) => h.root() == r.as_path(),
+        (None, None) => true,
+        _ => false,
+    } {
+        return;
+    }
+    *cur = None; // 摘掉即停：线程退出时把 notify 句柄一起释放
+    let Some(root) = want else { return };
+    let sink_app = app.clone();
+    match watch::spawn(root, move |dirs| {
+        match server_push(&sink_app) {
+            Some(push) => {
+                eprintln!("[heid-fsDBG] 挂进推送队列 {dirs:?}");
+                push.queue_fs(dirs);
+            }
+            None => eprintln!("[heid-fsDBG] 没有在线连接，{dirs:?} 无处可去"),
+        }
+    }) {
+        Ok(handle) => {
+            eprintln!("[heid-fsDBG] 监听已建立 on {:?}", handle.root());
+            *cur = Some(handle);
+        }
+        Err(e) => {
+            drop(cur);
+            /* 只记一行到 stderr，**不碰状态快照里的 `connected`**。
+               这里原来走 `mark_error`，于是一个只影响实时更新的附属失败（共享根被删了、
+               没权限、路径太长）会把整条链路在界面上判成已断开 —— 而读写一条都没受影响。
+               2026-09-24 全量验收里 A 段那两条"TOFU 之后没转已连接"就是这么被带倒的。 */
+            eprintln!("[heid-fs] 文件变更监听没建起来，实时更新暂不可用（读写不受影响）：{e}");
+        }
+    }
+}
+
+/// 手机侧没有本地共享根可监听（它就是那棵树的远端读者），故这里是个空操作 ——
+/// 留着同名函数是为了上面那几处调用点不用各自加分支。
+#[cfg(not(desktop))]
+fn sync_fs_watch(_app: &AppHandle) {}
 
 fn prepare(stream: &mut TcpStream) {
     stream.set_read_timeout(Some(POLL)).ok();
@@ -1364,8 +1471,11 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
     // 挂上推送队列：从这一刻起，窗口上报标签 / 换焦点 / 关窗才有人能通知到对端。
     // 摘掉时留在队列里的帧一起作废 —— 下一次连接建立后对端本来就要重取全量（§6.1）。
     *state.push.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::<Push>::default());
+    // 从这一刻起才有"谁在看这棵树"这回事：监听随连接而建，随断开而释放
+    sync_fs_watch(&app);
     run_pump(stream, session, &app, &stop, Role::Server);
     *state.push.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    sync_fs_watch(&app);
     publish(&app, |s| {
         s.connected = false;
         s.peer_device.clear();
@@ -1783,17 +1893,11 @@ pub fn link_set_root(app: AppHandle, label: String, path: Option<String>) -> Res
     if !window_alive(&app, &label) {
         return Ok(snapshot(&app));
     }
-    let state = app.state::<LinkState>();
     let root = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         None => None,
         Some(p) => Some(roots::canonical_root(Path::new(p))?),
     };
-    let changed = state.board.lock().unwrap_or_else(|p| p.into_inner()).set_root(&label, root);
-    if changed {
-        publish_exposure(&app);
-        // 换根等于换整棵树：手机上展开着的目录、正开着的标签引用都要按新根重算
-        notify(&app, EVENT_TABS);
-    }
+    board_edit(&app, move |b| b.set_root(&label, root));
     Ok(snapshot(&app))
 }
 
@@ -1818,6 +1922,18 @@ fn window_alive(app: &AppHandle, label: &str) -> bool {
 /// 这样推送永远不会带着半新半旧的列表覆盖掉请求的结果。
 pub const EVENT_TABS: &str = "tabs";
 
+/// 桌面的文件变了（阶段 4）。载荷是 `{"dirs":["src","docs"]}` —— **只列目录不列文件**，
+/// 理由与实测代价都记在 `link/watch.rs` 的模块头与 ROADMAP 阶段 4 量测一节。
+/// 载荷为空 = 这一帧装不下了（超 `MAX_PUSH_DIRS`），手机端按「你看到的每一层都重取」处理。
+/// 只有桌面侧会发出这一类（手机是那棵树的远端读者），故非桌面构建下它没被引用。
+#[cfg_attr(not(desktop), allow(dead_code))]
+pub const EVENT_FS: &str = "fs";
+/// 共享根换了（阶段 4 补阶段 3 留的缺口）。语义是 `tabs` 的超集：
+/// 手机端要丢掉整棵树的缓存、重列展开着的层、并重取一次标签列表 —— 换根之后
+/// 那些 `rel` 与 `@w/…` 引用十有八九指向别处，只刷列表是不够的。
+/// 一次只推这一个或 [`EVENT_TABS`] 其中一个，不叠加。
+pub const EVENT_ROOT: &str = "rootChanged";
+
 /// 某个窗口把它当前的标签列表报给链路层（设计稿 §6.1）。桌面侧调用，手机端用不到。
 ///
 /// 这条命令是白名单的唯一来源：**桌面上开着哪些文件**决定局域网能读到哪些根外文件，
@@ -1828,13 +1944,32 @@ pub fn link_report_tabs(app: AppHandle, label: String, tabs: Vec<board::TabRepor
     if !window_alive(&app, &label) {
         return snapshot(&app);
     }
-    let state = app.state::<LinkState>();
-    let changed = state.board.lock().unwrap_or_else(|p| p.into_inner()).set_tabs(&label, tabs);
-    if changed {
-        publish_exposure(&app);
-        notify(&app, EVENT_TABS);
-    }
+    board_edit(&app, move |b| b.set_tabs(&label, tabs));
     snapshot(&app)
+}
+
+/// 在看板的同一把锁里做一次变更，并带回两件判定：这次变更要不要通知对端、
+/// 以及**手机上看到的那棵根换了没有**。
+///
+/// 两件判定必须同一次算：换根的推送与"不换了才推 tabs"是一对互斥的分支，
+/// 分开问两次看板就可能一次一个样。根换了只推 [`EVENT_ROOT`]（它的语义包含重取列表），
+/// 没换才推 [`EVENT_TABS`]。
+fn board_edit(app: &AppHandle, change: impl FnOnce(&mut board::Board) -> bool) {
+    let state = app.state::<LinkState>();
+    let (changed, moved) = {
+        let mut g = state.board.lock().unwrap_or_else(|p| p.into_inner());
+        let before = g.root();
+        let changed = change(&mut g);
+        (changed, before != g.root())
+    };
+    if moved {
+        publish_exposure(app);
+        notify(app, EVENT_ROOT);
+    } else if changed {
+        publish_exposure(app);
+        notify(app, EVENT_TABS);
+    }
+    sync_fs_watch(app);
 }
 
 /// 把「桌面现在暴露了什么」刷进状态快照。设置面板那两行（共享范围 + 根外文件数）
@@ -1852,23 +1987,16 @@ fn publish_exposure(app: &AppHandle) {
 /// 全局窗口事件里要处理的两件事（其余返回 `false` = 无需推送）。
 /// 由 `lib.rs` 的 `on_window_event` 调用；桌面才有意义（手机只有一个窗口）。
 pub fn on_window_focus(app: &AppHandle, label: &str) {
-    let state = app.state::<LinkState>();
-    let changed = state.board.lock().unwrap_or_else(|p| p.into_inner()).focus(label);
-    if changed {
-        publish_exposure(app);
-        // 换窗口 = 换一份列表、可能还换了一棵树：让对端整个重取
-        notify(app, EVENT_TABS);
-    }
+    // 换窗口可能连着换根，所以判据交给 board_edit：换根推 rootChanged，只换列表推 tabs
+    let label = label.to_string();
+    board_edit(app, move |b| b.focus(&label));
 }
 
 /// 窗口关掉：它报的根与标签当场作废。白名单是活窗口的并集，所以别的窗口里开着的文件不受牵连。
 pub fn on_window_closed(app: &AppHandle, label: &str) {
-    let state = app.state::<LinkState>();
-    let changed = state.board.lock().unwrap_or_else(|p| p.into_inner()).close_window(label);
-    if changed {
-        publish_exposure(app);
-        notify(app, EVENT_TABS);
-    }
+    let label = label.to_string();
+    board_edit(app, move |b| b.close_window(&label));
+    sync_fs_watch(app);
 }
 
 /// 手机侧发一条远程文件命令，返回结果的 JSON 文本（形状由 [`fsrv`] 里各命令的定义决定）。
@@ -1921,3 +2049,5 @@ mod roots_tests;
 mod board_tests;
 #[cfg(test)]
 mod fsrv_tests;
+#[cfg(all(test, desktop))]
+mod watch_probe;

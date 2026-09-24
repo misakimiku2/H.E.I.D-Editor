@@ -25,6 +25,7 @@ import { useT } from '../lib/i18nContext';
 import type { MessageKey } from '../lib/i18n';
 import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import { fetchStatus, loadPrefs, subscribeLinkStatus, subscribeRemoteEvents, type LinkStatus } from '../lib/link';
+import { EVENT_TABS } from '../lib/remoteChanges';
 import { isRemoteError, makeRemotePath, remoteTabs, type RemoteTabView } from '../lib/remote';
 
 interface RemoteTabsSheetProps {
@@ -99,7 +100,9 @@ export function RemoteTabsSheet({ dark, onClose, onOpen }: RemoteTabsSheetProps)
   useEffect(() => {
     if (!online) return;
     refresh();
-    return subscribeRemoteEvents((type) => { if (type === 'tabs') refresh(); });
+    return subscribeRemoteEvents((type) => {
+      if (type === EVENT_TABS) refresh();
+    });
   }, [online, refresh]);
 
   const openTab = (rel: string) => {

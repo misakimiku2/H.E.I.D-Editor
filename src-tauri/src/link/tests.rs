@@ -594,6 +594,108 @@ fn 远程命令走完整加密链路往返() {
 /// - `event` 帧能在没有请求在飞的时候到达客户端（手机靠它刷新列表）；
 /// - 服务端只按 `type` 各留一帧：连着报三次也只推一次，不会把链路刷爆；
 /// - 关掉标签之后同一条 `@w` 引用在线上立刻失效 —— 收回授权不靠对端自觉。
+/// 阶段 4：`fs` 推送的队列语义。三条都在别的推送上不存在，所以单独测：
+/// - **合而不是丢重复**：泵被一次大文件读拖住的这几秒里，两个合并窗口各攒了一批目录，
+///   出口必须是一帧两批都在（按 `queue` 那种"同类型只留一条"会把后一批吃掉）；
+/// - 超限退化成不带载荷的一条，而不是把清单截断——截断会让手机端以为其余层没变；
+/// - 空集合不发帧。
+#[test]
+#[cfg(desktop)]
+fn fs_推送按窗口合并载荷且装不下就整体退化() {
+    let push = Push::default();
+    assert!(push.take().is_empty(), "没变化就不该有帧");
+
+    push.queue_fs(&["src".into(), "docs".into()]);
+    push.queue_fs(&["docs".into(), "src/lib".into()]);
+    let frames = push.take();
+    assert_eq!(frames.len(), 1, "两批合成一帧，而不是排两条");
+    match &frames[0] {
+        Msg::Event { typ, data } => {
+            assert_eq!(typ, EVENT_FS);
+            assert_eq!(data, r#"{"dirs":["docs","src","src/lib"]}"#, "去重 + 排序，同一批变化永远序列化成一个样子");
+        }
+        other => panic!("不该发出 {other:?}"),
+    }
+    assert!(push.take().is_empty(), "发过的不该重复发");
+
+    // 一帧装不下的量（比 MAX_PUSH_DIRS 多一条），且**没有任何一部分被截断发出去**
+    let many: Vec<String> = (0..=watch::MAX_PUSH_DIRS).map(|i| format!("d{i}")).collect();
+    push.queue_fs(&many);
+    let frames = push.take();
+    assert_eq!(frames.len(), 1);
+    match &frames[0] {
+        Msg::Event { typ, data } => {
+            assert_eq!(typ, EVENT_FS);
+            assert_eq!(data, "", "退化 = 不带载荷的那条「变了，去重取」，手机端因此不会漏掉任何一层");
+        }
+        other => panic!("不该发出 {other:?}"),
+    }
+}
+
+/// 阶段 4：监听随连接而生死。这条测的是"断开即释放"那半句 ——
+/// 判据用 Windows 上最硬的那条：**句柄还开着就删不掉目录**。
+/// 停掉之后能删干净，说明通知句柄真的随线程一起放下了，而不是留了一份没人管的监听。
+#[test]
+#[cfg(desktop)]
+fn 监听停掉之后释放目录句柄() {
+    use std::sync::mpsc;
+    let dir = std::env::temp_dir().join(format!("heid-watch-close-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let (tx, rx) = mpsc::channel::<Vec<String>>();
+    let handle = watch::spawn(dir.clone(), move |dirs| {
+        let _ = tx.send(dirs.to_vec());
+    })
+    .expect("监听建不起来");
+
+    std::fs::write(dir.join("a.md"), "一").unwrap();
+    let got = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("建了监听却一帧都没收到");
+    assert_eq!(got, vec![String::new()], "根目录下的变更报的是「重列根」这一层");
+
+    drop(handle);
+    // 线程最多再转一个 TICK 就退出；给它一秒足够，且不靠"猜 sleep"判定成败 —— 判据是删除能否成功
+    let mut last_err = String::new();
+    for _ in 0..50 {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => return,
+            Err(e) => {
+                last_err = e.to_string();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    panic!("停掉之后目录仍删不掉，说明监听句柄没释放：{last_err}");
+}
+
+/// 阶段 4：换根之后旧根当场读不到。判据落在服务端而不是手机端 ——
+/// 手机上置灰只是好看，命令面拒了才是真的收回去。
+#[test]
+fn 换根后旧根的相对路径当场不可读() {
+    use super::board::Board;
+    use super::roots_tests::Temp;
+
+    let t = Temp::new("root-switch");
+    let a = t.root();
+    std::fs::create_dir_all(t.base.join("second")).unwrap();
+    // 服务端存的从来就是 canonicalize 过的那一份，测试不能拿裸路径冒充
+    let b = super::roots::canonical_root(&t.base.join("second")).unwrap();
+
+    let mut board = Board::default();
+    board.set_root("main", Some(a.clone()));
+    let scope_a = board.scope();
+    assert!(super::fsrv::handle(&scope_a, "stat", r#"{"relPath":"readme.md"}"#).is_ok());
+
+    board.set_root("main", Some(b.clone()));
+    let scope_b = board.scope();
+    // 同一份 rel，换了根就只能指向新根里面 —— 旧根那份不会还留在解析结果里
+    let err = super::fsrv::handle(&scope_b, "stat", r#"{"relPath":"readme.md"}"#).unwrap_err();
+    assert_eq!(err.0, "notfound", "旧根那份文件在新根里不存在，就该是读不到而不是读到旧内容");
+    assert!(super::fsrv::handle(&scope_b, "list", r#"{"relDir":""}"#).is_ok(), "新根自己照样可列");
+}
+
 #[test]
 fn 标签白名单与推送走完整加密链路() {
     use super::board::{open_id, Board, TabReport};

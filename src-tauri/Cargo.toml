@@ -38,9 +38,12 @@ tauri-plugin-process = "2"
 tauri-plugin-window-state = "2"
 regex = "1"
 rayon = "1"
+# 阶段 4 的桌面文件变更监听。**声明为直接依赖不新增编译产物** ——
+# notify 8.2.0 已随 tauri-plugin-fs（features= ["watch"]）在树里（实测 Cargo.lock），
+# 桌面侧本来就在跑同一个后端（`watchImmediate` 就是它的 RecommendedWatcher 递归监听）。
+notify = "8"
 
 [dev-dependencies]
-notify = "8"
 notify-debouncer-full = "0.6"
 
 [profile.release]

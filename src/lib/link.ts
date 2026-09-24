@@ -421,19 +421,20 @@ export function subscribePairRequests(cb: (r: LinkPairReq) => void): () => void 
 }
 
 /**
- * 订阅对端主动推的事件（阶段 3 起：桌面标签列表变了）。
- * 按类型分流由调用方做 —— 这里不认识 `tabs` 之外的任何类型，
- * 加一类推送不用改这一层（与 Rust 帧层「不认识具体命令」同一条分工）。
+ * 订阅对端主动推的事件（阶段 3 起：桌面标签列表变了；阶段 4 起：桌面文件变了）。
+ * 按类型分流与载荷解析都由调用方做 —— 这一层不认识任何具体类型的载荷形状，
+ * 加一类推送不用改这里（与 Rust 帧层「不认识具体命令」同一条分工）。
+ * `data` 原样带出：多数推送是空的（「变了，去重取」），只有 `fs` 那份带内容。
  */
-export function subscribeRemoteEvents(cb: (type: string) => void): () => void {
+export function subscribeRemoteEvents(cb: (type: string, data: string) => void): () => void {
   if (!isTauri) return () => {};
   let unlisten: (() => void) | null = null;
   let cancelled = false;
   void (async () => {
     const { listen } = await import('@tauri-apps/api/event');
-    const fn = await listen<{ type?: string }>(LINK_REMOTE_EVENT, e => {
+    const fn = await listen<{ type?: string; data?: string }>(LINK_REMOTE_EVENT, e => {
       const t = typeof e.payload?.type === 'string' ? e.payload.type : '';
-      if (t) cb(t);
+      if (t) cb(t, typeof e.payload?.data === 'string' ? e.payload.data : '');
     });
     if (cancelled) fn();
     else unlisten = fn;

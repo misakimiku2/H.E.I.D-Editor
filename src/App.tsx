@@ -35,6 +35,8 @@ import { localizeRemoteImages, collectRemoteImages, type LocalizeIo } from './li
 import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDoc';
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
+import { useRemoteFileChanges } from './hooks/useRemoteFileChanges';
+import { isRemotePath } from './lib/remote';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
 import { autoReconnectFromPrefs, autoStartFromPrefs } from './lib/link';
 import { LANGUAGE_LABELS, detectLanguageFromPath } from './lib/codemirror';
@@ -214,6 +216,29 @@ export default function App() {
     paths: watchedPaths,
     enabled: isTauri && !IS_ANDROID_APP,
     onExternalChange: handleExternalChange,
+  });
+
+  /* 打开着的远程文件被桌面改了（阶段 4）：与上面那条桌面外部修改**共用同一个入口**，
+     所以手机上看到的是同一条时间线、同一套采纳/忽略动作，不另造一种提示。
+     这里只多做一件事：把刚读到的哈希写回标签的基线 —— 不写的话，
+     用户接着改完再保存，会撞上一次本不该有的「桌面期间也改过」。 */
+  const remoteWatched = useMemo(
+    () =>
+      editor.tabs
+        .filter(t => isRemotePath(t.path))
+        .map(t => ({
+          path: t.path as string,
+          originalContent: t.originalContent,
+          baseHash: t.remoteBaseHash ?? '',
+        })),
+    [editor.tabs],
+  );
+  useRemoteFileChanges({
+    tabs: remoteWatched,
+    onExternalChange: (path, before, after, hash) => {
+      handleExternalChange(path, before, after);
+      editor.setTabs(prev => prev.map(t => (t.path === path ? { ...t, remoteBaseHash: hash } : t)));
+    },
   });
 
   const file = useFileActions({

@@ -583,8 +583,16 @@ function frameReader(sock) {
   return (timeoutMs = 5000) =>
     new Promise((res, rej) => {
       if (frames.length) return res({ payload: frames.shift() });
-      const t = setTimeout(() => rej(new Error('读取帧超时')), timeoutMs);
-      waiters.push((f) => { clearTimeout(t); res(f); });
+      /* 超时必须把 waiter 从队列里摘掉。留着它，下一帧会被交给这个已经 reject 的承诺
+         并就地丢掉 —— 于是"之后所有帧都看不见"。阶段 4 的判据要连着等好几轮空帧，
+         2026-09-24 就是这条把一次真能收到推送的链路读成了"0 帧"。 */
+      const w = (f) => { clearTimeout(t); res(f); };
+      const t = setTimeout(() => {
+        const i = waiters.indexOf(w);
+        if (i >= 0) waiters.splice(i, 1);
+        rej(new Error('读取帧超时'));
+      }, timeoutMs);
+      waiters.push(w);
     });
 }
 
@@ -1067,6 +1075,7 @@ async function stage3Tabs() {
   const up = await ask('read', { relPath: (ref ? ref.rel : '@w/000000000000/x').replace(/\/[^/]*$/, '/..') });
   ok('拿白名单引用往上跳一层被拒', up.ok === false, `${up.code ?? '放行了'}`);
   m3.close();
+
   log(`   （判定样本：${seen.map((x) => `${x.who}=[${x.list}]`).join(' → ')}）`);
   } finally {
     watchOn = false;
@@ -1086,6 +1095,189 @@ async function stage3Tabs() {
     try { await (m ?? back)?.invoke('link_server_stop'); } catch { /* */ }
     try { pair?.conn.destroy(); } catch { /* */ }
     for (const ses of [m, w2, m2]) { try { ses?.close(); } catch { /* */ } }
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+}
+
+/* ------------------------------------------------- 阶段 4：实时推送（真实应用当服务端） */
+
+/**
+ * I. 桌面改文件 → 手机端**没有请求在飞**也收到 event{fs}；换根 → event{rootChanged}。
+ *
+ * 这段不重复合并逻辑（那是 watch_probe 的六格数字与 Rust 单测管的），只验三条
+ * "只有跑着的应用才能证明"的事：
+ * 1. 监听确实**随连接**建起来 —— `sync_fs_watch` 全靠调用点，调用点漏了就是静默失灵；
+ * 2. 载荷形状与手机端的解析是同一个约定（`{"dirs":[…]}`，手机端拿它跟自己已展开的层求交）；
+ * 3. 逐层黑名单在真磁盘、真通知链路上挡住了 node_modules —— 挡不住的话一次 npm install
+ *    就是十几万条事件涌进推送队列。
+ *
+ * 共享根必须由**前端自己报**（换 localStorage 里的树根 + reload），不能只调 `link_set_root`：
+ * 暴露面按聚焦窗口取，前端下一次上报会把自己那一份盖回去。2026-09-24 这段第一次跑出来
+ * 满屏"收不到帧"，就是这个原因 —— 判据本身没错，错在"桌面在监听哪一棵树"根本不是我以为的那一棵。
+ */
+async function stage4Live() {
+  log('\n=== I. 阶段 4：桌面改文件 → 手机端收到 event{fs}；换根 → rootChanged ===');
+  /* 独立端口：47123/47124/47127 可能还留着上一轮的 TIME_WAIT（SO_EXCLUSIVEADDRUSE 会拒绑） */
+  const PORT = 47131;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'heid-stage4-'));
+  const root = path.join(base, 'tree');
+  const root2 = path.join(base, 'tree-after');
+  fs.mkdirSync(path.join(root, 'node_modules', 'pkg'), { recursive: true });
+  fs.mkdirSync(root2, { recursive: true });
+  fs.writeFileSync(path.join(root, 'ready.md'), '# 开场就有');
+
+  const m = await attach('main');
+  const savedRoot = await m.evalJs(`return localStorage.getItem('heid-tree-root')`);
+  /* 本机若记着「共享开着」，每次 reload 都会按记忆重新 bind —— 那会把本段的连接踢掉，
+     所以先关掉记忆、跑完还原（与 H 段同一处理） */
+  const savedPrefs = await m.evalJs(`return localStorage.getItem('heid-link-prefs')`);
+  await m.evalJs(`
+    const p = JSON.parse(localStorage.getItem('heid-link-prefs') || '{}');
+    p.enabled = false;
+    localStorage.setItem('heid-link-prefs', JSON.stringify(p));
+    return 1;`);
+  /** dev 的 #root 有空帧老毛病（vite 因 lockfile 变化重新预打包，首帧作废）：按秒级轮询补挂一次 */
+  const mount = async (why) => {
+    for (let i = 0; i < 40; i += 1) {
+      if (await m.evalJs('return document.getElementById("root")?.childElementCount ?? 0')) return true;
+      if (i === 3) await m.evalJs(`await import('/src/main.tsx'); return 1;`).catch(() => {});
+      await sleep(500);
+    }
+    return false;
+  };
+  /** 等前端把自己那棵树报成共享范围。报不到就别往下跑 —— 后面每一条都会以"静默"的形式失败 */
+  const rootIs = async (want) => {
+    const norm = (x) => String(x ?? '').replace(/[\\/]+$/, '').toLowerCase();
+    for (let i = 0; i < 40; i += 1) {
+      const st = await m.invoke('link_status');
+      if (norm(st.rootDisplay) === norm(want)) return true;
+      await sleep(250);
+    }
+    return false;
+  };
+  const swapRoot = async (to, why) => {
+    await m.evalJs(`localStorage.setItem('heid-tree-root', ${JSON.stringify(to)}); location.reload(); return 1;`);
+    await sleep(1200);
+    if (!await mount(why)) throw new Error(`${why}：应用没挂上`);
+    if (!await rootIs(to)) throw new Error(`${why}：前端没把它报成共享范围（rootDisplay 对不上）`);
+  };
+
+  let pair = null;
+  try {
+    await swapRoot(root, '换根到临时目录');
+    await m.invoke('link_server_start', { port: PORT });
+    ok('生效的共享根就是前端自己报的那一棵（fs 判据的前提）', await rootIs(root));
+    pair = await pairedPhone(m.invoke, PORT);
+    const next = frameReader(pair.conn);
+    let tx = 1, rx = 1;
+    const send = (msg) => {
+      writeFrame(pair.conn, seal(pair.keys.c2s, tx, Buffer.from(JSON.stringify({ seq: tx, msg }))));
+      tx += 1;
+    };
+    /* 收帧与解帧只用这一个计数器；对同一个 socket 另起一个 frameReader
+       会让两份缓冲各收到一遍帧，第二份从此每帧都解不开 */
+    const recv = async (timeoutMs = 700) => {
+      for (;;) {
+        const env = JSON.parse(open(pair.keys.s2c, rx, (await next(timeoutMs)).payload).toString());
+        rx += 1;
+        if (env.msg.t === 'ping') { send({ t: 'pong' }); continue; }
+        return env.msg;
+      }
+    };
+    /** 在 budget 内收某类事件帧；每一帧都打出来 —— 这段既判"该来的来了"也判"不该来的没来" */
+    const collect = async (budgetMs, type) => {
+      const got = [];
+      const until = Date.now() + budgetMs;
+      while (Date.now() < until) {
+        try {
+          const msg = await recv();
+          if (msg.t !== 'event') continue;
+          log(`   (event ${msg.type} data=${JSON.stringify(msg.data)})`);
+          if (msg.type === type) got.push(msg);
+        } catch (e) {
+          // 解密失败与"真的没帧"是两件事：前者说明计数器失步，之后每一帧都解不开
+          log(`   (读帧这轮没成：${String(e?.message ?? e).slice(0, 70)})`);
+        }
+      }
+      return got;
+    };
+    const dirsOf = (list) => list.flatMap((x) => {
+      try { return JSON.parse(x.data)?.dirs ?? []; } catch { return []; }
+    });
+    const askOnce = async (id, method, params) => {
+      send({ t: 'req', id, method, params: JSON.stringify(params ?? {}) });
+      for (;;) {
+        const msg = await recv(4000);
+        if (msg.t === 'res' && msg.id === id) return msg;
+      }
+    };
+
+    /* 1) 刚连上：连接本身不该顺手推一帧 fs */
+    ok('连上之后没有凭空发出的 fs 帧', (await collect(1200, 'fs')).length === 0);
+
+    /* 2) 桌面改一个文件 —— 手机端一个请求都没发，就该看见它所在的那一层 */
+    const stBefore = await m.invoke('link_status');
+    log(`   (改文件之前：connected=${stBefore.connected} peerAddr=${stBefore.peerAddr} 我这条 socket 的本地端口=${pair.conn.localPort} rootDisplay=${stBefore.rootDisplay})`);
+    fs.writeFileSync(path.join(root, 'ready.md'), '# 桌面刚改的');
+    const stAfter = await m.invoke('link_status');
+    log(`   (改完之后：connected=${stAfter.connected} peerAddr=${stAfter.peerAddr} 我这条=${pair.conn.localPort} err=${stAfter.lastError})`);
+    const e1 = await collect(4000, 'fs');
+    ok('桌面改文件后，手机端在没有在飞请求的情况下收到 event{fs}', e1.length >= 1, `${e1.length} 帧`);
+    /* 不写"一次写入正好一帧"：实测一次 writeFileSync 在 Windows 上会分成几条通知
+       （创建、写数据、关闭时补尺寸/时间戳），彼此间隔能越过一个合并窗口 → 3 帧。
+       真正要盯的是"没有第二份监听在推"，那由后面「换根之后旧根不再推帧」那条夹住。 */
+    ok('一次写入只推个位数帧、且每帧都是同一份目录（不是每个通知一帧新内容）',
+      e1.length <= 4 && new Set(e1.map((x) => x.data)).size <= 2,
+      `${e1.length} 帧 / ${new Set(e1.map((x) => x.data)).size} 种载荷`);
+    ok('根目录下的变更报的是 ""（与手机端 makeRemotePath 的根同一个值）',
+      dirsOf(e1).includes(''), JSON.stringify(dirsOf(e1)));
+    ok('载荷里不混文件名（手机端按目录求交，文件名进了也没人用）',
+      dirsOf(e1).every((x) => x === '' || x.split('/').every((seg) => !/\.[a-z0-9]+$/i.test(seg))),
+      JSON.stringify(dirsOf(e1)));
+
+    /* 3) 子目录里的变更报的是那一层的相对路径 —— 手机端就是拿它跟已展开的层求交 */
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    await collect(900, 'fs');
+    fs.writeFileSync(path.join(root, 'src', 'live.md'), '# 子目录里改的');
+    const e2 = await collect(4000, 'fs');
+    ok('子目录里的变更按 src 这一层报上来', dirsOf(e2).includes('src'), JSON.stringify(dirsOf(e2)));
+
+    /* 4) 逐层黑名单：40 次写入进 node_modules/pkg，一帧都不该有 */
+    for (let i = 0; i < 40; i += 1) fs.writeFileSync(path.join(root, 'node_modules', 'pkg', `f${i}.js`), 'export default 1\n');
+    const storm = await collect(1800, 'fs');
+    ok('node_modules 里的 40 次写入不产生任何 fs 帧（一次 npm install 不会涌进推送队列）',
+      storm.length === 0, `${storm.length} 帧：${JSON.stringify(dirsOf(storm))}`);
+    /* 风暴之后主路还在：过滤器只是滤掉它，没把监听一起带走 */
+    fs.writeFileSync(path.join(root, 'src', 'live.md'), '# 又改一次');
+    const afterStorm = await collect(4000, 'fs');
+    ok('依赖风暴之后 src 的变更照样推得到', dirsOf(afterStorm).includes('src'), JSON.stringify(dirsOf(afterStorm)));
+
+    /* 5) 换根（仍走前端上报那条路）：手机端要收到 rootChanged，监听与命令面都要挪过去 */
+    await swapRoot(root2, '换根到第二棵');
+    const moved = await collect(6000, 'rootChanged');
+    ok('桌面换根 → 手机端收到 event{rootChanged}', moved.length >= 1, `${moved.length} 帧`);
+    const listed = await askOnce(91, 'list', { relDir: '' });
+    ok('换根之后命令面也挪到新根（新根列得出来）', listed.ok === true, `${listed.code ?? ''}`);
+    fs.mkdirSync(path.join(root2, 'fresh'), { recursive: true });
+    await collect(900, 'fs');
+    fs.writeFileSync(path.join(root2, 'fresh', 'n.md'), '新根里写的');
+    const onNew = await collect(4000, 'fs');
+    ok('新根里的变更按新根的相对路径报', dirsOf(onNew).includes('fresh'), JSON.stringify(dirsOf(onNew)));
+    /* 旧根已经不在暴露面里：它再变也不该推给手机端 */
+    fs.writeFileSync(path.join(root, 'src', 'live.md'), '# 旧根又改了');
+    const onOld = await collect(1500, 'fs');
+    ok('换根之后旧根不再推帧', onOld.length === 0, JSON.stringify(dirsOf(onOld)));
+  } finally {
+    try { await m.invoke('link_server_stop'); } catch { /* */ }
+    try { pair?.conn.destroy(); } catch { /* */ }
+    /* 树根与"记住开着共享"那条还原回去，再 reload —— 这段是借用户的应用在测，不该留下痕迹 */
+    try {
+      await m.evalJs(`
+        ${savedRoot ? `localStorage.setItem('heid-tree-root', ${JSON.stringify(savedRoot)})` : `localStorage.removeItem('heid-tree-root')`};
+        ${savedPrefs ? `localStorage.setItem('heid-link-prefs', ${JSON.stringify(savedPrefs)})` : `localStorage.removeItem('heid-link-prefs')`};
+        location.reload(); return 1;`);
+    } catch { /* 页面可能正在导航，下一段自己会 attach 到新页面 */ }
+    m.close();
     fs.rmSync(base, { recursive: true, force: true });
   }
 }
@@ -1117,7 +1309,11 @@ try {
   await safe('B 应用当客户端', () => appAsClient(invoke));
   await safe('C 指纹不符', () => wrongFp(invoke));
   await safe('D 未登记 keyId', () => unknownKeyId(invoke));
-  /* 放最后：这段会换用户的文件树根并 reload 页面，跑在前面对象就变了 */
+  /* I 段自己会把前端的树根换成临时目录并 reload，放在 H 前面；两段都会换根，
+     谁在后面对象就变了，所以 H 仍然排最后。 */
+  await safe('I 阶段 4 实时推送', () => stage4Live());
+  /* 放最后：这段会换用户的文件树根并 reload 页面，跑在前面对象就变了。
+     跑之前先让应用把会话恢复完 —— 基线读到"没有标签"而中途又冒出几个，判据就全歪了。 */
   await safe('H 阶段 3 标签与聚焦', () => stage3Tabs());
 } finally {
   try { await invoke('link_server_stop'); } catch { /* */ }
