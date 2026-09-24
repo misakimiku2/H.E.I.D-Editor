@@ -24,6 +24,8 @@ interface SettingsDialogProps {
   asPage?: boolean;
   /** 设备互联里「浏览这台电脑的文件」：转发给 App 去开文件树 */
   onBrowseRemote?: (rootPath: string) => void;
+  /** 设备互联里「电脑上正打开的文件」某一行：转发给 App 按路径开标签（阶段 3） */
+  onOpenRemoteFile?: (path: string) => void;
 }
 
 /**
@@ -171,7 +173,7 @@ function ThemeCard({ theme, selected, isDarkMode, onSelect }: {
   );
 }
 
-export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage, onBrowseRemote }: SettingsDialogProps) {
+export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage, onBrowseRemote, onOpenRemoteFile }: SettingsDialogProps) {
   const t = useT();
 
   useEffect(() => {
@@ -524,7 +526,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
           ))}
 
           {sectionNode(Usb, t('settings.section.deviceLink'), (
-            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} onBrowseRemote={onBrowseRemote} />
+            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} onBrowseRemote={onBrowseRemote} onOpenRemoteFile={onOpenRemoteFile} />
           ))}
         </div>
 

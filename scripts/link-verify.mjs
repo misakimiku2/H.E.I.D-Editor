@@ -49,8 +49,8 @@ function withTimeout(promise, ms, label) {
 
 /* ---------------------------------------------------------------- CDP */
 
-async function cdpSession() {
-  const { WebSocket } = await import(pathToFileURL(`${REPO}/node_modules/ws/wrapper.mjs`).href);
+/** 当前所有页面 target（多窗口时每个文档窗各一个，URL 全是同一个 localhost，只能按 label 分） */
+async function listPages() {
   const targets = await withTimeout(new Promise((res, rej) => {
     http.get({ host: '127.0.0.1', port: CDP_PORT, path: '/json' }, (r) => {
       let s = '';
@@ -58,9 +58,29 @@ async function cdpSession() {
       r.on('end', () => res(JSON.parse(s)));
     }).on('error', rej);
   }), 8000, '取 CDP /json 列表');
-  const pages = targets.filter((t) => t.type === 'page');
-  const page = pages.find((t) => /localhost:\d+/.test(t.url)) || pages[0];
-  if (!page) throw new Error('没有 page target：' + targets.map((t) => t.url).join(', '));
+  return targets.filter((t) => t.type === 'page');
+}
+
+/** 连到指定窗口（'main' / 'win-N'）：逐个 target 试，用页面自己的 Tauri 元数据认领标签。
+    标题不可靠 —— 标题跟着激活文档变，两个窗口可能同名。 */
+async function attach(label, tries = 20) {
+  for (let i = 0; i < tries; i += 1) {
+    for (const p of await listPages()) {
+      let s = null;
+      try {
+        s = await openPage(p);
+        const got = await s.evalJs('return window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? ""');
+        if (got === label) return s;
+      } catch { /* 这个 target 可能正在导航，下一轮再试 */ }
+      s?.close();
+    }
+    await sleep(400);
+  }
+  throw new Error(`找不到窗口标签为 ${label} 的页面 target`);
+}
+
+async function openPage(page) {
+  const { WebSocket } = await import(pathToFileURL(`${REPO}/node_modules/ws/wrapper.mjs`).href);
   const ws = new WebSocket(page.webSocketDebuggerUrl, { perMessageDeflate: false });
   await withTimeout(new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); }), 8000, '连 CDP ws');
   let id = 0;
@@ -441,7 +461,7 @@ async function stage2Files(invoke) {
   const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
   await invoke('link_server_start', { port: PORT });
-  const st = await invoke('link_set_root', { path: root });
+  const st = await invoke('link_set_root', { label: 'main', path: root });
   const norm = (x) => String(x ?? '').replace(/[\\/]+$/, '').toLowerCase();
   ok('共享范围明示给前端（设置面板要显示它）', norm(st.rootDisplay) === norm(root), `rootDisplay=${st.rootDisplay}`);
   const pair = await pairedPhone(invoke, PORT);
@@ -462,6 +482,8 @@ async function stage2Files(invoke) {
       const env = JSON.parse(open(pair.keys.s2c, rx, f.payload).toString());
       rx += 1;
       if (env.msg.t === 'ping') { send({ t: 'pong' }); continue; }
+      /* 阶段 3 起桌面会随时推 event：它不是对任何请求的回答，跳过而不是判死 */
+      if (env.msg.t === 'event') continue;
       if (env.msg.t === 'res' && env.msg.id === id) {
         return { ...env.msg, data: env.msg.data ? JSON.parse(env.msg.data) : null };
       }
@@ -531,7 +553,7 @@ async function stage2Files(invoke) {
   const unknown = await ask('delete', {});
   ok('命令面之外的方法被拒', unknown.ok === false && unknown.code === 'unknown');
 
-  await invoke('link_set_root', { path: null });
+  await invoke('link_set_root', { label: 'main', path: null });
   const noroot = await ask('list', { relDir: '' });
   ok('清除共享范围后一律拒答（noroot）', noroot.ok === false && noroot.code === 'noroot');
 
@@ -674,13 +696,409 @@ async function appAsClientFiles(invoke) {
   await invoke('link_client_disconnect');
 }
 
+/* ------------------------- 阶段 3：标签上报、聚焦窗口判定与 event 推送 */
+
+/** 点某个窗口里的「文件树」开关，再点指定文件那一行 —— 走的是用户那条路，
+    于是应用自己的上报回路（useTabReport → link_report_tabs）被真正跑到。
+    开关是**翻转**而不是"打开"（`handleToggleTree`），所以抽屉已经开着就不要再点它。 */
+async function openFileViaTree(s, file) {
+  const toggled = await s.evalJs(`
+    if (document.querySelector('.heid-tree-row')) return 'already';
+    const want = ['文件树', 'File Tree'];
+    const b = [...document.querySelectorAll('button')]
+      .find(x => want.includes((x.getAttribute('title') || x.getAttribute('aria-label') || '').trim()));
+    if (!b) return 'NO-TOGGLE:' + [...document.querySelectorAll('button')]
+      .map(x => (x.getAttribute('title') || x.getAttribute('aria-label') || '').trim()).filter(Boolean).slice(0, 12).join(',');
+    b.click(); return 'ok';`);
+  if (toggled !== 'ok' && toggled !== 'already') throw new Error(`找不到文件树开关：${toggled}`);
+  const clicked = await s.evalJs(`
+    const sel = '.heid-tree-row[title$="${file}"]';
+    for (let i = 0; i < 40; i++) {
+      const row = document.querySelector(sel);
+      if (row) { row.click(); return 'ok'; }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return 'NO-ROW:' + [...document.querySelectorAll('.heid-tree-row')].map(n => n.title).slice(0, 8).join(',');`);
+  if (clicked !== 'ok') throw new Error(`文件树里没有 ${file}：${clicked}`);
+  /* 点开之后标签条要等一次文件读完才多出一格，所以轮询而不是立刻看 ——
+     立刻看会把"刚点下去"误判成"没开成"。 */
+  const stem = file.replace(/\.[a-z0-9]+$/i, '');
+  let grew = false;
+  for (let i = 0; i < 25 && !grew; i += 1) {
+    grew = await s.evalJs(`return [...document.querySelectorAll('[data-tab-id]')].some(n => (n.textContent || '').includes(${JSON.stringify(stem)}))`);
+    if (!grew) await new Promise((r) => setTimeout(r, 120));
+  }
+  if (!grew) throw new Error(`点了 ${file} 但桌面上没出现这个标签（先查是不是没开成，再查有没有上报）`);
+}
+
+/** 等这个窗口的标签条安定下来：启动时的会话恢复是异步的（要重读磁盘），
+    不等它就会把"恢复完成"当成"我刚点开了文件"，判据整个错位。 */
+async function settleTabs(s, tries = 25) {
+  let last = null;
+  let same = 0;
+  for (let i = 0; i < tries; i += 1) {
+    const cur = await s.evalJs(`return [...document.querySelectorAll('[data-tab-id]')].map(n => (n.textContent || '').trim()).join('|')`);
+    if (cur === last) { same += 1; if (same >= 3) return cur; } else { same = 0; last = cur; }
+    await sleep(400);
+  }
+  return last;
+}
+
+/** 这个窗口是不是 Tauri 认定的聚焦窗口。
+    不能用 `document.hasFocus()` —— WebView2 在窗口失活后仍然报告文档有焦点，
+    实测过一次：手机上看到的明明是新建那个窗口的列表，主窗口的 hasFocus 却还是 true，
+    照着它判就把一条正确的实现判成 bug。 */
+const isFocused = (s, label) =>
+  s.invoke('plugin:window|is_focused', { label }).then((v) => v === true).catch(() => false);
+
+/**
+ * 把这一段测试要依赖的应用状态归位。
+ *
+ * 上一轮中途失败会留下两类脏东西，都会把下一轮的判据错位：
+ * - 多开的文档窗口还活着 —— 共享根按**聚焦窗口**取，聚焦的若是残留的 win-N，
+ *   A–G 段手动设的主窗口根就根本不参与判定（表现为"命令面全拒"却看不出为什么）；
+ * - 树根 / 会话里指向我临时目录的条目 —— 我的临时目录会被删掉，那些路径当场变成死标签。
+ */
+async function normalizeAppState() {
+  /* 以「label 是 main 的那个页面」为基准，而不是 /json 的第一个 target —— 上一轮残留的
+     win-N 常常才是第一个 target，拿它当主窗口就会去关自己，之后每次求值都超时。 */
+  const ses = await attach('main');
+  const me = await ses.evalJs('return window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? ""');
+  for (let i = 1; i <= 8; i += 1) {
+    const label = `win-${i}`;
+    if (label === me) continue;
+    try { await ses.invoke('plugin:window|close', { label }); } catch { /* 没有这个窗口 */ }
+  }
+  const root = await ses.evalJs(`return localStorage.getItem('heid-tree-root')`);
+  const dirty = String(root ?? '').includes('heid-stage3-');
+  if (dirty) {
+    ok('桌面树根不是上一次运行遗留的临时目录', false, `heid-tree-root=${root}`);
+    await ses.evalJs(`localStorage.removeItem('heid-tree-root'); return 1;`);
+  }
+  const dropped = await ses.evalJs(`
+    const k = 'heid-session';
+    const raw = localStorage.getItem(k);
+    if (!raw) return 0;
+    const st = JSON.parse(raw);
+    const n = (st.tabs || []).length;
+    st.tabs = (st.tabs || []).filter((t) => !String(t.path || '').includes('heid-stage3-'));
+    if (n !== st.tabs.length) localStorage.setItem(k, JSON.stringify(st));
+    return n - st.tabs.length;`);
+  if (dropped) log(`main: 丢掉 ${dropped} 个遗留的临时目录标签`);
+  /* 无条件重载主窗口：残留窗口关干净之后，看板里就只剩"主窗口报的那一份"。
+     不重置的话，上一轮残留窗口的空标签列表会一直当聚焦窗口用，
+     手机看到空列表而桌面明明开着四个标签 —— 后面每条判据都白测。 */
+  await ses.evalJs(`location.reload(); return 1;`);
+  for (let i = 0; i < 30; i += 1) {
+    await sleep(500);
+    const n = await ses.evalJs('return document.querySelectorAll("button").length');
+    if (n) break;
+    if (i === 4) await ses.evalJs(`await import('/src/main.tsx'); return 1;`).catch(() => {});
+  }
+  return ses;
+}
+
+async function stage3Tabs() {
+  log('\n=== H. 阶段 3：两个窗口的聚焦判定、标签上报回路与 event 推送 ===');
+  /* 又一个独立端口：F/G 跑完后 47123/47124 可能还留着 TIME_WAIT（SO_EXCLUSIVEADDRUSE 会拒绑） */
+  const PORT = 47127;
+  /* 文件名带一次运行的唯一后缀：桌面上次运行留下的会话里不可能有它，
+     "我点开的那个是新出现的"这条判据才在重跑时依然成立 */
+  const TAG = Date.now().toString(36);
+  const A = `a-${TAG}.md`;
+  const B = `b-${TAG}.md`;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'heid-stage3-'));
+  const root = path.join(base, 'tree');
+  fs.mkdirSync(root);
+  fs.writeFileSync(path.join(root, A), '# alpha');
+  fs.writeFileSync(path.join(root, B), '# beta');
+
+  /* 用户自己的树根与标签会话先存下来，跑完原样还回去 —— 这段测试不改他的应用状态。
+     顺手把上一次失败遗留的"指向临时目录的标签"从会话里剔掉：留着它，这一轮的
+     "我点开的是个新文件"判据就不成立了，而且那本来就是我造的脏数据。 */
+  const first = await attach('main');
+  await first.evalJs(`
+    const k = 'heid-session';
+    const raw = localStorage.getItem(k);
+    if (!raw) return 0;
+    const st = JSON.parse(raw);
+    const n = (st.tabs || []).length;
+    st.tabs = (st.tabs || []).filter((t) => !String(t.path || '').includes('heid-stage3-'));
+    localStorage.setItem(k, JSON.stringify(st));
+    return n - st.tabs.length;`);
+  const savedRoot = await first.evalJs(`return localStorage.getItem('heid-tree-root')`);
+  const savedSession = await first.evalJs(`return localStorage.getItem('heid-session')`);
+  /* 本机若记着「共享开着」，主窗口每次 reload 都会按记忆重新 bind（这正是 2026-09-23 定的
+     记忆开关该做的事）。本段自己起监听，所以先把记忆关掉、跑完还原 ——
+     否则换根那一步的 reload 会把服务端抢到默认端口上，把我这条测试连接踢掉。 */
+  const savedPrefs = await first.evalJs(`return localStorage.getItem('heid-link-prefs')`);
+  await first.evalJs(`
+    const p = JSON.parse(localStorage.getItem('heid-link-prefs') || '{}');
+    p.enabled = false;
+    localStorage.setItem('heid-link-prefs', JSON.stringify(p));
+    return 1;`);
+  first.close();
+
+  /* 中途抛错也必须还回去：上一轮失败没清干净时，遗留在会话里的标签
+     会变成下一轮的"桌面本来就开着它"，把判据整个污染掉。 */
+  let m = null, w2 = null, m2 = null, pair = null;
+  let watchOn = true;
+  const reloadedAtClock = { value: 0 };
+  try {
+
+  /* 把树根换成临时目录并刷新页面：换完之后 rootDisplay 应当自己变成它 ——
+     这一步验的是"应用主动报根"那条回路，不是脚本手动 invoke 出来的结果 */
+  await (await attach('main')).evalJs(
+    `localStorage.setItem('heid-tree-root', ${JSON.stringify(root)}); location.reload(); return 1;`,
+  );
+  reloadedAtClock.value = Date.now();
+  await sleep(1200);
+    m = await attach('main');
+  /* dev 的 #root 有空帧老毛病（vite 因 lockfile 变化重新预打包依赖，把首帧作废）。
+     一行补挂 import('/src/main.tsx')；挂载要等 vite 现编整张依赖图，按秒级轮询而不是猜一个数。 */
+  for (let i = 0; i < 40; i += 1) {
+    const kids = await m.evalJs('return document.getElementById("root")?.childElementCount ?? 0');
+    if (kids) break;
+    if (i === 3) await m.evalJs(`await import('/src/main.tsx'); return 1;`);
+    await sleep(500);
+  }
+  const mounted = await m.evalJs('return document.querySelectorAll("button").length');
+  if (!mounted) throw new Error(`应用没挂上：#root=${await m.evalJs('return document.getElementById("root")?.innerHTML?.slice(0,60)')}`);
+
+  await m.invoke('link_server_start', { port: PORT });
+  let st = null;
+  for (let i = 0; i < 30; i += 1) {
+    st = await m.invoke('link_status');
+    const norm = (x) => String(x ?? '').replace(/[\\/]+$/, '').toLowerCase();
+    if (norm(st.rootDisplay) === norm(root)) break;
+    await sleep(200);
+  }
+  const norm = (x) => String(x ?? '').replace(/[\\/]+$/, '').toLowerCase();
+  ok('桌面自己把本窗口的树根报成共享范围（无人手动 invoke）',
+    norm(st?.rootDisplay) === norm(root), `rootDisplay=${st?.rootDisplay}`);
+
+    pair = await pairedPhone(m.invoke, PORT);
+  const next = frameReader(pair.conn);
+  let tx = 1, rx = 1, idc = 0;
+  const send = (msg) => {
+    writeFrame(pair.conn, seal(pair.keys.c2s, tx, Buffer.from(JSON.stringify({ seq: tx, msg }))));
+    tx += 1;
+  };
+  /** 解一帧成 Msg（心跳就地回 pong，不冒泡给调用方）。超时向上抛，由调用方决定怎么办。 */
+  const recvMsg = async (timeoutMs = 8000) => {
+    for (;;) {
+      const env = JSON.parse(open(pair.keys.s2c, rx, (await next(timeoutMs)).payload).toString());
+      rx += 1;
+      if (env.msg.t === 'ping') { send({ t: 'pong' }); continue; }
+      return env.msg;
+    }
+  };
+  const ask = async (method, params) => {
+    const id = ++idc;
+    send({ t: 'req', id, method, params: JSON.stringify(params ?? {}) });
+    for (;;) {
+      const msg = await recvMsg();
+      if (msg.t === 'event') continue; // 推送随时可能夹进来，不该打断一次请求
+      if (msg.t === 'res' && msg.id === id) {
+        return { ...msg, data: msg.data ? JSON.parse(msg.data) : null };
+      }
+      throw new Error(`等 res(${id}) 时收到 ${JSON.stringify(msg)}`);
+    }
+  };
+  /** 手机看到的列表（rel 数组）。共享根内的条目就是相对路径，根外的是 `@w/…` */
+  const rels = async () => (await ask('tabs')).data ?? [];
+  const joined = (list) => list.map((x) => x.rel).filter(Boolean).sort().join(',');
+  const has = (list, f) => list.some((x) => x.rel === f);
+  const hasOpenOf = (list, f) => list.some((x) => x.rel.startsWith('@w/') && x.rel.endsWith(`/${f}`));
+
+  /* 桌面上此刻还开着用户上次留下的标签（会话恢复），所以判据一律是
+     "我点开的这个在不在 / 不在"，不做整份列表相等 —— 那样会把别人的文件算成失败。 */
+  const seen = [];
+  /* 手机看到的列表什么时候算安定：距最近一次 reload 至少 3.5 秒（会话恢复要重读磁盘），
+     并且连续两次读到的内容一致。只看 DOM 标签条不行 —— "一个标签都没有"也是稳定态，
+     会在恢复完成之前就提前返回，把空列表当成基线。 */
+  const settlePhoneList = async (sinceReload, tries = 14) => {
+    while (Date.now() < sinceReload + 3500) await sleep(300);
+    let prev = joined(await rels());
+    for (let i = 0; i < tries; i += 1) {
+      await sleep(700);
+      const now = joined(await rels());
+      if (now === prev) return now;
+      prev = now;
+    }
+    return prev;
+  };
+
+  // 状态监视：Bye 只可能来自 link_server_stop / link_client_disconnect / 又一次 server_start
+  // （replace_stop 会踢掉正在跑的那台）。与其猜是哪条，不如把每次端口与连接状态的变化都记下来。
+  let lastSnap = '';
+  void (async () => {
+    while (watchOn) {
+      try {
+        const x = await m.invoke('link_status');
+        const now = `${x.port}/${x.listening ? 'L' : '-'}/${x.connected ? 'C' : '-'}`;
+        if (now !== lastSnap) { log(`   (status -> ${now} err=${x.lastError})`); lastSnap = now; }
+      } catch { return; }
+      await sleep(300);
+    }
+  })();
+  const before = await rels().then(async (x) => { await settlePhoneList(reloadedAtClock.value); return x; });
+  log(`   （基线=[${joined(before)}]）`);
+  ok('未点开的文件不在列表里（暴露的是开着的标签，不是整个磁盘）',
+    !has(before, A) && !hasOpenOf(before, A), `基线=[${joined(before)}]`);
+
+  /* event 推送：桌面点开一个文件，手机端**没有**任何请求在飞，应当收到一帧 event。
+     注意这里绝不能用 `next()` 裸取一帧不解密 —— 接收计数器与实际流一旦错开，
+     之后每一帧都解不开（nonce 与流顺序是绑死的）。 */
+  await openFileViaTree(m, A);
+  let pushed = null;
+  const pushUntil = Date.now() + 6000;
+  while (Date.now() < pushUntil && !pushed) {
+    try {
+      const msg = await recvMsg(1200);
+      if (msg.t === 'event') pushed = msg.type;
+    } catch { /* 这一轮没来，继续等 */ }
+  }
+  ok('桌面点开标签后，手机端在没有在飞请求的情况下收到 event{type:tabs}', pushed === 'tabs', String(pushed));
+  await settleTabs(m);
+  const withAlpha = await rels();
+  if (!has(withAlpha, A)) {
+    log(`   （桌面上的标签条：${await m.evalJs(`return [...document.querySelectorAll('[data-tab-id]')].map(n => (n.textContent || '').trim()).join('|')`)}；文件树行：${await m.evalJs(`return [...document.querySelectorAll('.heid-tree-row')].slice(0,6).map(n => n.title).join('|')`)}）`);
+  }
+  ok('点开的文件出现在手机端的列表里（根内 → 相对路径，不给 @w）',
+    has(withAlpha, A), `列表=[${joined(withAlpha)}]`);
+
+  /* 桌面那行"另外暴露了 N 个"必须与手机真正看到的 @w 条目数一致，否则明示就是假的 */
+  const stAfter = await m.invoke('link_status');
+  const openOnPhone = withAlpha.filter((x) => x.rel.startsWith('@w/')).length;
+  ok('桌面明示的根外文件数 = 手机端拿到的 @w 条目数',
+    stAfter.openShared === openOnPhone, `status=${stAfter.openShared}，手机=${openOnPhone}`);
+  ok('根外条目都带得上文件名（手机端要靠它做标题与语言判定）',
+    withAlpha.filter((x) => x.rel.startsWith('@w/')).every((x) => /\.[a-z0-9]+$/i.test(x.rel)),
+    joined(withAlpha));
+
+  /* 第二个窗口：它自己开一个不同的文件。两份列表不同，聚焦判定才叫被检验过 */
+  const dump = async (why) => {
+    const one = async (ses, tag) => {
+      if (!ses) return `${tag}=无`;
+      try {
+        const st = await ses.invoke('link_status');
+        return `${tag}: port=${st.port} listening=${st.listening} connected=${st.connected} err=${st.lastError}`;
+      } catch (e) { return `${tag} 取不到状态：${String(e?.message ?? e).slice(0, 60)}`; }
+    };
+    log(`   （诊断 ${why}）`);
+    log(`     ${await one(m, 'main')}`);
+    log(`     ${await one(w2, '新窗口')}`);
+  };
+  const openBefore = (await m.invoke('link_status')).openShared;
+  let label2 = '';
+  try {
+    label2 = await m.invoke('create_document_window', {
+      source: 'main', payload: { kind: 'session', state: { tabs: [], activePath: null } }, drop: null,
+    });
+  } catch (e) { await dump('建窗失败'); throw e; }
+  w2 = await attach(label2);
+  try {
+    await settleTabs(w2);
+    await openFileViaTree(w2, B);
+  } catch (e) { await dump('第二窗口那一段'); throw e; }
+  await sleep(1800);
+
+  /* B 与 A 一样在临时根之内，所以「根外额外暴露数」不该因为多开一个窗口而变化。
+     这一条盯的是那个计数的**含义**：它报的是"根外多交出去几个"，不是"开了几个标签"。 */
+  const openWithWin2 = (await m.invoke('link_status')).openShared;
+  ok('在根内再开一个标签不会虚增「根外额外暴露」计数',
+    openWithWin2 === openBefore, `${openBefore} -> ${openWithWin2}`);
+
+  const afterCreate = await rels().catch(async (e) => { await dump('新建窗口后取列表'); throw e; });
+  /* 聚焦判据：能测出"哪一个在前台"就按 §6.1 的字面判据断言。两个都不在前台
+     （焦点在我这边的终端上）时不硬判，改判这一对可观察事实 —— 新建窗口把列表换成了
+     那一份窗口的、关掉它又落回来；弱一档，但仍然是真判据，并且如实标出来。 */
+  const fNew = await isFocused(w2, label2);
+  const fMain = await isFocused(m, 'main');
+  if (fNew !== fMain) {
+    const who = fNew ? label2 : 'main';
+    ok('手机看到的正是聚焦那份窗口的标签',
+      has(afterCreate, fNew ? B : A) && !has(afterCreate, fNew ? A : B),
+      `列表=[${joined(afterCreate)}]，聚焦=${who}`);
+    seen.push({ who, list: joined(afterCreate) });
+  } else {
+    log('   （两个窗口都不在前台，聚焦判据降级为「新建即切换 + 关窗回落」这一对）');
+    ok('新建窗口把手机看到的列表换成了那一份窗口的', has(afterCreate, B) && !has(afterCreate, A),
+      `列表=[${joined(afterCreate)}]`);
+    seen.push({ who: label2, list: joined(afterCreate) });
+  }
+
+  await w2.invoke('plugin:window|close', { label: label2 });
+  await sleep(1800);
+  const afterClose = await rels();
+  ok('关掉那个窗口后列表落回还活着的那份（不是空列表）',
+    has(afterClose, A) && !has(afterClose, B), `列表=[${joined(afterClose)}]`);
+  seen.push({ who: 'main', list: joined(afterClose) });
+  /* 「只测单窗口等于没测」：第二份窗口列表若从未在手机上出现过，上面两条判定就是白过的 */
+  ok('本段确实检验过窗口之间的切换（手机见过第二个窗口那份列表）',
+    seen.some((x) => x.list.includes(B)), seen.map((x) => `${x.who}=[${x.list}]`).join(' → '));
+
+  /* 白名单的端到端一读：换一个根再报一次，原来那个"根内"的标签这一刻就落到根外了。
+     手机上必须能凭 @w 引用把它读出来 —— 这条走的是跑着的应用，不是 Rust 单测里的替身。 */
+  const other = path.join(base, 'other-root');
+  fs.mkdirSync(other, { recursive: true });
+  reloadedAtClock.value = Date.now();
+  await m.evalJs(`localStorage.setItem('heid-tree-root', ${JSON.stringify(other)}); location.reload(); return 1;`);
+  const m3 = await attach('main');
+  for (let i = 0; i < 30; i += 1) {
+    if (await m3.evalJs('return document.querySelectorAll("button").length')) break;
+    if (i === 4) await m3.evalJs(`await import('/src/main.tsx'); return 1;`).catch(() => {});
+    await sleep(500);
+  }
+  await settlePhoneList(reloadedAtClock.value);
+  const moved = await rels();
+  const ref = moved.find((x) => x.rel.startsWith('@w/') && x.rel.endsWith(`/${A}`));
+  ok('换根之后，原来那个标签改由白名单引用寻址', !!ref, `列表=[${joined(moved)}]`);
+  const read = ref ? await ask('read', { relPath: ref.rel }) : { ok: false, code: 'norel' };
+  ok('手机端凭白名单引用读到桌面上的那份内容（逐字）',
+    read.ok === true && read.data?.text === '# alpha', `${read.ok ? 'ok' : read.code}`);
+  const stMoved = await m3.invoke('link_status');
+  /* 换到空根之后，原来"根内"的那个标签落到根外：额外暴露恰好 +1
+     （用户自己那几个根外标签本来就在数里，所以判差分而不是判绝对值） */
+  ok('换根把那个标签推到根外后，额外暴露数如实 +1',
+    stMoved.openShared === openBefore + 1, `${openBefore} -> ${stMoved.openShared}`);
+  /* 白名单只给"确实开着的那一个文件"：拿它的引用往上跳一层必须被拒 */
+  const up = await ask('read', { relPath: (ref ? ref.rel : '@w/000000000000/x').replace(/\/[^/]*$/, '/..') });
+  ok('拿白名单引用往上跳一层被拒', up.ok === false, `${up.code ?? '放行了'}`);
+  m3.close();
+  log(`   （判定样本：${seen.map((x) => `${x.who}=[${x.list}]`).join(' → ')}）`);
+  } finally {
+    watchOn = false;
+    /* 树根与标签会话原样还回去，再把测试点开过的标签从用户的会话里抹掉 */
+    const back = m2 ?? m ?? w2;
+    if (back) {
+      const js = `localStorage.setItem('heid-tree-root', ${JSON.stringify(savedRoot ?? '')});
+        ${savedSession === null ? `localStorage.removeItem('heid-session')` : `localStorage.setItem('heid-session', ${JSON.stringify(savedSession)})`};
+        location.reload(); return 1;`;
+      try { await back.evalJs(js); } catch { /* 页面可能正在导航，下一段用例自己会 attach 到新页面 */ }
+    }
+    try {
+      await back?.evalJs(`
+        ${savedPrefs === null ? `localStorage.removeItem('heid-link-prefs')` : `localStorage.setItem('heid-link-prefs', ${JSON.stringify(savedPrefs)})`};
+        return 1;`);
+    } catch { /* */ }
+    try { await (m ?? back)?.invoke('link_server_stop'); } catch { /* */ }
+    try { pair?.conn.destroy(); } catch { /* */ }
+    for (const ses of [m, w2, m2]) { try { ses?.close(); } catch { /* */ } }
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+}
+
 /* ---------------------------------------------------------------- main */
 
 // 兜底看门狗：无论如何 100 秒内退出，免得某个 await 卡住把 dev 拖住
 setTimeout(() => { log('\nWATCHDOG: 超时，强制退出'); process.exit(2); }, 180_000).unref();
 
 log('main: 连接 CDP…');
-const { invoke, evalJs, close } = await cdpSession();
+/* 先归位再取会话：归位会关掉上一轮残留的文档窗口，而 /json 的第一个 page
+   不保证是主窗口 —— 拿错窗口，A–G 段就会"全都拒"却看不出为什么。 */
+const { invoke, evalJs, close } = await normalizeAppState();
 log('main: CDP 就绪，开始用例');
 /* LINK_VERIFY_ONLY=G 只跑某一段：调试时不必等 A–F 的四十秒，也避开前一段留下的状态 */
 const ONLY = (process.env.LINK_VERIFY_ONLY || '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -691,6 +1109,7 @@ async function safe(name, fn) {
 try {
   try { await invoke('link_server_stop'); } catch { /* */ }
   try { await invoke('link_client_disconnect'); } catch { /* */ }
+  await normalizeAppState(invoke, evalJs);
   await safe('入参校验', () => badInputs(invoke));
   await safe('A 应用当服务端', () => appAsServer(invoke));
   await safe('F 阶段 2 命令面', () => stage2Files(invoke));
@@ -698,6 +1117,8 @@ try {
   await safe('B 应用当客户端', () => appAsClient(invoke));
   await safe('C 指纹不符', () => wrongFp(invoke));
   await safe('D 未登记 keyId', () => unknownKeyId(invoke));
+  /* 放最后：这段会换用户的文件树根并 reload 页面，跑在前面对象就变了 */
+  await safe('H 阶段 3 标签与聚焦', () => stage3Tabs());
 } finally {
   try { await invoke('link_server_stop'); } catch { /* */ }
   try { await invoke('link_client_disconnect'); } catch { /* */ }

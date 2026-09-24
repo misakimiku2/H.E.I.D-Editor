@@ -18,10 +18,12 @@ export const DEFAULT_LINK_PORT = 47123;
 export const LINK_EVENT = 'heid-link';
 /** 与 Rust `link::EVENT_PAIR` 同名：桌面收到一个持票设备、等用户确认时推这个 */
 export const LINK_PAIR_EVENT = 'heid-link-pair';
+/** 与 Rust `link::EVENT_REMOTE` 同名：对端主动推的事件（阶段 3 起有 `tabs`） */
+export const LINK_REMOTE_EVENT = 'heid-link-event';
 /** 与 Rust `PROTOCOL_VERSION` 同步；不一致说明两端版本错开，要提示升级 */
 export const LINK_PROTOCOL = 1;
 
-const PREFS_KEY = 'heid-l…refs';
+const PREFS_KEY = 'heid-link-prefs';
 
 export type LinkRole = 'off' | 'server' | 'client';
 
@@ -64,6 +66,8 @@ export interface LinkStatus {
   peerKeyId: string;
   /** bind 成功但迟迟没有连接尝试：大概率是 Windows 防火墙 */
   firewallHint: boolean;
+  /** 共享根之外、因「桌面上正开着」而暴露给手机的文件数（阶段 3 的白名单） */
+  openShared: number;
 }
 
 export const EMPTY_STATUS: LinkStatus = {
@@ -79,6 +83,7 @@ export const EMPTY_STATUS: LinkStatus = {
   rootDisplay: '',
   peerKeyId: '',
   firewallHint: false,
+  openShared: 0,
 };
 
 /** Rust 侧 `Refused.code` 的稳定取值；UI 按它出双语标签，原始 reason 作次要信息 */
@@ -112,6 +117,7 @@ export function normalizeStatus(raw: unknown): LinkStatus {
     rootDisplay: typeof o.rootDisplay === 'string' ? o.rootDisplay : '',
     peerKeyId: typeof o.peerKeyId === 'string' ? o.peerKeyId : '',
     firewallHint: o.firewallHint === true,
+    openShared: typeof o.openShared === 'number' ? o.openShared : 0,
   };
 }
 
@@ -237,11 +243,70 @@ export async function fetchTicket(): Promise<string> {
   return call<string>('link_ticket');
 }
 
-/** 桌面把文件树当前的根报给链路层当共享范围（设计稿 §2.3：不让用户再选第二遍）。
-    传 null 即清除；手机端不用（手机恒为客户端，不暴露任何文件） */
-export async function setSharedRoot(path: string | null): Promise<void> {
+/** 桌面把**本窗口**文件树当前的根报给链路层当共享范围（设计稿 §2.3：不让用户再选第二遍）。
+    传 null 即清除；手机端不用（手机恒为客户端，不暴露任何文件）。
+    多窗口下每台各有一份树，哪一份暴露出去由聚焦窗口决定（§6.1），所以带上窗口标签。 */
+export async function setSharedRoot(label: string, path: string | null): Promise<void> {
   if (!isTauri) return;
-  await call<unknown>('link_set_root', { path }).catch(() => {});
+  await call<unknown>('link_set_root', { label, path }).catch(() => {});
+}
+
+/* ------------------------------------------------ 阶段 3：标签上报与对端事件 */
+
+/** 与 Rust `link::board::TabReport` 同形（camelCase） */
+export interface TabReport {
+  path: string | null;
+  title: string;
+  language: string;
+  mdView: string;
+  dirty: boolean;
+  readOnly: boolean;
+  line: number;
+  col: number;
+}
+
+/**
+ * 把前端标签列表压成上报用的最小快照。
+ *
+ * 只报**没有内容**的那几项：手机上那份列表要表达的是「桌面上开着什么」，
+ * 内容本身永远走 `read` 现取 —— 一次上报带内容就等于允许两份"正在改的"存在。
+ * 路径只收正常的磁盘路径：`content://`（手机 SAF）与 `hide-remote://`（远程标签）
+ * 都不是桌面文件系统里的东西，报上去只会让桌面去解析一个打不开的路径。
+ */
+export function tabReports(
+  tabs: {
+    id: string;
+    path: string | null;
+    title: string;
+    language: string;
+    mdView: string;
+    isDirty: boolean;
+    readOnly: boolean;
+  }[],
+  activeId: string,
+  cursor: { line: number; col: number } | null,
+): TabReport[] {
+  return tabs.map(t => {
+    const p = t.path ?? null;
+    const plain = p !== null && !p.includes('://');
+    const on = t.id === activeId ? cursor : null;
+    return {
+      path: plain ? p : null,
+      title: t.title,
+      language: t.language,
+      mdView: t.mdView,
+      dirty: t.isDirty,
+      readOnly: t.readOnly,
+      line: on?.line ?? 0,
+      col: on?.col ?? 0,
+    };
+  });
+}
+
+/** 报本窗口的标签列表；只有桌面前端会调它 */
+export async function reportTabs(label: string, tabs: TabReport[]): Promise<void> {
+  if (!isTauri) return;
+  await call<unknown>('link_report_tabs', { label, tabs }).catch(() => {});
 }
 
 export async function connectTo(
@@ -349,6 +414,32 @@ export function subscribePairRequests(cb: (r: LinkPairReq) => void): () => void 
     if (cancelled) fn();
     else unlisten = fn;
   })().catch(() => {});
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}
+
+/**
+ * 订阅对端主动推的事件（阶段 3 起：桌面标签列表变了）。
+ * 按类型分流由调用方做 —— 这里不认识 `tabs` 之外的任何类型，
+ * 加一类推送不用改这一层（与 Rust 帧层「不认识具体命令」同一条分工）。
+ */
+export function subscribeRemoteEvents(cb: (type: string) => void): () => void {
+  if (!isTauri) return () => {};
+  let unlisten: (() => void) | null = null;
+  let cancelled = false;
+  void (async () => {
+    const { listen } = await import('@tauri-apps/api/event');
+    const fn = await listen<{ type?: string }>(LINK_REMOTE_EVENT, e => {
+      const t = typeof e.payload?.type === 'string' ? e.payload.type : '';
+      if (t) cb(t);
+    });
+    if (cancelled) fn();
+    else unlisten = fn;
+  })().catch(() => {
+    /* 订阅失败只意味着列表不再自动刷新；设备页仍可靠下拉/重进刷新 */
+  });
   return () => {
     cancelled = true;
     unlisten?.();

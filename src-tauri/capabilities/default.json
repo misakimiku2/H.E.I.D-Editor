@@ -26,6 +26,7 @@
     "allow-link-pairings-list",
     "allow-link-pairing-revoke",
     "allow-link-set-root",
+    "allow-link-report-tabs",
     "allow-link-request",
     "allow-open-external",
     "allow-render-page",

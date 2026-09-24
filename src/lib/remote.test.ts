@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   REMOTE_SCHEME, RemoteError, encodeRemoteSegment, isRemoteError, isRemotePath,
-  makeRemotePath, parseRemoteError, parseRemotePath, parseRemoteResponse,
-  remoteList, remoteRead, remoteStat, remoteWrite,
+  isOpenRel, makeRemotePath, openRelId, parseRemoteError, parseRemotePath, parseRemoteResponse,
+  remoteList, remoteRead, remoteStat, remoteTabs, remoteWrite,
   type RemoteListResult, type RemoteReadResult, type RemoteStatResult, type RemoteWriteResult,
 } from './remote';
 import { displayNameFromPath } from './platform';
@@ -248,6 +248,44 @@ describe('命令封装在非 Tauri 环境', () => {
     expect(isRemoteError(e)).toBe(true);
     expect((e as RemoteError).code).toBe('unavailable');
     expect((e as RemoteError).message).toBeTruthy();
+  });
+});
+
+/* ------------------------------------------------- 阶段 3：根外白名单引用 */
+
+describe('白名单引用 @w/<id>/<名字>', () => {
+  const ID = '0a1b2c3d4e5f';
+
+  it('只认严格三段形态', () => {
+    expect(isOpenRel(`@w/${ID}/todo.md`)).toBe(true);
+    expect(openRelId(`@w/${ID}/todo.md`)).toBe(ID);
+    for (const bad of ['notes/todo.md', `@w/${ID}`, `@w/${ID}x/x.md`, `@W/${ID}/x.md`,
+      `@w/${ID.toUpperCase()}/x.md`, '@w//x.md', `@w/短/x.md`, `sub/@w/${ID}/x.md`]) {
+      expect(isOpenRel(bad)).toBe(false);
+      expect(openRelId(bad)).toBeNull();
+    }
+  });
+
+  it('身份键往返：编进 hide-remote:// 再解回来还是同一条引用', () => {
+    const rel = `@w/${ID}/待办 1.md`;
+    const p = makeRemotePath(DEV, rel);
+    // 三段各自编码（`@` 也编，成 %40），但分隔符仍是裸斜杠 —— 远程树的懒加载按它切段
+    expect(p).toBe(`${REMOTE_SCHEME}${DEV}/%40w/${ID}/%E5%BE%85%E5%8A%9E%201.md`);
+    const ref = parseRemotePath(p);
+    expect(ref).not.toBeNull();
+    expect(ref!.deviceId).toBe(DEV);
+    expect(ref!.rel).toBe(rel);
+    expect(isOpenRel(ref!.rel)).toBe(true);
+  });
+
+  it('显示名取真文件名：手机上那行标题要好看，而不是整条引用', () => {
+    expect(displayNameFromPath(`${REMOTE_SCHEME}${DEV}/@w/${ID}/todo.md`)).toBe('todo.md');
+  });
+
+  it('tabs 命令在没有链路时如实抛 unavailable（不是返回空列表）', async () => {
+    const e = await remoteTabs().then(() => null, (err: unknown) => err);
+    expect(isRemoteError(e)).toBe(true);
+    expect((e as RemoteError).code).toBe('unavailable');
   });
 });
 

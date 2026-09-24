@@ -32,6 +32,8 @@ mod identity;
 mod pair;
 /// 共享根与路径逃逸防护（阶段 2）：`relPath` 只能落在根内。
 mod roots;
+/// 桌面标签看板与根外文件白名单（阶段 3）：聚焦窗口决定列表，白名单决定 `@w/…` 能否解析。
+mod board;
 /// 远程文件命令面（阶段 2）：`list` / `stat` / `read` / `write`，不碰网络也不碰会话。
 mod fsrv;
 
@@ -60,6 +62,11 @@ const BIND_QUIET_HINT: Duration = Duration::from_secs(15);
 pub const EVENT: &str = "heid-link";
 /// 阶段 1 的配对请求（TOFU）事件名：桌面收到一个持票设备、等用户点允许/拒绝时推这个
 pub const EVENT_PAIR: &str = "heid-link-pair";
+/// 手机侧订阅的对端推送事件名（阶段 3 起）。载荷 [`RemoteEvent`]。
+///
+/// 单单一件事件而不是每种推送各开一个事件名：推送的"有哪些类型"是协议面的事，
+/// 前端按 `typ` 分派一次即可，加一类事件不用改两端的事件名约定。
+pub const EVENT_REMOTE: &str = "heid-link-event";
 
 /* ------------------------------------------------------------------ 消息 */
 
@@ -114,6 +121,12 @@ pub enum Msg {
     /// 对 `Req` 的应答。`ok=false` 时 `code` 是稳定标识、`error` 给人看；
     /// `data` 同样是 JSON 文本。
     Res { id: u64, ok: bool, code: String, error: String, data: String },
+    /// 服务端主动推送（无 id、不要求应答）。`typ` 是稳定标识（`tabs` / `fs` / `rootChanged`…），
+    /// `data` 是 JSON 文本 —— 与 `Req`/`Res` 同一策略，帧层不认识任何具体事件。
+    ///
+    /// 只推「变了」这个事实而不把内容一起塞进帧：对端本来就要用它自己的 `id` 走一次请求，
+    /// 内容跟着请求的基线走才不会推出半新半旧的两份。
+    Event { #[serde(rename = "type")] typ: String, data: String },
 }
 
 /// 加密帧的信封。`seq` 与 nonce 计数器同值，作为协议层的顺序断言：
@@ -617,6 +630,9 @@ pub struct LinkStatus {
     /// 这条是设计稿 §11.1 的实现要求：「端口开着、包进不来」这种半死状态比直接报错难查得多，
     /// 而这在本机环境（有历史 node 放行规则）测不出用户侧结论，只能靠应用自己 bind 时才成立。
     pub firewall_hint: bool,
+    /// 共享根之外、因「桌面上正开着」而暴露给手机的**文件**数（阶段 3 的白名单）。
+    /// 与 `root_display` 同一条理由：多交出去一分，就得让用户看得见一分。
+    pub open_shared: usize,
 }
 
 /// `protocol` 必须是本地常量而不是 0：前端拿它自证"我这一端说的是哪版协议"。
@@ -635,6 +651,7 @@ impl Default for LinkStatus {
             root_display: String::new(),
             peer_key_id: String::new(),
             firewall_hint: false,
+            open_shared: 0,
         }
     }
 }
@@ -663,10 +680,22 @@ pub struct LinkState {
     /// 有一条配对请求正等用户决定（serve_conn 挂上、轮询 decision）
     pending: Mutex<Option<()>>,
     decision: Mutex<Option<bool>>,
-    /// 桌面共享根（canonicalize 之后）。None = 还没选根，此时所有远程文件命令都以 `noroot` 拒
-    shared_root: Mutex<Option<PathBuf>>,
+    /// 桌面共享根（canonicalize 之后）按窗口各存一份。None = 那个窗口没开文件树。
+    /// 与标签列表同属 [`board`]：谁是聚焦窗口，暴露面就是那一份。
+    board: Mutex<board::Board>,
     /// 手机侧的活连接；前端 `link_request` 走它把请求塞进发出队列
     conn: Mutex<Option<Arc<Conn>>>,
+    /// 桌面侧这条连接的推送队列（阶段 3 的 `event {type:'tabs'}`）。连接建立时挂上、结束时摘掉
+    push: Mutex<Option<Arc<Push>>>,
+}
+
+/// 推给手机前端的对端事件载荷：`typ` 与帧里的 `event.type` 同名，`data` 是 JSON 文本。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEvent {
+    #[serde(rename = "type")]
+    pub typ: String,
+    pub data: String,
 }
 
 impl LinkState {
@@ -800,6 +829,33 @@ impl Conn {
     }
 }
 
+/// 桌面 → 手机的推送队列（阶段 3）。存在理由与 [`Conn`] 完全一样：
+/// socket 只有维持线程一个主人，发送帧计数器才可能和写出顺序严格一致，
+/// 所以别的线程（窗口上报标签、焦点事件、关窗）只往这里挂一帧，由 pump 在下一回合发出。
+#[derive(Default)]
+pub struct Push {
+    items: Mutex<VecDeque<Msg>>,
+}
+
+impl Push {
+    /// 挂一条 `event {type:typ}`。同一类型只留一条：这类推送的语义是「变了，去重取」，
+    /// 连着来十条只是让对端多拉十次同样的结果 —— dedupe 掉既省帧也让队首不饿死。
+    /// 不复制 `Msg`，所以队列长度天然有界（一类型一条）。
+    pub fn queue(&self, typ: &str) {
+        let mut g = self.items.lock().unwrap_or_else(|p| p.into_inner());
+        let dup = g.iter().any(|m| matches!(m, Msg::Event { typ: t, .. } if t == typ));
+        if !dup {
+            g.push_back(Msg::Event { typ: typ.to_string(), data: String::new() });
+        }
+    }
+
+    /// 维持线程用：取走本回合要发的帧
+    fn take(&self) -> Vec<Msg> {
+        let mut g = self.items.lock().unwrap_or_else(|p| p.into_inner());
+        g.drain(..).collect()
+    }
+}
+
 /// 状态变更的唯一出口：改快照 + 推事件
 fn publish(app: &AppHandle, f: impl FnOnce(&mut LinkStatus)) {
     let state = app.state::<LinkState>();
@@ -923,6 +979,15 @@ fn desktop_name() -> String {
 
 /* ------------------------------------------------------------------ 连接维持 */
 
+/// 一条请求 → 一帧应答。服务端 pump 与单测**共用**这一个函数：
+/// 两边各写一遍 `match fsrv::handle(...)` 的话，命令面改了响应形状时测的是一套、跑的是一套。
+fn answer_req(scope: &board::Scope, id: u64, method: &str, params: &str) -> Msg {
+    match fsrv::handle(scope, method, params) {
+        Ok(data) => Msg::Res { id, ok: true, code: String::new(), error: String::new(), data },
+        Err((code, error)) => Msg::Res { id, ok: false, code, error, data: String::new() },
+    }
+}
+
 /// 握手后的维持循环：心跳、断连判定、停止开关观察，以及**应用层消息的分派**。
 /// 两端共用，只有 `role` 不同：服务端答 `Req`，客户端发 `Req` 并收 `Res` / `Event`。
 ///
@@ -957,6 +1022,17 @@ fn run_pump(
                 }
             }
         }
+        // 服务端：把别的线程挂上来的推送发出去（同上一条的理由，socket 只有一个主人）
+        if role == Role::Server {
+            if let Some(push) = server_push(app) {
+                for msg in push.take() {
+                    if let Err(e) = session.send(&mut stream, &msg) {
+                        mark_error(app, e);
+                        return;
+                    }
+                }
+            }
+        }
         match session.recv(&mut stream, &mut framer) {
             Ok(Some(Msg::Pong {})) => {
                 misses = 0;
@@ -973,11 +1049,8 @@ fn run_pump(
                     mark_error(app, "手机端是客户端，不该收到请求帧".to_string());
                     return;
                 }
-                let root = shared_root(app);
-                let msg = match fsrv::handle(root.as_deref(), &method, &params) {
-                    Ok(data) => Msg::Res { id, ok: true, code: String::new(), error: String::new(), data },
-                    Err((code, error)) => Msg::Res { id, ok: false, code, error, data: String::new() },
-                };
+                let scope = board_scope(app);
+                let msg = answer_req(&scope, id, &method, &params);
                 if let Err(e) = session.send(&mut stream, &msg) {
                     mark_error(app, e);
                     return;
@@ -988,6 +1061,16 @@ fn run_pump(
                     Some(conn) => conn.deliver(id, if ok { Ok(data) } else { Err(format!("{code}: {error}")) }),
                     None => mark_error(app, "没有活连接却收到应答帧".to_string()),
                 }
+            }
+            Ok(Some(Msg::Event { typ, data })) => {
+                // 只有手机侧该收到推送；桌面收到说明对端把我们当客户端在指挥，判死。
+                if role != Role::Client {
+                    mark_error(app, "桌面是服务端，不该收到事件帧".to_string());
+                    return;
+                }
+                // 转成前端事件就完事：手机上「哪个类型该重取什么」由 `link.ts` 那侧决定，
+                // 帧层与这里都不认识具体事件类型的语义（加一类事件不用动这个函数）。
+                let _ = app.emit(EVENT_REMOTE, &RemoteEvent { typ, data });
             }
             Ok(Some(Msg::Bye {})) => return,
             Ok(Some(other)) => {
@@ -1024,9 +1107,23 @@ fn client_conn(app: &AppHandle) -> Option<Arc<Conn>> {
     app.state::<LinkState>().conn.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
-/// 桌面当前的共享根
-fn shared_root(app: &AppHandle) -> Option<PathBuf> {
-    app.state::<LinkState>().shared_root.lock().unwrap_or_else(|p| p.into_inner()).clone()
+/// 桌面侧这条连接的推送队列（没在服务任何设备时为 None —— 那时推送无处可去）
+fn server_push(app: &AppHandle) -> Option<Arc<Push>> {
+    app.state::<LinkState>().push.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// 这一刻的暴露面：聚焦窗口的共享根 + 标签列表 + 所有活窗口的白名单。
+/// 每次请求现算，不缓存 —— 白名单的判定必须跟着「桌面上还开着什么」走（§6.3）。
+fn board_scope(app: &AppHandle) -> board::Scope {
+    app.state::<LinkState>().board.lock().unwrap_or_else(|p| p.into_inner()).scope()
+}
+
+/// 桌面向对端推一帧「变了，去重取」。没连着的时候静默丢掉：
+/// 手机端连上之后本来就会自己拉一次全量，不必为断线期间的变化留队列。
+fn notify(app: &AppHandle, typ: &str) {
+    if let Some(push) = server_push(app) {
+        push.queue(typ);
+    }
 }
 
 fn prepare(stream: &mut TcpStream) {
@@ -1264,7 +1361,11 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
         s.peer_key_id = key_id.clone();
         s.last_error.clear();
     });
+    // 挂上推送队列：从这一刻起，窗口上报标签 / 换焦点 / 关窗才有人能通知到对端。
+    // 摘掉时留在队列里的帧一起作废 —— 下一次连接建立后对端本来就要重取全量（§6.1）。
+    *state.push.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::<Push>::default());
     run_pump(stream, session, &app, &stop, Role::Server);
+    *state.push.lock().unwrap_or_else(|p| p.into_inner()) = None;
     publish(&app, |s| {
         s.connected = false;
         s.peer_device.clear();
@@ -1418,6 +1519,13 @@ pub fn link_ticket(state: State<LinkState>) -> String {
 pub fn link_server_start(app: AppHandle, port: u16) -> Result<LinkStatus, String> {
     if !(1024..=65535).contains(&port) {
         return Err("端口要在 1024–65535 之间".to_string());
+    }
+    /* 幂等：同一个端口已经在听着，就直接回当前状态。
+       每个文档窗口挂载时都会跑一次"上次开着就自动开"（App.tsx），没有这一道的话，
+       用户新开一个窗口就会把手机上正连着的那条链路踢掉。 */
+    let current = snapshot(&app);
+    if current.listening && current.port == port {
+        return Ok(current);
     }
     spawn_server(app.clone(), port)?;
     Ok(snapshot(&app))
@@ -1664,19 +1772,103 @@ pub fn link_client_disconnect(app: AppHandle) -> LinkStatus {
 
 /* ------------------------------------------------- 阶段 2：共享根与远程命令 */
 
-/// 桌面设置 / 清除共享范围。前端把文件树当前的根（`heid-tree-root`）原样交进来，
+/// 桌面设置 / 清除**本窗口**的共享范围。前端把文件树当前的根（`heid-tree-root`）原样交进来，
 /// 桌面侧 canonicalize 之后才存 —— **手机上永远只出现相对路径，绝对路径不出桌面**。
+///
+/// `label` 由前端报自己的窗口标签（`currentWindowLabel()`）：多窗口下每台各有一份文件树，
+/// 到底哪一份暴露给手机由聚焦窗口决定（§6.1）。不走 `WebviewWindow` 取标签，是因为这条命令
+/// 两端共用一个实现，而手机侧根本没有多窗口 —— 少一处平台差异，就少一次「桌面好、手机炸」。
 #[tauri::command]
-pub fn link_set_root(app: AppHandle, path: Option<String>) -> Result<LinkStatus, String> {
+pub fn link_set_root(app: AppHandle, label: String, path: Option<String>) -> Result<LinkStatus, String> {
+    if !window_alive(&app, &label) {
+        return Ok(snapshot(&app));
+    }
     let state = app.state::<LinkState>();
     let root = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         None => None,
         Some(p) => Some(roots::canonical_root(Path::new(p))?),
     };
-    let display = root.as_deref().map(display_path).unwrap_or_default();
-    *state.shared_root.lock().unwrap_or_else(|p| p.into_inner()) = root;
-    publish(&app, |s| s.root_display = display);
+    let changed = state.board.lock().unwrap_or_else(|p| p.into_inner()).set_root(&label, root);
+    if changed {
+        publish_exposure(&app);
+        // 换根等于换整棵树：手机上展开着的目录、正开着的标签引用都要按新根重算
+        notify(&app, EVENT_TABS);
+    }
     Ok(snapshot(&app))
+}
+
+/* ------------------------------------------------- 阶段 3：标签上报与推送 */
+
+/// 这个窗口标签现在真的存在吗。
+///
+/// 关窗时前端可能赶在 `Destroyed` **之后再报一次**（关窗流程会先收干净标签与会话），
+/// 收下它等于把已经不存在的窗口重新登记成"最近动过的窗口" ——
+/// 手机上随后看到的就是凭空多出来的一份空列表。窗口存在与否只有 Tauri 自己知道，
+/// 所以这里问它，而不是在看板里记"死标签"：文档窗口的 label 是**复用**的
+/// （`windows.rs` 取最小空闲的 win-N），记死标签会把重开的同一个窗口永久拒收。
+fn window_alive(app: &AppHandle, label: &str) -> bool {
+    #[cfg(desktop)]
+    { app.get_webview_window(label).is_some() }
+    #[cfg(not(desktop))]
+    { let _ = (app, label); true }
+}
+
+/// 手机侧事件类型：桌面的标签列表变了（§6.1）。载荷故意是空的 ——
+/// 语义是「变了，去重取」，内容跟着手机端自己那次 `tabs` 请求走，
+/// 这样推送永远不会带着半新半旧的列表覆盖掉请求的结果。
+pub const EVENT_TABS: &str = "tabs";
+
+/// 某个窗口把它当前的标签列表报给链路层（设计稿 §6.1）。桌面侧调用，手机端用不到。
+///
+/// 这条命令是白名单的唯一来源：**桌面上开着哪些文件**决定局域网能读到哪些根外文件，
+/// 关掉标签即收回（下一次上报里没有它）。所以它必须与标签变化严格同步 ——
+/// 前端在标签、脏标记、聚焦、共享根的每一次变更后都会重报一次（节流在 `link.ts`）。
+#[tauri::command]
+pub fn link_report_tabs(app: AppHandle, label: String, tabs: Vec<board::TabReport>) -> LinkStatus {
+    if !window_alive(&app, &label) {
+        return snapshot(&app);
+    }
+    let state = app.state::<LinkState>();
+    let changed = state.board.lock().unwrap_or_else(|p| p.into_inner()).set_tabs(&label, tabs);
+    if changed {
+        publish_exposure(&app);
+        notify(&app, EVENT_TABS);
+    }
+    snapshot(&app)
+}
+
+/// 把「桌面现在暴露了什么」刷进状态快照。设置面板那两行（共享范围 + 根外文件数）
+/// 就是从这里来的 —— 开启态必须让用户看得见自己交出去的是什么，这是 §5.2 的硬要求。
+fn publish_exposure(app: &AppHandle) {
+    let scope = board_scope(app);
+    let display = scope.root.as_deref().map(display_path).unwrap_or_default();
+    let opens = scope.outside_open_count();
+    publish(app, |s| {
+        s.root_display = display;
+        s.open_shared = opens;
+    });
+}
+
+/// 全局窗口事件里要处理的两件事（其余返回 `false` = 无需推送）。
+/// 由 `lib.rs` 的 `on_window_event` 调用；桌面才有意义（手机只有一个窗口）。
+pub fn on_window_focus(app: &AppHandle, label: &str) {
+    let state = app.state::<LinkState>();
+    let changed = state.board.lock().unwrap_or_else(|p| p.into_inner()).focus(label);
+    if changed {
+        publish_exposure(app);
+        // 换窗口 = 换一份列表、可能还换了一棵树：让对端整个重取
+        notify(app, EVENT_TABS);
+    }
+}
+
+/// 窗口关掉：它报的根与标签当场作废。白名单是活窗口的并集，所以别的窗口里开着的文件不受牵连。
+pub fn on_window_closed(app: &AppHandle, label: &str) {
+    let state = app.state::<LinkState>();
+    let changed = state.board.lock().unwrap_or_else(|p| p.into_inner()).close_window(label);
+    if changed {
+        publish_exposure(app);
+        notify(app, EVENT_TABS);
+    }
 }
 
 /// 手机侧发一条远程文件命令，返回结果的 JSON 文本（形状由 [`fsrv`] 里各命令的定义决定）。
@@ -1725,5 +1917,7 @@ pub fn init_store(app: &AppHandle, dir: PathBuf) {
 mod tests;
 #[cfg(test)]
 mod roots_tests;
+#[cfg(test)]
+mod board_tests;
 #[cfg(test)]
 mod fsrv_tests;

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_LINK_PORT, autoReconnectFromPrefs, autoStartFromPrefs, deviceName, isKeyId,
   isTicket, isUsablePort, linkRole, normalizePairReq, normalizeStatus, parsePrefs,
-  subscribeLinkStatus,
+  subscribeLinkStatus, tabReports,
 } from './link';
 
 describe('normalizeStatus', () => {
@@ -117,5 +117,60 @@ describe('平台分派', () => {
     expect(typeof subscribeLinkStatus(() => {})).toBe('function');
     expect(await autoStartFromPrefs()).toBeNull();
     expect(await autoReconnectFromPrefs()).toBeNull();
+  });
+});
+
+/* -------------------------------------------------- 阶段 3：标签上报 */
+
+describe('tabReports', () => {
+  const t = (over: Partial<Parameters<typeof tabReports>[0][number]> & { id: string }) => ({
+    path: 'C:\\notes\\' + over.id + '.md',
+    title: `${over.id}.md`,
+    language: 'markdown',
+    mdView: 'edit',
+    isDirty: false,
+    readOnly: false,
+    ...over,
+  });
+
+  it('只报元数据：内容一个字都不上手（两份"正在改的"是设计明确排除的）', () => {
+    const [one] = tabReports([t({ id: 'a', ...({ content: '秘密正文' } as object) })], 'a', { line: 3, col: 4 });
+    expect(JSON.stringify(one)).not.toContain('秘密正文');
+    expect(one).not.toHaveProperty('content');
+    expect(one).toEqual({
+      path: 'C:\\notes\\a.md', title: 'a.md', language: 'markdown', mdView: 'edit',
+      dirty: false, readOnly: false, line: 3, col: 4,
+    });
+  });
+
+  it('光标只给激活标签，别的标签是 0', () => {
+    const list = tabReports([t({ id: 'a' }), t({ id: 'b' })], 'b', { line: 12, col: 7 });
+    expect([list[0].line, list[0].col]).toEqual([0, 0]);
+    expect([list[1].line, list[1].col]).toEqual([12, 7]);
+  });
+
+  it('非磁盘路径（content:// 与 hide-remote://）报成无路径，绝不当本地文件报上去', () => {
+    const list = tabReports(
+      [t({ id: 'a', path: 'content://com.android.externalstorage/tree/x.md' }),
+       t({ id: 'b', path: 'hide-remote://a1b2c3d4e5f6/notes/x.md' }),
+       t({ id: 'c', path: null })],
+      '', null,
+    );
+    expect(list.map(x => x.path)).toEqual([null, null, null]);
+    // 路径没了但标题还在：手机上那份列表仍要读得出"桌面上开着什么"
+    expect(list.map(x => x.title)).toEqual(['a.md', 'b.md', 'c.md']);
+  });
+
+  it('无激活标签（activeId 为空串）时谁都不带光标', () => {
+    const list = tabReports([t({ id: 'a' })], '', { line: 9, col: 9 });
+    expect([list[0].line, list[0].col]).toEqual([0, 0]);
+  });
+});
+
+describe('openShared 归一化', () => {
+  it('缺字段与脏类型都归 0（这条数字是暴露面，宁可少报也不报个假的）', () => {
+    expect(normalizeStatus({}).openShared).toBe(0);
+    expect(normalizeStatus({ openShared: '3' }).openShared).toBe(0);
+    expect(normalizeStatus({ openShared: 3 }).openShared).toBe(3);
   });
 });

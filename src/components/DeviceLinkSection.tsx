@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Copy, FolderTree, Loader2, QrCode, ShieldAlert, Smartphone, Usb, X } from 'lucide-react';
+import { Camera, Copy, Files, FolderTree, Loader2, QrCode, ShieldAlert, Smartphone, Usb, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
@@ -11,6 +11,7 @@ import {
   type LinkPairReq, type LinkStatus, type PairInfo, type QrInfo,
 } from '../lib/link';
 import { makeRemotePath } from '../lib/remote';
+import { RemoteTabsSheet } from './RemoteTabsSheet';
 
 /* 二维码只在桌面开配对窗时才用得到，懒加载独立 chunk（与「关于」里的 QrImage 同库同策略） */
 const QrImage = lazy(() => import('./QrImage'));
@@ -24,6 +25,11 @@ interface DeviceLinkSectionProps {
   labelCls: string;
   /** 手机点「浏览这台电脑的文件」：把远程根交给 App 去开文件树抽屉 */
   onBrowseRemote?: (rootPath: string) => void;
+  /**
+   * 手机点「电脑上正打开的文件」里某一行：App 侧接自己那条按路径打开标签的入口
+   * （`hide-remote://` 的读写通道阶段 2 已走通，这里不必再区分远程与否）。
+   */
+  onOpenRemoteFile?: (path: string) => void;
 }
 
 /**
@@ -33,7 +39,7 @@ interface DeviceLinkSectionProps {
  * 阶段 1：桌面生成 `hide-link://pair` 二维码 + 6 位短码兜底；手机用应用内「扫一扫」配对，
  * 配对后记住设备、启动免扫重连。粘贴配对码 / 短码是相机不可用时的等价入口，不是过渡方案。
  */
-export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote }: DeviceLinkSectionProps) {
+export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOpenRemoteFile }: DeviceLinkSectionProps) {
   const t = useT();
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -49,6 +55,7 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote }: De
   const [uri, setUri] = useState('');
   const [code, setCode] = useState('');
   const [scanning, setScanning] = useState(false);
+  const [tabsSheet, setTabsSheet] = useState(false);
   const paired = !!initial.current.keyId && !!initial.current.host;
 
   /* 预热扫码用的两个懒加载包：面板一开就把 QrScanner 与 jsQR 取回来（不挂相机、不申请权限）。
@@ -214,7 +221,19 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote }: De
         <>
           {enabled ? (
             <>
-              {/* 已连着：进远程文件树 + 断开，不再摆一堆输入框占地方 */}
+              {/* 已连着：看桌面上正开着的标签（阶段 3）+ 进远程文件树 + 断开，
+                  不再摆一堆输入框占地方 */}
+              <div className={cn(rowCls, 'justify-end')}>
+                <button
+                  type="button"
+                  disabled={!s?.peerKeyId}
+                  onClick={() => setTabsSheet(true)}
+                  className={btnPrimary}
+                >
+                  <Files size={14} />
+                  {t('link.openTabs')}
+                </button>
+              </div>
               <div className={cn(rowCls, 'justify-end gap-2')}>
                 <button
                   type="button"
@@ -363,6 +382,15 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote }: De
               </span>
             </div>
           )}
+          {/* 根外白名单也在暴露范围内（阶段 3 §6.3）：标签关一个少一个，所以只报数量不列路径 */}
+          {enabled && (s?.openShared ?? 0) > 0 && (
+            <div className={rowCls}>
+              <span className={labelCls}>{t('link.shareExtra')}</span>
+              <span className="min-w-0 flex-1 text-xs leading-snug">
+                {t('link.openSharedFiles', { n: s?.openShared ?? 0 })}
+              </span>
+            </div>
+          )}
           {/* bind 成功但没人来连：这是「端口开着、包进不来」的半死状态，比直接报错难查，
               所以由桌面自己提，而不是等用户来回猜是哪台设备的问题 */}
           {enabled && status?.firewallHint && (
@@ -462,6 +490,12 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote }: De
         <Suspense fallback={null}>
           <QrScanner onResult={onScanned} onClose={() => setScanning(false)} dark={dark} />
         </Suspense>
+      )}
+
+      {/* 手机上「电脑上正打开的文件」：sheet 自己 portal 到 body（设置弹窗的 backdrop-blur
+          会成了 fixed 的包含块），关掉也由它自己在打开文件前做 */}
+      {tabsSheet && (
+        <RemoteTabsSheet dark={dark} onClose={() => setTabsSheet(false)} onOpen={(p) => onOpenRemoteFile?.(p)} />
       )}
 
       <div className={cn(rowCls, 'items-start')}>

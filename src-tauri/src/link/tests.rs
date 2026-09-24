@@ -505,10 +505,7 @@ fn 远程命令走完整加密链路往返() {
                 Msg::Bye {} => break,
                 Msg::Req { id, method, params } => {
                     seen.push(format!("{method}:{id}"));
-                    let msg = match fsrv::handle(Some(&srv_root), &method, &params) {
-                        Ok(data) => Msg::Res { id, ok: true, code: String::new(), error: String::new(), data },
-                        Err((code, error)) => Msg::Res { id, ok: false, code, error, data: String::new() },
-                    };
+                    let msg = answer_req(&board::Scope::root_only(&srv_root), id, &method, &params);
                     sess.send(&mut s, &msg).unwrap();
                 }
                 other => {
@@ -587,4 +584,190 @@ fn 远程命令走完整加密链路往返() {
     csess.send(&mut c, &Msg::Bye {}).unwrap();
     let seen = srv.join().unwrap();
     assert_eq!(seen, vec!["list:1", "read:2", "write:3", "write:4", "read:5"], "服务端要按序收到这五笔");
+}
+
+/* -------------------------------------------- 阶段 3：标签、白名单与推送 */
+
+/// 标签列表、根外白名单读写、以及**服务端主动推送**，全走一遍真实 TCP + 真实 AEAD 会话。
+///
+/// 这条测试盯的是阶段 3 独有的三件事，各自的单测都覆盖不到：
+/// - `event` 帧能在没有请求在飞的时候到达客户端（手机靠它刷新列表）；
+/// - 服务端只按 `type` 各留一帧：连着报三次也只推一次，不会把链路刷爆；
+/// - 关掉标签之后同一条 `@w` 引用在线上立刻失效 —— 收回授权不靠对端自觉。
+#[test]
+fn 标签白名单与推送走完整加密链路() {
+    use super::board::{open_id, Board, TabReport};
+    use super::roots_tests::Temp;
+
+    let t = Temp::new("tcp-tabs");
+    let root = t.root();
+    let outside = t.base.join("open/todo.md");
+    std::fs::create_dir_all(t.base.join("open")).unwrap();
+    std::fs::write(&outside, "# 根外那份").unwrap();
+
+    // 看板两边都要碰（服务端线程读、主线程模拟窗口上报），所以与真实代码一样挂在锁上
+    let mut initial = Board::default();
+    initial.set_root("main", Some(root.clone()));
+    initial.set_tabs(
+        "main",
+        vec![
+            TabReport {
+                path: Some(root.join("readme.md").to_string_lossy().to_string()),
+                title: "readme.md".into(),
+                ..Default::default()
+            },
+            TabReport {
+                path: Some(outside.to_string_lossy().to_string()),
+                title: "todo.md".into(),
+                ..Default::default()
+            },
+        ],
+    );
+    let board = Arc::new(Mutex::new(initial));
+    let srv_board = board.clone();
+
+    let ticket_v = ticket();
+    let (_, pkcs8, fp) = test_identity();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let pk = pkcs8.clone();
+    let tv = ticket_v.clone();
+
+    let push = Arc::new(Push::default());
+    let srv_push = push.clone();
+    let srv = std::thread::spawn(move || -> Vec<String> {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(400))).ok();
+        let id = identity::Identity::from_pkcs8(&pk).unwrap();
+        let mut f = Framer::default();
+        let hs = server_handshake(&mut s, &mut f, &|_, _, _| Ok(tv.clone()), &id).unwrap();
+        let mut sess = hs.session;
+        let _ = recv_msg_deadline(&mut s, &mut sess, &mut f, Instant::now() + Duration::from_secs(2));
+        let mut seen = Vec::new();
+        let mut pushed = false;
+        loop {
+            // 与 run_pump 同一顺序：先发挂上来的推送，再收请求
+            for msg in srv_push.take() {
+                sess.send(&mut s, &msg).unwrap();
+            }
+            let msg = match recv_msg_deadline(&mut s, &mut sess, &mut f, Instant::now() + Duration::from_secs(3))
+            {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            match msg {
+                Msg::Bye {} => break,
+                Msg::Req { id, ref method, .. } => seen.push(format!("{method}:{id}")),
+                other => {
+                    seen.push(format!("unexpected:{other:?}"));
+                    break;
+                }
+            }
+            let Msg::Req { id, method, params } = msg else { break };
+            let scope = srv_board.lock().unwrap().scope();
+            let reply = answer_req(&scope, id, &method, &params);
+            sess.send(&mut s, &reply).unwrap();
+            // 应答之后模拟一次「桌面又报了三次标签」：队列里必须只留一帧，且紧接着就发出去
+            if !pushed {
+                pushed = true;
+                srv_push.queue("tabs");
+                srv_push.queue("tabs");
+                srv_push.queue("tabs");
+                for msg in srv_push.take() {
+                    sess.send(&mut s, &msg).unwrap();
+                }
+            }
+        }
+        seen
+    });
+
+    /// 手机侧：把会话/流/增量读取器收在一起，`ask` 与 `recv` 才能交替调用 ——
+    /// 两个 `&mut` 闭包各持有一份借用，写成闭包会在借用检查上撞车。
+    struct Phone {
+        sess: Session,
+        sock: TcpStream,
+        fr: Framer,
+        next: u64,
+    }
+    impl Phone {
+        /// 收一帧（应答与推送都接）
+        fn recv(&mut self) -> Msg {
+            loop {
+                match self.sess.recv(&mut self.sock, &mut self.fr).unwrap() {
+                    Some(m) => return m,
+                    None => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        }
+
+        fn ask(&mut self, method: &str, params: &str) -> Result<serde_json::Value, String> {
+            self.next += 1;
+            let id = self.next;
+            self.sess
+                .send(&mut self.sock, &Msg::Req { id, method: method.into(), params: params.into() })
+                .unwrap();
+            loop {
+                match self.recv() {
+                    Msg::Res { id: rid, ok, code, error, data } => {
+                        assert_eq!(rid, id, "响应必须回到发起它的那条请求上");
+                        return if ok {
+                            Ok(serde_json::from_str(&data).expect("响应载荷应是 JSON"))
+                        } else {
+                            Err(format!("{code}:{error}"))
+                        };
+                    }
+                    other => panic!("在等 {method} 的应答却收到 {other:?}"),
+                }
+            }
+        }
+    }
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_millis(400))).ok();
+    let mut cf = Framer::default();
+    let (csess, _ls, _) = client_handshake(
+        &mut c, &mut cf, &ticket_v, Mode::Pair, "", "ticket", "heid-android", "SM-X808U", &fp,
+    )
+    .unwrap();
+    let mut phone = Phone { sess: csess, sock: c, fr: cf, next: 0 };
+
+    // ① 标签列表：根内的给相对路径，根外的给白名单引用
+    let tabs = phone.ask("tabs", "{}").expect("tabs 应成功");
+    let list = tabs.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["rel"], "readme.md");
+    let open_rel = list[1]["rel"].as_str().unwrap().to_string();
+    assert_eq!(open_rel, format!("@w/{}/todo.md", open_id(&outside.canonicalize().unwrap())));
+
+    // ② 服务端在我们没有发任何请求的情况下推了一帧 event（且三次上报只成一帧）。
+    // 顺序要紧跟着上一条 ask：这一帧到达时没有任何请求在飞。
+    match phone.recv() {
+        Msg::Event { typ, data } => {
+            assert_eq!(typ, "tabs");
+            assert!(data.is_empty(), "推送只报「变了」，内容跟着请求走");
+        }
+        other => panic!("期望收到一帧 event，实际 {other:?}"),
+    }
+
+    // ③ 根外那份照样能读——走的是与根内同一条命令、同一套解码
+    let read = phone
+        .ask("read", &format!(r#"{{"relPath":"{open_rel}"}}"#))
+        .expect("白名单内的读取应成功");
+    assert_eq!(read["text"], "# 根外那份");
+
+    // ④ 关掉标签：同一条引用当场失效（先确认它曾经可用）
+    board.lock().unwrap().set_tabs(
+        "main",
+        vec![TabReport { path: None, title: "未命名".into(), ..Default::default() }],
+    );
+    let tabs2 = phone.ask("tabs", "{}").expect("第二次 tabs 应成功");
+    assert_eq!(tabs2[0]["reason"], "novirtual", "剩下的那个是无路径标签");
+    let dead = phone
+        .ask("read", &format!(r#"{{"relPath":"{open_rel}"}}"#))
+        .unwrap_err();
+    assert!(dead.starts_with("notopen:"), "关标签后必须断掉这条引用，实际：{dead}");
+
+    phone.sess.send(&mut phone.sock, &Msg::Bye {}).unwrap();
+    let seen = srv.join().unwrap();
+    assert_eq!(seen, vec!["tabs:1", "read:2", "tabs:3", "read:4"], "服务端要按序收到这四笔");
 }

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::encoding;
 
-use super::roots;
+use super::board::{self, Scope};
 
 /// 不远程打开的上限。设计稿写的是 32MB（那是桌面「可读但只读」的分块预览线），
 /// 但远程通道没有分块协议（§5.3 明确不做），而整份内容要走完两个更硬的天花板：
@@ -121,30 +121,33 @@ struct WriteResult {
 
 /* ------------------------------------------------------------------ 分发 */
 
-/// 执行一条远程文件命令。`root` 是桌面当前的共享根（已 canonicalize）；
-/// `None` 表示还没设置共享根，此时所有命令都以 `noroot` 拒绝。
+/// 执行一条远程文件命令。`scope` 是这一刻的暴露面（[`board::Board::scope`]）：
+/// 聚焦窗口的共享根 + 所有活窗口的白名单 + 聚焦窗口的标签列表。
+/// 根与白名单都没有时，文件类命令以 `noroot` / `notopen` 拒绝。
 ///
 /// 这里**不碰网络也不碰会话**：给什么参数就返回什么结果，
 /// 因此单测可以不开一个 socket 就把命令面全部跑完。
-pub fn handle(root: Option<&Path>, method: &str, params: &str) -> Handled {
-    let root = root.ok_or_else(|| err("noroot", "桌面还没设置共享的文件夹"))?;
+pub fn handle(scope: &Scope, method: &str, params: &str) -> Handled {
     match method {
         "list" => {
             let p: ListParams = parse(params)?;
-            list(root, &p.rel_dir)
+            list(scope, &p.rel_dir)
         }
         "stat" => {
             let p: PathParams = parse(params)?;
-            stat(root, &p.rel_path)
+            stat(scope, &p.rel_path)
         }
         "read" => {
             let p: PathParams = parse(params)?;
-            read(root, &p.rel_path, p.force_encoding.as_deref())
+            read(scope, &p.rel_path, p.force_encoding.as_deref())
         }
         "write" => {
             let p: PathParams = parse(params)?;
-            write(root, p)
+            write(scope, p)
         }
+        // 桌面正打开着哪些标签：无参，内容已由看板算好（能不能打开、为什么不能都在里面）
+        "tabs" => serde_json::to_string(&scope.tabs)
+            .map_err(|e| err("io", format!("标签列表序列化失败：{e}"))),
         other => Err(err("unknown", format!("桌面不支持的命令 {other}"))),
     }
 }
@@ -155,8 +158,8 @@ fn parse<T: for<'de> Deserialize<'de>>(params: &str) -> Result<T, (String, Strin
 
 /* ------------------------------------------------------------------ 各命令 */
 
-fn list(root: &Path, rel_dir: &str) -> Handled {
-    let dir = resolve(root, rel_dir)?;
+fn list(scope: &Scope, rel_dir: &str) -> Handled {
+    let dir = resolve_dir(scope, rel_dir)?;
     let mut entries: Vec<Entry> = Vec::new();
     let mut truncated = false;
     let read_dir = std::fs::read_dir(&dir).map_err(|e| err("io", format!("列目录失败：{e}")))?;
@@ -189,8 +192,8 @@ fn cmp_name(a: &str, b: &str) -> std::cmp::Ordering {
     a.to_lowercase().cmp(&b.to_lowercase())
 }
 
-fn stat(root: &Path, rel: &str) -> Handled {
-    let path = resolve(root, rel)?;
+fn stat(scope: &Scope, rel: &str) -> Handled {
+    let path = resolve(scope, rel)?;
     let meta = std::fs::metadata(&path).map_err(|e| err("io", format!("读属性失败：{e}")))?;
     let is_dir = meta.is_dir();
     let size = meta.len();
@@ -199,8 +202,8 @@ fn stat(root: &Path, rel: &str) -> Handled {
         .map_err(|e| err("io", e.to_string()))
 }
 
-fn read(root: &Path, rel: &str, force: Option<&str>) -> Handled {
-    let path = resolve(root, rel)?;
+fn read(scope: &Scope, rel: &str, force: Option<&str>) -> Handled {
+    let path = resolve(scope, rel)?;
     let bytes = std::fs::read(&path).map_err(|e| err("io", format!("读取失败：{e}")))?;
     if (bytes.len() as u64) > MAX_REMOTE_FILE_BYTES {
         return Err(err("toobig", format!(
@@ -222,13 +225,13 @@ fn read(root: &Path, rel: &str, force: Option<&str>) -> Handled {
         .map_err(|e| err("io", e.to_string()))
 }
 
-fn write(root: &Path, p: PathParams) -> Handled {
+fn write(scope: &Scope, p: PathParams) -> Handled {
     // 基线必填。留空即跳判等于给出一条「手机没说基线 → 桌面内容被静默覆盖」的通道，
     // 而这条链路上每次 `read` 都会带回哈希，不存在 legitimately 没有基线的写。
     if p.base_hash.is_empty() {
         return Err(err("badparams", "缺少内容基线（read 返回的 hash）"));
     }
-    let path = resolve(root, &p.rel_path)?;
+    let path = resolve(scope, &p.rel_path)?;
     if path.is_dir() {
         return Err(err("badpath", "这是一个文件夹，不能当作文件保存"));
     }
@@ -269,9 +272,19 @@ fn write(root: &Path, p: PathParams) -> Handled {
 
 /* ------------------------------------------------------------------ 工具 */
 
-/// 解析 + 逃逸校验（[`roots::resolve_rel`] 是唯一入口）。
-fn resolve(root: &Path, rel: &str) -> Result<std::path::PathBuf, (String, String)> {
-    roots::resolve_rel(root, rel).map_err(|r| err(r.code(), r.message()))
+/// 解析 + 逃逸校验（[`board::resolve_in_scope`] 是命令面唯一的入口：
+/// 白名单引用与共享根两条路在那里分岔，且互斥）。
+fn resolve(scope: &Scope, rel: &str) -> Result<std::path::PathBuf, (String, String)> {
+    board::resolve_in_scope(scope, rel).map_err(|r| err(r.code(), r.message()))
+}
+
+/// 只有目录类命令（`list`）用它：白名单条目凭定义是**文件**，拿它当目录列举是误用，
+/// 与其让 `read_dir` 抛一个含糊的 io 错误，不如在这里按同一套码说清。
+fn resolve_dir(scope: &Scope, rel: &str) -> Result<std::path::PathBuf, (String, String)> {
+    if board::parse_open_rel(rel).is_some() {
+        return Err(err("badpath", "桌面上打开的这个标签是一个文件，不能当目录列举"));
+    }
+    resolve(scope, rel)
 }
 
 fn mtime_of(meta: &std::fs::Metadata) -> i64 {

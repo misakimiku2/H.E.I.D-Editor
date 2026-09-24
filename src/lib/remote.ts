@@ -138,6 +138,45 @@ export function makeRemotePath(deviceId: string, rel: string): string {
   return body ? `${REMOTE_SCHEME}${deviceId}/${body}` : `${REMOTE_SCHEME}${deviceId}`;
 }
 
+/* ------------------------------------------------ 根外白名单引用（阶段 3 §6.3） */
+
+/**
+ * 白名单引用的保留首段，与 Rust 侧 `link::board::OPEN_HEAD` 同值。
+ * 桌面上开着、但不在共享根里的文件，靠它寻址：`@w/<12 位十六进制>/<文件名>`。
+ *
+ * 为什么不是设计稿 §4.2 原先写的 `tabOpen {index}`：下标会随开关标签漂移，
+ * 手机上那份标签的身份键必须稳定（同一份文件重开不该变成另一个标签），
+ * 而 `read` / `write` 的基线判定也才能与根内文件共用同一条通道。
+ */
+export const OPEN_REL_HEAD = '@w';
+
+const OPEN_REL = /^@w\/([0-9a-f]{12})\/([^/\\]+)$/;
+
+/** 这条 `rel` 是不是白名单引用（而不是共享根内的相对路径） */
+export function isOpenRel(rel: string): boolean {
+  return OPEN_REL.test(rel);
+}
+
+/** 从白名单引用里取出文件标识；不是引用就返回 null */
+export function openRelId(rel: string): string | null {
+  return OPEN_REL.exec(rel)?.[1] ?? null;
+}
+
+/** 桌面 `tabs` 命令的一行。`rel` 与 `reason` 互斥：能打开才有 rel。 */
+export interface RemoteTabView {
+  title: string;
+  language: string;
+  mdView: string;
+  dirty: boolean;
+  readOnly: boolean;
+  line: number;
+  col: number;
+  /** 打开它要用的相对引用：共享根内是普通相对路径，根外是 `@w/…`；打不开是空串 */
+  rel: string;
+  /** `''` | `dirty`（桌面有未保存的修改）| `novirtual`（还没保存到磁盘）| `missing`（现在读不到） */
+  reason: string;
+}
+
 function decodeSegment(seg: string): string {
   try {
     return decodeURIComponent(seg);
@@ -172,7 +211,7 @@ export function parseRemotePath(path: string): RemoteRef | null {
 
 /* ------------------------------------------------------------------ 命令封装 */
 
-export type RemoteMethod = 'list' | 'stat' | 'read' | 'write';
+export type RemoteMethod = 'list' | 'stat' | 'read' | 'write' | 'tabs';
 
 /**
  * `link_request` 成功时带回的是**结果 JSON 文本**而不是对象（Rust 侧返回 `String`），
@@ -227,4 +266,12 @@ export async function remoteRead(relPath: string, forceEncoding?: string): Promi
 export async function remoteWrite(args: RemoteWriteArgs): Promise<RemoteWriteResult> {
   if (!isTauri) throw unavailable();
   return request<RemoteWriteResult>('write', { ...args });
+}
+
+/** 桌面正打开着的标签（阶段 3）。无参：要哪一份由桌面的聚焦窗口决定。 */
+export async function remoteTabs(): Promise<RemoteTabView[]> {
+  if (!isTauri) throw unavailable();
+  const list = await request<RemoteTabView[]>('tabs', {});
+  // 桌面上的命令面只会给数组；真给了别的形状就是协议错开，如实报而不是当空列表
+  return Array.isArray(list) ? list : [];
 }

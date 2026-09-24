@@ -36,7 +36,7 @@ import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDo
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
-import { autoReconnectFromPrefs, autoStartFromPrefs, setSharedRoot } from './lib/link';
+import { autoReconnectFromPrefs, autoStartFromPrefs } from './lib/link';
 import { LANGUAGE_LABELS, detectLanguageFromPath } from './lib/codemirror';
 import {
   EOL_LABELS, applyLineEnding, normalizeToLf, type LineEnding,
@@ -88,6 +88,7 @@ import { useDiffTimelines } from './hooks/useDiffTimelines';
 import { useDiscardConfirm } from './hooks/useDiscardConfirm';
 import { useFileActions } from './hooks/useFileActions';
 import { useSessionPersistence } from './hooks/useSessionPersistence';
+import { useTabReport } from './hooks/useTabReport';
 import { usePlatformIntegration } from './hooks/usePlatformIntegration';
 import { useAppShortcuts } from './hooks/useAppShortcuts';
 import { useSplitScroll } from './hooks/useSplitScroll';
@@ -644,12 +645,6 @@ export default function App() {
     saveTreeRoot(treeRootPath);
   }, [treeRootPath]);
 
-  /* 桌面把文件树当前的根如实报给链路层当共享范围（设计稿 §2.3：不让用户再选第二遍）。
-     手机端不报：它恒为客户端，一台手机上都没有暴露过任何文件 */
-  useEffect(() => {
-    if (isTauri && !IS_ANDROID_APP) void setSharedRoot(treeRootPath);
-  }, [treeRootPath]);
-
   /* ---- 文件树管理操作的标签页同步与危险确认（管理命令在 FileTreeSidebar 内执行） ---- */
 
   /** 删除确认（复用全局自绘确认弹窗，标题换为删除语义） */
@@ -848,12 +843,14 @@ export default function App() {
 
   /* ---- 设备互联：上次开着就自动重新 bind（桌面，2026-09-23 定的「记忆开关」）；
      手机侧则按记住的设备免扫自动重连。两者各自只在对应端生效。
-     等 hydrated 之后再跑：阶段 2 的共享范围取的是文件树当前根，早了会拿到空值。 ---- */
+     等 hydrated 之后再跑：阶段 2 的共享范围取的是文件树当前根，早了会拿到空值。
+     只由主窗口发起 —— 服务端是**进程级单例**（一个端口），每个文档窗口各跑一次
+     就等于"新开一个窗口"会把手机上正连着的那条链路换掉（多窗口是阶段 3 才成真的场景）。 ---- */
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || !isMain) return;
     void autoStartFromPrefs();
     void autoReconnectFromPrefs();
-  }, [hydrated]);
+  }, [hydrated, isMain]);
 
   /* ---- 分屏同步滚动 ---- */
   const { attachEditorScroller, attachPreviewScroller } = useSplitScroll();
@@ -928,6 +925,13 @@ export default function App() {
     setTreeOpen(true);
     setSettingsOpen(false);
   }, []);
+
+  /* 手机在「电脑上正打开的」列表里点一行：设置页要收掉，否则手机上整页仍是设置，
+     看不见刚打开的那个标签（与上面进远程文件树同一条道理） */
+  const openRemoteFile = useCallback((p: string) => {
+    setSettingsOpen(false);
+    void file.openPathIntoTab(p);
+  }, [file.openPathIntoTab]);
 
   /* ---- 网址导入：转换结果以 Markdown 新标签页打开（分屏视图，标脏） ---- */
   const handleUrlImported = useCallback((result: UrlImportResult) => {
@@ -1095,6 +1099,17 @@ export default function App() {
   useEffect(() => {
     setCursorInfo({ line: 1, col: 1, selChars: 0 });
   }, [editor.activeTabId]);
+
+  /* 桌面把本窗口的共享根与标签列表报给链路层（设计稿 §2.3 / §6.1）。
+     手机端不报：它恒为客户端，一台手机上都没有暴露过任何文件 */
+  useTabReport({
+    enabled: isTauri && !IS_ANDROID_APP,
+    windowLabel,
+    rootPath: treeRootPath,
+    tabs: editor.tabs,
+    activeTabId: editor.activeTabId,
+    cursor: cursorInfo,
+  });
 
   /* ---- render ---- */
 
@@ -2557,6 +2572,7 @@ export default function App() {
             onClose={() => setSettingsOpen(false)}
             asPage={isPhone}
             onBrowseRemote={openRemoteTree}
+            onOpenRemoteFile={openRemoteFile}
           />
         )}
 

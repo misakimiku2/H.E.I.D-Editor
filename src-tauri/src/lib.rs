@@ -165,7 +165,15 @@ pub fn run() {
         .manage(launch::LaunchPaths::default())
         .manage(large_file::LargeFileIndex::default())
         .manage(windows::WindowBootstrap::default())
-        .manage(windows::PendingTabDrag::default());
+        .manage(windows::PendingTabDrag::default())
+        /* 设备互联要按「聚焦窗口」取标签列表与共享根（设计稿 §6.1）：手机看到的，
+           永远是用户眼前那台窗口报上来的那一份。焦点与关窗都由这里喂给看板 ——
+           前端的 `onFocusChanged` 做不到：新窗口建好到前端挂上监听之间会漏事件。 */
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Focused(true) => link::on_window_focus(tauri::Manager::app_handle(window), window.label()),
+            tauri::WindowEvent::Destroyed => link::on_window_closed(tauri::Manager::app_handle(window), window.label()),
+            _ => {}
+        });
 
     builder
         .invoke_handler(tauri::generate_handler![
@@ -187,6 +195,7 @@ pub fn run() {
             link::link_pair_deny,
             link::link_pairings_list,
             link::link_set_root,
+            link::link_report_tabs,
             link::link_request,
             link::link_pairing_revoke,
             external::open_external,

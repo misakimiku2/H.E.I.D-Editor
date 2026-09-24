@@ -51,6 +51,7 @@ fn main() {
             "link_pairings_list",
             "link_pairing_revoke",
             "link_set_root",
+            "link_report_tabs",
             "link_request",
         ])),
     )

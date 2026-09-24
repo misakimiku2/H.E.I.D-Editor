@@ -108,6 +108,10 @@ pub enum Reject {
     NotFound,
     /// 解析时撞上了别的 I/O 错误（权限、卷离线…）
     Io(String),
+    /// 桌面还没设共享根：根内这条路根本没有起点
+    NoRoot,
+    /// 白名单里没有这条（标签已关，或它已被换成指向别处的链接）
+    NotOpen,
 }
 
 impl Reject {
@@ -119,6 +123,8 @@ impl Reject {
             Reject::Outside => "outside",
             Reject::NotFound => "notfound",
             Reject::Io(_) => "io",
+            Reject::NoRoot => "noroot",
+            Reject::NotOpen => "notopen",
         }
     }
 
@@ -129,6 +135,10 @@ impl Reject {
             Reject::Outside => "该路径经符号链接指向了共享范围之外，已拒绝".to_string(),
             Reject::NotFound => "共享根内没有这个文件".to_string(),
             Reject::Io(e) => format!("路径解析失败：{e}"),
+            Reject::NoRoot => "桌面还没设置共享的文件夹".to_string(),
+            // 这一条把两种成因并到一个码上：关标签（授权当场收回）与条目被换掉
+            // （白名单里那个路径现在指向别处）。对端要做的都是同一件事 —— 别再重试。
+            Reject::NotOpen => "桌面已不再把这个文件作为打开的标签暴露（标签关掉了，或它已被替换）".to_string(),
         }
     }
 }
