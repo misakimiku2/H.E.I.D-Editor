@@ -40,7 +40,7 @@ export const LATEST_JSON_URLS = [
 ];
 
 /** 版本号兜底（浏览器模式无 getVersion API；与 package.json / tauri.conf.json 同步维护） */
-export const FALLBACK_APP_VERSION = '1.4.2';
+export const FALLBACK_APP_VERSION = '1.5.0';
 
 export interface LatestReleaseInfo {
   version: string;
