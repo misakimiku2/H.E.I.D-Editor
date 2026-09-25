@@ -1041,9 +1041,26 @@ B 段重写成时机判据：握手后不谎报 / 1 s 内转已连接 / 拒绝�
    `transferred` 变体、复用多窗口 bootstrap 那条「传 `SessionState` → `restoreSessionTabs`」通路、
    光标走既有 `jumpRequest`、单条上限 `MAX_DRAFT_CHARS`、移交语义（源端进"已移交"只读态）而不是同步。
    依赖最浅，单独发（v1.5.2）。
-2. **v1.5.1 发布**（阶段 4 + 5）：这一版是「断网不丢内容」那一档，六处版本号 + CI + 签名 +
-   发行说明单独成文，并且**每个版本都要走完 `mirror-gitee`**（「获取另一版」的二维码按 tag 直链，
-   没走镜像任务就是扫码 404 —— 见条目 49 / 54）。
+2. ✅ **v1.5.0 已发布（2026-09-25 晚）**。原表那段三段拆分作废：阶段 0-5 与「入口提到一级」一次性
+   作为 v1.5.0 发出去了 —— v1.5.0 从未发过，再切一个 1.5.1 只是让第一版少一半东西。下一版是阶段 6。
+   发布事实（都是重新取回来对过的，不是看任务绿灯）：
+   - tag `v1.5.0` → commit `5d7d9f8`（版本号六处 + `docs/RELEASE-NOTES-v1.5.0.md`），`origin/main` 同点；
+     Release 非草稿，正文就是那版发行说明。
+   - 四个资产：`H.I.D.E_1.5.0_x64-setup.exe` 8,090,265 B（sha256 `183a2a06…ee681633`）、`.sig` 416 B、
+     `latest.json` 4,649 B、`H.I.D.E_1.5.0_arm64.apk` 16,164,266 B（sha256 `a392bc39…7f7265b1`）。
+   - APK：`versionCode 1005000 / versionName 1.5.0`、包内只有 `lib/arm64-v8a/`、V2 证书摘要
+     `60f82f09…1884e20f` —— 与 v1.4.0/1.4.1/1.4.2 同一把 keystore，**覆盖安装成立**；
+     `latest.json` 的 `signature` 与发布的 `.sig` 逐字节相同，签名里绑的文件名是
+     `H.I.D.E_1.5.0_x64-setup.exe`。
+   - **`mirror-gitee` 在 CI 上连挂两次**（attempt 1、2 都是 `UND_ERR_HEADERS_TIMEOUT`，且都卡在 5 分钟整）：
+     根因不是 Gitee 挂了，而是 undici（Node 的 fetch）默认 `headersTimeout` 正好 300 s，而 Gitee 的
+     `attach_files` 要收完整个包才回话，境外 runner 传 8 MB 就是超过 5 分钟。已按根因修（`6e082da`：
+     上传这一路改走 `node:https`，其余小请求仍用 fetch）。本次镜像由本机补跑完成：Gitee `v1.5.0`
+     （id 1166633）两个产物与 GitHub **sha256 逐字节一致**，`mirror-latest/latest.json` 已是 1.5.0
+     且两条 `platforms.url` 都指向 gitee.com。
+     **往后这条再挂就直接本地补跑 `scripts/mirror-gitee.mjs`**：本机到 Gitee 传这两个包十几秒，
+     而 CI 重跑用的还是标签指向的那份旧脚本，重跑只会同样挂。
+
 3. **还欠着的**（别当已收尾）：① 上面第 1 条查出来的 deviceId 换长期指纹；② 手机壳 412px 的
    横幅排版 + 真机（Tab S8 / Mate）走一遍阶段 5 的断网—恢复；③ 阶段 4 记过的
    「共享根是 UNC 网络路径」那一种形态；④ 条目 55（桌面覆盖脏标签的口子）与 57
