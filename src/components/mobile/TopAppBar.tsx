@@ -40,6 +40,11 @@ interface TopAppBarProps {
       缺了它从文本视图（如大文件/查找自动切换）就回不去网格） */
   csvView?: 'grid' | 'text';
   onToggleCsvView?: () => void;
+  /**
+   * 「设备互联」一级入口（v1.5）：App 给一颗已经带好状态点的按钮，位置排在文件树右侧。
+   * 顶栏只负责排布与 48dp 档，状态怎么判归 `DeviceLinkPanel` 那一份，免得两处各写一套。
+   */
+  linkSlot?: React.ReactNode;
 }
 
 /**
@@ -55,7 +60,7 @@ export function TopAppBar({
   onSettings, onShortcuts, onAbout,
   treeOpen, hasTreeRoot, onToggleTree,
   canToggleView, view, onToggleView,
-  csvView, onToggleCsvView,
+  csvView, onToggleCsvView, linkSlot,
 }: TopAppBarProps) {
   const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -171,6 +176,9 @@ export function TopAppBar({
           {csvView === 'text' ? <Table size={19} /> : <Code size={19} />}
         </button>
       )}
+
+      {/* 设备互联一级入口（App 给的按钮，自带状态点）：排在文件树右侧、更多菜单左侧 */}
+      {linkSlot}
 
       {/* 文件树抽屉入口：已开=实心(点击收起)；未开且有根目录=展开；无根目录=唤起系统目录选择 */}
       {onToggleTree && (

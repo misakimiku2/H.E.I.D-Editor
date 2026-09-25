@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
 import { ShieldAlert, Smartphone } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { IS_ANDROID_APP } from '../lib/platform';
-import { EMPTY_STATUS, fetchStatus, subscribeLinkStatus, type LinkStatus } from '../lib/link';
+import { useLinkStatus } from '../hooks/useLinkStatus';
 
 /**
  * 状态栏上的「手机可访问」常驻标记（v1.5 阶段 1 定稿第 1 条的硬要求：
@@ -17,15 +16,7 @@ import { EMPTY_STATUS, fetchStatus, subscribeLinkStatus, type LinkStatus } from 
  */
 export function LinkShareChip({ dark }: { dark: boolean }) {
   const t = useT();
-  const [s, setS] = useState<LinkStatus>(EMPTY_STATUS);
-
-  useEffect(() => {
-    if (IS_ANDROID_APP) return;
-    let alive = true;
-    fetchStatus().then((v) => { if (alive) setS(v); }).catch(() => {});
-    const off = subscribeLinkStatus((v) => { if (alive) setS(v); });
-    return () => { alive = false; off(); };
-  }, []);
+  const s = useLinkStatus();
 
   if (IS_ANDROID_APP || s.role !== 'server' || !s.listening) return null;
 

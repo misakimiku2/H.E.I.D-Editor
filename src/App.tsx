@@ -55,6 +55,8 @@ import { translate, resolveSystemLang, type Lang, type MessageKey } from './lib/
 import { I18nProvider, rt, setRuntimeLang } from './lib/i18nContext';
 import { deleteDraft, draftKeyForTab } from './lib/drafts';
 import { SettingsDialog } from './components/SettingsDialog';
+import { DeviceLinkMenuButton, ScanLinkEntry } from './components/DeviceLinkPanel';
+import type { LinkOfflineInfo } from './components/DeviceLinkSection';
 import { UrlImportModal } from './components/UrlImportModal';
 import { FileTreeSidebar, type TreeSyncMark } from './components/FileTreeSidebar';
 import { getDirLister, isSvgPath, loadTreeRoot, saveTreeRoot } from './lib/fileTree';
@@ -281,6 +283,17 @@ export default function App() {
     }
     return m;
   }, [offline.markers, diff.diffTimelines]);
+
+  /* 互联入口与抽屉里的离线队列摘要：数还是 useOfflineSync 那一份，这里只是换个地方说。
+     桌面是服务端、没有队列，所以只有手机端才有这一项 */
+  const linkOffline: LinkOfflineInfo | undefined = IS_ANDROID_APP && isTauri ? {
+    offline: offline.offline,
+    pending: offline.pending,
+    conflicts: offline.conflicts,
+    progress: offline.progress,
+    onSync: () => offline.syncNow(),
+    onCancel: () => offline.cancel(),
+  } : undefined;
 
   /** 长按菜单与横幅上的「查看差异」：把那个标签切到前台再开时间线（没开着就没有差异可看） */
   const showDiffForPath = useCallback((path: string) => {
@@ -714,6 +727,8 @@ export default function App() {
   /* 移动端：标签页抽屉开合 */
   const [tabSheetOpen, setTabSheetOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /* 手机顶栏那颗「扫一扫」点开的相机层（桌面/平板那颗按钮自己管自己的浮层） */
+  const [scanOpen, setScanOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [urlImportOpen, setUrlImportOpen] = useState(false);
   const [diffModalOpen, setDiffModalOpen] = useState(false);
@@ -899,7 +914,7 @@ export default function App() {
 
   /* ---- 平台适配（拖拽 / 外部交来的文件 / 链接守卫 / 关闭拦截 / 安卓返回键与安全区 / 浏览器兜底）---- */
   const overlayState = {
-    tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
+    tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, scanOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
@@ -914,6 +929,7 @@ export default function App() {
       cancelDiscard: () => pendingDiscard?.resolve('cancel'),
       closeFind,
       closeSettings: () => setSettingsOpen(false),
+      closeScan: () => setScanOpen(false),
       closeShortcuts: () => setShortcutsOpen(false),
       closeTabMenu: () => setTabMenu(null),
       closeTabSheet: () => setTabSheetOpen(false),
@@ -1641,6 +1657,15 @@ export default function App() {
           onSaveAs={file.handleSaveAs}
           onImportUrl={isTauri ? () => setUrlImportOpen(true) : undefined}
           onOpenDiff={() => setDiffModalOpen(true)}
+          /* 手机顶栏的互联入口：直接就是「扫一扫」，点开是相机，不再多一层抽屉 */
+          linkSlot={linkOffline ? (
+            <ScanLinkEntry
+              dark={isDarkMode}
+              offline={linkOffline}
+              open={scanOpen}
+              onOpenChange={setScanOpen}
+            />
+          ) : undefined}
           onInsertTable={() => { if (isMarkdown) previewRef.current?.insertTable(); }}
           onInsertImage={() => { if (isMarkdown) previewRef.current?.openImageModal(); }}
           onSettings={() => setSettingsOpen(true)}
@@ -1723,6 +1748,17 @@ export default function App() {
         >
           <Menu size={IS_TOUCH_PRIMARY ? 18 : 15} />
         </button>
+
+        {/* 设备互联一级入口（v1.5）：内容仍是设置里那一整块，点开是贴着按钮的浮层。
+            状态与状态栏那条「手机可访问」标记读同一份 link_status */}
+        {isTauri && (
+          <DeviceLinkMenuButton
+            dark={isDarkMode}
+            offline={linkOffline}
+            onBrowseRemote={openRemoteTree}
+            onOpenRemoteFile={openRemoteFile}
+          />
+        )}
 
         {/* 文件夹树入口：桌面保持 PanelLeft 图标开关。平板把打开/关闭文件夹从主菜单
             提取为菜单栏常驻图标按钮（与菜单栏其他按钮同为纯图标、48px 触控目标）：
@@ -2671,6 +2707,7 @@ export default function App() {
             onChange={setSettings}
             onClose={() => setSettingsOpen(false)}
             asPage={isPhone}
+            offline={linkOffline}
             onBrowseRemote={openRemoteTree}
             onOpenRemoteFile={openRemoteFile}
           />

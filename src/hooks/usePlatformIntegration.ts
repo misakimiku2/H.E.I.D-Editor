@@ -23,6 +23,8 @@ export interface OverlayState {
   pendingDiscard: PendingDiscardConfirm | null;
   findOpen: boolean;
   settingsOpen: boolean;
+  /** 手机顶栏那颗「扫一扫」点开的相机层 */
+  scanOpen: boolean;
   shortcutsOpen: boolean;
   tabMenuOpen: boolean;
 }
@@ -31,6 +33,7 @@ export interface OverlayActions {
   cancelDiscard: () => void;
   closeFind: () => void;
   closeSettings: () => void;
+  closeScan: () => void;
   closeShortcuts: () => void;
   closeTabMenu: () => void;
   closeTabSheet: () => void;
@@ -220,6 +223,7 @@ export function usePlatformIntegration({
       const a = overlayActionsRef.current;
       if (o.pendingDiscard) { a.cancelDiscard(); return; }
       if (o.findOpen) { a.closeFind(); return; }
+      if (o.scanOpen) { a.closeScan(); return; }
       if (o.settingsOpen) { a.closeSettings(); return; }
       if (o.shortcutsOpen) { a.closeShortcuts(); return; }
       if (o.tabMenuOpen) { a.closeTabMenu(); return; }

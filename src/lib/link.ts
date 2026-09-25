@@ -198,6 +198,22 @@ export function savePrefs(patch: Partial<LinkPrefs>): LinkPrefs {
   return next;
 }
 
+/**
+ * 配对成功后把对端记进偏好 —— 下次启动的免扫重连全靠这一份。
+ * 地址取 `peerAddr`：客户端那一侧它就是「连过去时用的 地址:端口」，
+ * 所以扫码这条没有输入框可填的路也记得住该连哪儿。
+ */
+export function rememberPeer(st: LinkStatus): void {
+  if (!st.peerKeyId) return;
+  const m = /^(.*):(\d{1,5})$/.exec(st.peerAddr || '');
+  savePrefs({
+    keyId: st.peerKeyId,
+    peerName: st.peerDevice,
+    host: m ? m[1] : st.peerAddr,
+    ...(m ? { port: Number(m[2]) } : {}),
+  });
+}
+
 /** 端口合法区间：与 Rust `link_server_start` 的校验一致，两端各挡一次 */
 export function isUsablePort(port: number): boolean {
   return Number.isInteger(port) && port >= 1024 && port <= 65535;

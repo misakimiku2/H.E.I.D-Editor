@@ -1,28 +1,43 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Copy, Files, FolderTree, Loader2, QrCode, ShieldAlert, Smartphone, Usb, X } from 'lucide-react';
+import { Copy, Files, FolderTree, Loader2, QrCode, ShieldAlert, Usb, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
 import { isTauri } from '../lib/fileIO';
 import {
   DEFAULT_LINK_PORT, approvePair, connectTo, denyPair, deviceName, disconnectClient,
-  fetchStatus, isUsablePort, loadPrefs, pairCode, pairQr, pairUri, pairingsList, reconnect,
+  fetchStatus, isUsablePort, loadPrefs, pairCode, pairQr, pairUri, pairingsList, reconnect, rememberPeer,
   revokePairing, savePrefs, setTestPair, startServer, stopServer, subscribeLinkStatus, subscribePairRequests,
   type LinkPairReq, type LinkStatus, type PairInfo, type QrInfo,
 } from '../lib/link';
 import { makeRemotePath } from '../lib/remote';
+import { isLinkEnabled, linkStateText } from '../lib/linkStatusText';
 import { RemoteTabsSheet } from './RemoteTabsSheet';
 
 /* 二维码只在桌面开配对窗时才用得到，懒加载独立 chunk（与「关于」里的 QrImage 同库同策略） */
 const QrImage = lazy(() => import('./QrImage'));
-/* 扫码器 + 解码库（jsqr）只在手机点「扫一扫」时才用得到，同样懒加载、不进主包 */
-const QrScanner = lazy(() => import('./QrScanner'));
+
+/**
+ * 手机侧离线队列（阶段 5）。桌面是服务端、没有队列，App 那边就不会传这一项。
+ * 文案与配色与文件树顶部那条横幅同源 —— 同一件事在两个地方说法必须一样。
+ */
+export interface LinkOfflineInfo {
+  /** 已配对但链路断了：此时「立即同步」点了也没用，只报数 */
+  offline: boolean;
+  pending: number;
+  conflicts: number;
+  progress: { done: number; total: number } | null;
+  onSync: () => void;
+  onCancel: () => void;
+}
 
 interface DeviceLinkSectionProps {
   dark: boolean;
   /** 与 SettingsDialog 同源的行样式，避免这里另写一份尺寸定义后与别处漂移 */
   rowCls: string;
   labelCls: string;
+  /** 离线队列摘要；只在手机侧、且真有欠账时占一行 */
+  offline?: LinkOfflineInfo;
   /** 手机点「浏览这台电脑的文件」：把远程根交给 App 去开文件树抽屉 */
   onBrowseRemote?: (rootPath: string) => void;
   /**
@@ -34,12 +49,70 @@ interface DeviceLinkSectionProps {
 
 /**
  * 设置 →「设备互联」。桌面是服务端（开关 + 端口 + 配对二维码 + 已配对设备），
- * 手机是客户端（配对 / 免扫重连）—— 拓扑定死，两端各只出现自己那一半。
+ * 手机是客户端（免扫重连 / 改用配对码 / 离线队列）—— 拓扑定死，两端各只出现自己那一半。
  *
- * 阶段 1：桌面生成 `hide-link://pair` 二维码 + 6 位短码兜底；手机用应用内「扫一扫」配对，
- * 配对后记住设备、启动免扫重连。粘贴配对码 / 短码是相机不可用时的等价入口，不是过渡方案。
+ * 手机的「扫一扫」不在这格里：它在顶栏那颗入口上，点下去直接开相机
+ * （见 `DeviceLinkPanel.tsx` 的 `ScanLinkEntry`）。这一格留的是不需要相机的等价入口。
  */
-export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOpenRemoteFile }: DeviceLinkSectionProps) {
+/**
+ * 离线队列那一行：待同步 / 需确认 / 正在写回。
+ * 与文件树顶部那条横幅同一套文案与颜色，只是换了个说它的地方。
+ */
+export function OfflineQueueRow({ dark, info }: { dark: boolean; info: LinkOfflineInfo }) {
+  const t = useT();
+  if (!info.progress && info.pending === 0 && info.conflicts === 0) return null;
+  const line = 'flex items-center gap-1.5 min-h-[28px] pointer-coarse:min-h-[40px]';
+  const dot = 'w-1.5 h-1.5 rounded-full shrink-0';
+  const btn = cn(
+    'shrink-0 rounded-lg font-medium transition-colors',
+    IS_TOUCH_PRIMARY ? 'min-h-[48px] min-w-[80px] px-3 text-sm' : 'px-2 py-0.5 text-[11px]',
+    dark ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-200 text-zinc-700',
+  );
+  return (
+    <div
+      role="status"
+      className={cn(
+        'mx-2.5 my-1 flex flex-col gap-1 rounded-xl border px-3 py-2 text-xs pointer-coarse:text-sm',
+        dark ? 'border-zinc-700/70 bg-zinc-900/30' : 'border-zinc-200 bg-zinc-50/70',
+      )}
+    >
+      {info.progress ? (
+        <div className={line}>
+          <Loader2 size={13} className="shrink-0 animate-spin" />
+          <span className="min-w-0 flex-1">
+            {t('offline.bannerSyncing', { done: info.progress.done, total: info.progress.total })}
+          </span>
+          <button type="button" onClick={info.onCancel} className={btn}>{t('common.cancel')}</button>
+        </div>
+      ) : (
+        <>
+          {info.conflicts > 0 && (
+            <div className={line}>
+              <span className={cn(dot, 'bg-red-500')} />
+              <span className="min-w-0 flex-1">{t('offline.bannerConfirm', { n: info.conflicts })}</span>
+            </div>
+          )}
+          {info.pending > 0 && (
+            <div className={line}>
+              <span className={cn(dot, 'bg-amber-500')} />
+              <span className="min-w-0 flex-1">
+                {info.offline
+                  ? t('offline.banner', { n: info.pending })
+                  : t('offline.countTip', { pending: info.pending, conflicts: info.conflicts })}
+              </span>
+              {/* 断开时不给「立即同步」：那一下必然失败，能做的只有下面的免扫重连 */}
+              {!info.offline && (
+                <button type="button" onClick={info.onSync} className={btn}>{t('offline.syncNow')}</button>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+export function DeviceLinkSection({ dark, rowCls, labelCls, offline, onBrowseRemote, onOpenRemoteFile }: DeviceLinkSectionProps) {
   const t = useT();
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -54,16 +127,8 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
   const [pairReq, setPairReq] = useState<LinkPairReq | null>(null);
   const [uri, setUri] = useState('');
   const [code, setCode] = useState('');
-  const [scanning, setScanning] = useState(false);
   const [tabsSheet, setTabsSheet] = useState(false);
   const paired = !!initial.current.keyId && !!initial.current.host;
-
-  /* 预热扫码用的两个懒加载包：面板一开就把 QrScanner 与 jsQR 取回来（不挂相机、不申请权限）。
-     资源在 APK 内、不走网络，所以提前解包是白赚的——省掉点「扫一扫」后那一段 Suspense 空窗。 */
-  useEffect(() => {
-    if (!IS_TOUCH_PRIMARY) return;
-    void Promise.all([import('./QrScanner'), import('jsqr')]).catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -80,19 +145,27 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
 
   const asClient = IS_ANDROID_APP;
 
-  /** 配对/连接成功后，把手机记住的设备 keyId + 名字落进偏好，供下次免扫重连 */
-  const persistPairedDevice = useCallback(async () => {
-    const list = await pairingsList().catch(() => [] as PairInfo[]);
-    setDevices(list);
-    const newest = list[0];
-    if (newest) savePrefs({ keyId: newest.keyId, peerName: newest.name, host: host.trim() || newest.name });
-  }, [host]);
+  /* 共享开着就把二维码要过来直接摆着：以前还得再点一次「让手机连接」，
+     而那一下不带来任何新信息。`pairQr` 每次都是换一张新票，所以只在
+     「开了」这一下与每次手动刷新时取，别把它挂到状态推送上（推一次换一张，
+     手机上正对着的码会被自己作废）。 */
+  const listening = !asClient && status?.listening === true;
+  useEffect(() => {
+    if (!listening) return;
+    let alive = true;
+    pairQr().then((info) => { if (alive && info) setQr(info); }).catch(() => {});
+    return () => { alive = false; };
+  }, [listening]);
 
   const run = useCallback(async (fn: () => Promise<LinkStatus>) => {
     setBusy(true);
     setLocalError('');
     try {
-      setStatus(await fn());
+      const st = await fn();
+      setStatus(st);
+      /* 手机侧一拿到对端就把地址与设备记进偏好（下次启动免扫重连靠它）。
+         `rememberPeer` 自己判有没有 keyId，所以没连上时这一句什么都不做。 */
+      if (IS_ANDROID_APP) rememberPeer(st);
     } catch (e) {
       setLocalError(String((e as { message?: string })?.message ?? e));
     } finally {
@@ -113,8 +186,8 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
   };
 
   /**
-   * 测试配对模式：开的时候顺手把配对面板打开 —— 那张哨兵票的短码是固定的，
-   * 面板上的码就是手机要用的码，不用再点一次「让手机连接」。
+   * 测试配对模式：开的时候顺手换一次码 —— 那张哨兵票的短码是固定的，
+   * 面板上摆着的就是手机要用的码，不用再点一次刷新。
    */
   const onTestPairToggle = async (on: boolean) => {
     setBusy(true);
@@ -142,21 +215,14 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
     refreshDevices();
   };
 
-  // 手机：吃扫到/粘贴的 hide-link 配对码
+  // 手机：吃粘贴进来的 hide-link 配对码（相机不可用时的等价入口，顶栏那颗「扫一扫」走的是同一条配对）
   const doPairUri = (u: string) => {
     const s = u.trim();
     if (!s.startsWith('hide-link://pair')) return setLocalError(t('link.errUri'));
     setLocalError('');
-    savePrefs({ port: Number(port) || DEFAULT_LINK_PORT });
-    void run(() => pairUri(s, deviceName())).then(() => { void persistPairedDevice(); });
+    void run(() => pairUri(s, deviceName()));
   };
   const onPairUri = () => doPairUri(uri);
-  // 扫到一枚 hide-link 码：直接配对，并关掉扫码层
-  const onScanned = (text: string) => {
-    setScanning(false);
-    setUri(text);
-    doPairUri(text);
-  };
   // 手机：手输 host + port + 6 位短码
   const onPairCode = () => {
     const n = Number(port);
@@ -165,7 +231,7 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
     if (!/^\d{6}$/.test(code.trim())) return setLocalError(t('link.errCode'));
     setLocalError('');
     savePrefs({ host: host.trim(), port: n });
-    void run(() => pairCode(host.trim(), n, code.trim(), deviceName())).then(() => { void persistPairedDevice(); });
+    void run(() => pairCode(host.trim(), n, code.trim(), deviceName()));
   };
   // 手机：32 位配对码手填直连（调试通道，等价于无指纹的配对）
   const onConnectTicket = () => {
@@ -174,7 +240,7 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
     if (!isUsablePort(n)) return setLocalError(t('link.errPort'));
     setLocalError('');
     savePrefs({ host: host.trim(), port: n });
-    void run(() => connectTo(host.trim(), n, ticket.trim().toLowerCase(), deviceName())).then(() => { void persistPairedDevice(); });
+    void run(() => connectTo(host.trim(), n, ticket.trim().toLowerCase(), deviceName()));
   };
   const onReconnect = () => {
     const p = initial.current;
@@ -203,18 +269,8 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
   }
 
   const s = status;
-  const enabled = asClient ? s?.role === 'client' : s?.listening === true;
-  const stateText = !s || (!enabled && s.role === 'off')
-    ? t('link.stateOff')
-    : s.connected
-      ? t('link.stateConnected', { device: s.peerDevice || initial.current.peerName || s.peerAddr })
-      : asClient
-        ? /* 手机的中档：握手已过、桌面还没开始服务（它在等用户点「允许」）。
-             这一段既不能显示成"已连接"（做什么都没反应），也不该显示成"没连上"（明明配好了）。 */
-          s.waitingConfirm
-          ? t('link.stateAwaitConfirm')
-          : t('link.stateIdle')
-        : t('link.stateListening', { port: s.port });
+  const enabled = isLinkEnabled(s, asClient);
+  const stateText = linkStateText(t, s, asClient, initial.current.peerName);
   const errorText = localError || s?.lastError || '';
 
   const inputCls = cn(
@@ -240,6 +296,8 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
     <>
       {asClient ? (
         <>
+          {/* 离线队列那一档排在最前：它是「还有事没办完」，比下面的连接操作更该先看见 */}
+          {offline && <OfflineQueueRow dark={dark} info={offline} />}
           {enabled ? (
             <>
               {/* 已连着：看桌面上正开着的标签（阶段 3）+ 进远程文件树 + 断开，
@@ -285,13 +343,8 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
 
           {!enabled && (
             <>
-              {/* 扫一扫是主入口；下面粘贴/短码/手填是它的等价兜底（相机不可用时） */}
-              <div className={cn(rowCls, 'justify-end')}>
-                <button type="button" onClick={() => setScanning(true)} className={btnPrimary}>
-                  <Camera size={14} />
-                  {t('link.scan')}
-                </button>
-              </div>
+              {/* 顶栏那颗「扫一扫」是主入口；这一格留的是不需要相机的等价入口
+                  （相机被占用、码在另一台机器上、或对方直接把配对码发过来时） */}
               <div className={rowCls}>
                 <span className={labelCls}>{t('link.pasteCode')}</span>
                 <input
@@ -391,6 +444,51 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
               />
             </button>
           </div>
+          {/* TOFU 确认框：有持票设备来了才出现，允许才登记。摆在开关正下方 ——
+              这是那一瞬间唯一需要人点的东西，不该让人往下找 */}
+          {pairReq && (
+            <div className={cn(boxCls, 'border-amber-500/60', dark ? 'bg-amber-500/10' : 'bg-amber-50')}>
+              <div className="flex items-center gap-1.5 text-[11px] font-medium pointer-coarse:text-sm">
+                <ShieldAlert size={13} className="text-amber-500" />
+                {t('link.confirmTitle', { device: pairReq.device || t('link.unknownDevice') })}
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={onApprove} className={btnPrimary}>{t('link.allow')}</button>
+                <button type="button" onClick={onDeny} className={cn(btnGhost, 'inline-flex items-center gap-1')}>
+                  <X size={12} />
+                  {t('link.deny')}
+                </button>
+              </div>
+            </div>
+          )}
+          {/* 配对二维码：开关一拨开就摆在这里（见上面那个 listening 副作用），
+              不再要多点一次「让手机连接」。一次性票 2 分钟有效，过期就点「换一个码」 */}
+          {qr && enabled && (
+            <div className={cn(boxCls, 'heid-fade-in')}>
+              <div className="text-[11px] font-medium opacity-80">{t('link.qrTitle')}</div>
+              <div className="bg-white rounded-lg p-1.5 shadow-sm">
+                <Suspense fallback={<div style={{ width: 168, height: 168 }} aria-hidden />}>
+                  <QrImage text={qr.uri} size={168} />
+                </Suspense>
+              </div>
+              {/* 短码是扫码失败时的等价入口，本身就该占最显眼的那一行 */}
+              <div className="font-mono text-lg tracking-[0.2em]">{qr.code}</div>
+              <p className="text-[10px] leading-relaxed opacity-60 break-all">
+                {qr.host ? `${qr.host}:${qr.port}` : t('link.noLanIp')}
+              </p>
+              <button type="button" onClick={onShowQr} className={cn(btnGhost, 'text-[10px] min-h-0 px-2 py-1')}>
+                {t('link.refreshCode')}
+              </button>
+              <div className={cn('flex items-center gap-1.5', IS_TOUCH_PRIMARY && 'min-h-[48px]')}>
+                <span className="text-[10px] opacity-70">{t('link.ticket')}</span>
+                <button type="button" onClick={onCopyTicket} className="font-mono text-[11px] truncate max-w-[150px] underline decoration-dotted">
+                  {s?.ticket || '—'}
+                </button>
+                <Copy size={11} className="opacity-60" onClick={onCopyTicket} />
+                {copied && <span className="text-[10px] opacity-70">{t('link.copied')}</span>}
+              </div>
+            </div>
+          )}
           {/* 共享范围明示（设计稿 §5.2）：开着共享时用户必须看得见手机端能读到哪些文件 */}
           {enabled && (
             <div className={rowCls}>
@@ -448,15 +546,8 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
               </span>
             </p>
           )}
-          {/* 根外白名单也在暴露范围内（阶段 3 §6.3）：标签关一个少一个，所以只报数量不列路径 */}
-          {enabled && (s?.openShared ?? 0) > 0 && (
-            <div className={rowCls}>
-              <span className={labelCls}>{t('link.shareExtra')}</span>
-              <span className="min-w-0 flex-1 text-xs leading-snug">
-                {t('link.openSharedFiles', { n: s?.openShared ?? 0 })}
-              </span>
-            </div>
-          )}
+          {/* 根外白名单（阶段 3 §6.3）不在这里占一行（2026-09-25 他说多余）：
+              它说的是同一件事的第二遍，份数留在状态栏那条标记的悬停说明里可查。 */}
           {/* bind 成功但没人来连：这是「端口开着、包进不来」的半死状态，比直接报错难查，
               所以由桌面自己提，而不是等用户来回猜是哪台设备的问题 */}
           {enabled && status?.firewallHint && (
@@ -479,61 +570,6 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
               )}
             />
           </div>
-
-          {enabled && (
-            <div className={cn(rowCls, 'justify-end gap-2')}>
-              <button type="button" onClick={onShowQr} disabled={busy} className={btnPrimary}>
-                <Smartphone size={13} />
-                {t('link.showQr')}
-              </button>
-            </div>
-          )}
-
-          {/* 配对二维码面板：一次性票 2 分钟有效，点一次刷新一次 */}
-          {qr && enabled && (
-            <div className={cn(boxCls, 'heid-fade-in')}>
-              <div className="bg-white rounded-lg p-1.5 shadow-sm">
-                <Suspense fallback={<div style={{ width: 168, height: 168 }} aria-hidden />}>
-                  <QrImage text={qr.uri} size={168} />
-                </Suspense>
-              </div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-[11px] opacity-70">{t('link.shortCode')}</span>
-                <span className="font-mono text-lg tracking-[0.2em]">{qr.code}</span>
-              </div>
-              <p className="text-[10px] leading-relaxed opacity-60 break-all">
-                {qr.host ? `${qr.host}:${qr.port}` : t('link.noLanIp')}
-              </p>
-              <button type="button" onClick={onShowQr} className={cn(btnGhost, 'text-[10px] min-h-0 px-2 py-1')}>
-                {t('link.refreshCode')}
-              </button>
-              <div className={cn('flex items-center gap-1.5', IS_TOUCH_PRIMARY && 'min-h-[48px]')}>
-                <span className="text-[10px] opacity-70">{t('link.ticket')}</span>
-                <button type="button" onClick={onCopyTicket} className="font-mono text-[11px] truncate max-w-[150px] underline decoration-dotted">
-                  {s?.ticket || '—'}
-                </button>
-                <Copy size={11} className="opacity-60" onClick={onCopyTicket} />
-                {copied && <span className="text-[10px] opacity-70">{t('link.copied')}</span>}
-              </div>
-            </div>
-          )}
-
-          {/* TOFU 确认框：有持票设备来了才出现，允许才登记 */}
-          {pairReq && (
-            <div className={cn(boxCls, 'border-amber-500/60', dark ? 'bg-amber-500/10' : 'bg-amber-50')}>
-              <div className="flex items-center gap-1.5 text-[11px] font-medium pointer-coarse:text-sm">
-                <ShieldAlert size={13} className="text-amber-500" />
-                {t('link.confirmTitle', { device: pairReq.device || t('link.unknownDevice') })}
-              </div>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={onApprove} className={btnPrimary}>{t('link.allow')}</button>
-                <button type="button" onClick={onDeny} className={cn(btnGhost, 'inline-flex items-center gap-1')}>
-                  <X size={12} />
-                  {t('link.deny')}
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* 已配对设备：多台并存，同一时刻只服务一台；撤销后需重新扫码 */}
           {devices.length > 0 && (
@@ -558,12 +594,6 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
             </div>
           )}
         </>
-      )}
-
-      {scanning && (
-        <Suspense fallback={null}>
-          <QrScanner onResult={onScanned} onClose={() => setScanning(false)} dark={dark} />
-        </Suspense>
       )}
 
       {/* 手机上「电脑上正打开的文件」：sheet 自己 portal 到 body（设置弹窗的 backdrop-blur

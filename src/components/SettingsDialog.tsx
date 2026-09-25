@@ -3,7 +3,8 @@ import {
   X, RotateCcw, Settings, Palette, Sparkles, Type, LayoutGrid, Save,
   Check, Moon, Sun, ArrowLeft, Minus, Plus, Usb,
 } from 'lucide-react';
-import { DeviceLinkSection } from './DeviceLinkSection';
+import { DeviceLinkSection, type LinkOfflineInfo } from './DeviceLinkSection';
+import { PANEL_LABEL_CLS, panelRowCls } from './panelRows';
 import { cn } from '../lib/utils';
 import { IS_TOUCH_PRIMARY } from '../lib/platform';
 import {
@@ -26,6 +27,8 @@ interface SettingsDialogProps {
   onBrowseRemote?: (rootPath: string) => void;
   /** 设备互联里「电脑上正打开的文件」某一行：转发给 App 按路径开标签（阶段 3） */
   onOpenRemoteFile?: (path: string) => void;
+  /** 手机侧离线队列摘要，原样转给「设备互联」那一格 */
+  offline?: LinkOfflineInfo;
 }
 
 /**
@@ -173,7 +176,7 @@ function ThemeCard({ theme, selected, isDarkMode, onSelect }: {
   );
 }
 
-export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage, onBrowseRemote, onOpenRemoteFile }: SettingsDialogProps) {
+export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage, onBrowseRemote, onOpenRemoteFile, offline }: SettingsDialogProps) {
   const t = useT();
 
   useEffect(() => {
@@ -197,13 +200,9 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
       ? asPage ? "bg-zinc-900 text-zinc-100" : "border-zinc-700 bg-zinc-800/85 backdrop-blur-xl text-zinc-100"
       : asPage ? "bg-zinc-50 text-zinc-800" : "border-zinc-200/90 bg-white/85 backdrop-blur-xl text-zinc-800"
   );
-  const rowCls = cn(
-    "flex items-center justify-between gap-3 mx-2.5 rounded-lg transition-colors",
-    /* 触屏：整行按 Android 偏好行的尺寸走，开关/步进按钮本身就有 48dp 命中区 */
-    IS_TOUCH_PRIMARY ? "px-3 py-2 min-h-[56px]" : "px-2.5 py-2",
-    dark ? "hover:bg-zinc-700/30" : "hover:bg-zinc-100/70"
-  );
-  const labelCls = "text-xs font-medium pointer-coarse:text-sm";
+  /* 行样式与「设备互联」一级面板同源（见 panelRows.ts），改一处两边一起改 */
+  const rowCls = panelRowCls(dark);
+  const labelCls = PANEL_LABEL_CLS;
 
   /** 分段开关：横排互斥选项（缩进用）；触屏每段命中区 48dp */
   const segmentedNode = (value: string, onPick: (v: string) => void, options: Array<{ value: string; label: string }>) => (
@@ -526,7 +525,7 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
           ))}
 
           {sectionNode(Usb, t('settings.section.deviceLink'), (
-            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} onBrowseRemote={onBrowseRemote} onOpenRemoteFile={onOpenRemoteFile} />
+            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} offline={offline} onBrowseRemote={onBrowseRemote} onOpenRemoteFile={onOpenRemoteFile} />
           ))}
         </div>
 
