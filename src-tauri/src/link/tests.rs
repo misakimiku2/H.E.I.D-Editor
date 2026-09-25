@@ -218,6 +218,9 @@ fn test_identity() -> (identity::Identity, Vec<u8>, String) {
     (id, pkcs8, fp)
 }
 
+/// 服务端握手时上报的设备名（(c) 的判据要看它有没有原样到达客户端）
+const DESKTOP_NAME: &str = "MISAKI-PC";
+
 /// 走一整对握手：`server_resolve` 是服务端为这次 Hello 选的 salt（或拒绝）；
 /// `expect_fp` 是客户端要校验的桌面指纹。返回两侧各自的 `(会话, LS)`。
 fn establish(
@@ -228,14 +231,14 @@ fn establish(
     key_id: &str,
     slot: &str,
     expect_fp: &str,
-) -> (Result<(Session, [u8; 32]), String>, Result<(Session, [u8; 32]), String>) {
+) -> (Result<(Session, [u8; 32]), HandshakeFail>, Result<(Session, [u8; 32]), String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let pkcs8 = server_pkcs8.to_vec();
-    let srv = std::thread::spawn(move || -> Result<(Session, [u8; 32]), String> {
+    let srv = std::thread::spawn(move || -> Result<(Session, [u8; 32]), HandshakeFail> {
         let (mut s, _) = listener.accept().unwrap();
         s.set_read_timeout(Some(Duration::from_millis(800))).ok();
-        let id = identity::Identity::from_pkcs8(&pkcs8)?;
+        let id = identity::Identity::from_pkcs8(&pkcs8).map_err(HandshakeFail::mute)?;
         let mut f = Framer::default();
         let sr = server_resolve;
         let hs = server_handshake(
@@ -248,12 +251,13 @@ fn establish(
                 }
             },
             &id,
+            DESKTOP_NAME,
         )?;
         let mut sess = hs.session;
         // 客户端验证 Auth 后必须回 Pong，才证明它握有同一把 salt
         match sess.recv(&mut s, &mut f) {
             Ok(Some(Msg::Pong {})) => {}
-            other => return Err(format!("服务端未收到 pong：{other:?}")),
+            other => return Err(HandshakeFail::spoke(format!("服务端未收到 pong：{other:?}"))),
         }
         Ok((sess, hs.ls))
     });
@@ -262,7 +266,7 @@ fn establish(
     let mut cf = Framer::default();
     let cres =
         client_handshake(&mut c, &mut cf, client_salt, mode, key_id, slot, "heid-android", "SM-X808U", expect_fp)
-            .map(|(s, ls, _)| (s, ls));
+            .map(|h| (h.session, h.ls));
     let sres = srv.join().unwrap();
     (sres, cres)
 }
@@ -293,7 +297,7 @@ fn 配对握手后两端可双向收发() {
         let id = identity::Identity::from_pkcs8(&pk).unwrap();
         let mut f = Framer::default();
         let hs =
-            server_handshake(&mut s, &mut f, &|_, _, _| Ok(t2.clone()), &id)
+            server_handshake(&mut s, &mut f, &|_, _, _| Ok(t2.clone()), &id, DESKTOP_NAME)
                 .unwrap();
         let mut sess = hs.session;
         let _ = sess.recv(&mut s, &mut f); // 客户端认证 Auth 后回的 pong
@@ -307,7 +311,7 @@ fn 配对握手后两端可双向收发() {
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
     c.set_read_timeout(Some(Duration::from_millis(800))).ok();
     let mut cf = Framer::default();
-    let (mut csess, cl, _) =
+    let ClientHandshake { session: mut csess, ls: cl, .. } =
         client_handshake(&mut c, &mut cf, &t, Mode::Pair, "", "ticket", "heid-android", "SM-X808U", &fp)
             .unwrap();
     csess.send(&mut c, &Msg::Ping {}).unwrap();
@@ -393,9 +397,10 @@ fn 协议版本不匹配被拒并给出稳定码() {
         let (_, pkcs8, _) = test_identity();
         let id = identity::Identity::from_pkcs8(&pkcs8).unwrap();
         let mut f = Framer::default();
-        server_handshake(&mut s, &mut f, &|_, _, _| Ok(ticket()), &id)
+        server_handshake(&mut s, &mut f, &|_, _, _| Ok(ticket()), &id, DESKTOP_NAME)
             .err()
-            .unwrap_or_default()
+            .expect("这次握手该被拒")
+            .reason
     });
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write_frame(
@@ -427,15 +432,102 @@ fn 握手期不合规的第一帧被拒() {
         let (_, pkcs8, _) = test_identity();
         let id = identity::Identity::from_pkcs8(&pkcs8).unwrap();
         let mut f = Framer::default();
-        server_handshake(&mut s, &mut f, &|_, _, _| Ok(ticket()), &id)
+        server_handshake(&mut s, &mut f, &|_, _, _| Ok(ticket()), &id, DESKTOP_NAME)
             .err()
-            .unwrap_or_default()
+            .expect("这次握手该被拒")
+            .reason
     });
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write_frame(&mut c, &serde_json::to_vec(&Msg::Ping {}).unwrap()).unwrap();
     let err = server.join().unwrap();
     assert!(err.contains("期望 hello"), "{err}");
     assert_eq!(refuse_code(&err), "protocol");
+}
+
+/* -------------------------------------------------- 握手失败归因与桌面设备名（工单 (a)(c)） */
+
+/// 用真实的 TCP 起一次服务端握手，把 `HandshakeFail` 原样带回来。
+/// `hello_first` = 这条连接有没有先报上自己是谁；`false` 就是 `nc host port` 的形状。
+fn fail_of(server_resolves: Result<String, String>, hello_first: bool) -> HandshakeFail {
+    let (_, pkcs8, _) = test_identity();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let srv = std::thread::spawn(move || -> HandshakeFail {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        let id = identity::Identity::from_pkcs8(&pkcs8).unwrap();
+        let mut f = Framer::default();
+        server_handshake(&mut s, &mut f, &|_, _, _| server_resolves.clone(), &id, DESKTOP_NAME)
+            .err()
+            .expect("这两条用例握的都是必定失败的手")
+    });
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    if hello_first {
+        write_frame(
+            &mut c,
+            &serde_json::to_vec(&Msg::Hello {
+                ver: PROTOCOL_VERSION,
+                pub_key: encode_pub(&[1u8; 32]),
+                agent: "heid-android".into(),
+                device: "SM-X808U".into(),
+                mode: Mode::Pair,
+                key_id: String::new(),
+                slot: "ticket".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    } else {
+        // 连上就断：对端读到的是 EOF，而不是「还没轮到它说话」
+        drop(c);
+    }
+    srv.join().unwrap()
+}
+
+/// 面板「上次失败」那一行说的是**谁拒了谁**。局域网里总有一条拨开就断的空连接
+/// （`nc host port`、端口扫描、半开的 socket），它连自己是谁都没说 —— 让它把
+/// 「配对码已过期或已用过」冲成「对端已关闭连接」，用户就会去查网络而不是刷新配对码。
+/// 2026-09-25 跨机实测的 (a) 正是这个形状；端到端那一条判据在 `link-verify` 的 A 段。
+#[test]
+fn 归因分得清空连接与报过自己的连接() {
+    let mute = fail_of(Ok(ticket()), false);
+    assert!(!mute.peer_spoke, "一个字都没发的连接不是一次配对尝试：{mute:?}");
+    assert!(mute.reason.contains("对端已关闭连接"), "原因本身照实记：{mute:?}");
+
+    let refused = fail_of(Err("配对码已过期或已用过，请重新打开".into()), true);
+    assert!(refused.peer_spoke, "对方报上过自己是谁，这次失败要进「上次失败」");
+    assert!(refused.reason.contains("配对码已过期"), "归因指向桌面自己拒的原因：{refused:?}");
+}
+
+/// 桌面设备名走 `Auth` 这一帧上到手机（(c)）。
+/// 为什么不能走 `hello.device`：那是**手机→桌面**方向的名字；而 `Msg::Auth` 只带 id+sig 时，
+/// 桌面的名字从没上过网 —— 免扫重连那条路上又没有配对码可查，手机于是永远显示不出电脑叫什么。
+#[test]
+fn 桌面名随第一帧密文到达手机() {
+    let (_, pkcs8, fp) = test_identity();
+    let t = ticket();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let srv = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(800))).ok();
+        let id = identity::Identity::from_pkcs8(&pkcs8).unwrap();
+        let mut f = Framer::default();
+        let hs = server_handshake(&mut s, &mut f, &|_, _, _| Ok(t.clone()), &id, DESKTOP_NAME)
+            .expect("配对握手该成功");
+        let mut sess = hs.session;
+        // 与 serve_conn 同一道证明：解得开 Auth、回了 pong 才算真握着票
+        let _ = recv_msg_deadline(&mut s, &mut sess, &mut f, Instant::now() + Duration::from_secs(2));
+    });
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_millis(800))).ok();
+    let mut cf = Framer::default();
+    let hs = client_handshake(
+        &mut c, &mut cf, &ticket(), Mode::Pair, "", "ticket", "heid-android", "SM-X808U", &fp,
+    )
+    .expect("客户端握手该成功");
+    assert_eq!(hs.device, DESKTOP_NAME, "手机拿到的就是桌面上报的那个名字");
+    srv.join().unwrap();
 }
 
 /* ------------------------------------------------------------------ 状态 */
@@ -491,7 +583,7 @@ fn 远程命令走完整加密链路往返() {
         s.set_read_timeout(Some(Duration::from_millis(800))).ok();
         let id = identity::Identity::from_pkcs8(&pk).unwrap();
         let mut f = Framer::default();
-        let hs = server_handshake(&mut s, &mut f, &|_, _, _| Ok(tv.clone()), &id).unwrap();
+        let hs = server_handshake(&mut s, &mut f, &|_, _, _| Ok(tv.clone()), &id, DESKTOP_NAME).unwrap();
         let mut sess = hs.session;
         let _ = recv_msg_deadline(&mut s, &mut sess, &mut f, Instant::now() + Duration::from_secs(2));
         let mut seen = Vec::new();
@@ -520,7 +612,7 @@ fn 远程命令走完整加密链路往返() {
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
     c.set_read_timeout(Some(Duration::from_millis(800))).ok();
     let mut cf = Framer::default();
-    let (mut csess, _ls, _) = client_handshake(
+    let ClientHandshake { session: mut csess, .. } = client_handshake(
         &mut c, &mut cf, &ticket_v, Mode::Pair, "", "ticket", "heid-android", "SM-X808U", &fp,
     )
     .unwrap();
@@ -742,7 +834,7 @@ fn 标签白名单与推送走完整加密链路() {
         s.set_read_timeout(Some(Duration::from_millis(400))).ok();
         let id = identity::Identity::from_pkcs8(&pk).unwrap();
         let mut f = Framer::default();
-        let hs = server_handshake(&mut s, &mut f, &|_, _, _| Ok(tv.clone()), &id).unwrap();
+        let hs = server_handshake(&mut s, &mut f, &|_, _, _| Ok(tv.clone()), &id, DESKTOP_NAME).unwrap();
         let mut sess = hs.session;
         let _ = recv_msg_deadline(&mut s, &mut sess, &mut f, Instant::now() + Duration::from_secs(2));
         let mut seen = Vec::new();
@@ -827,7 +919,7 @@ fn 标签白名单与推送走完整加密链路() {
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
     c.set_read_timeout(Some(Duration::from_millis(400))).ok();
     let mut cf = Framer::default();
-    let (csess, _ls, _) = client_handshake(
+    let ClientHandshake { session: csess, .. } = client_handshake(
         &mut c, &mut cf, &ticket_v, Mode::Pair, "", "ticket", "heid-android", "SM-X808U", &fp,
     )
     .unwrap();

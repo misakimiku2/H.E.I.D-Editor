@@ -76,6 +76,12 @@ export interface LinkStatus {
    * 故意不进 `LinkPrefs`：重启之后应当是关的。
    */
   testPair: boolean;
+  /**
+   * 手机侧中档：握手已通过、对端还没发过任何帧。
+   * 桌面要等用户点「允许」（TOFU）才开始服务，在那之前 `connected` 是 false ——
+   * 提前报已连接就是谎报（每条远程命令都会等满 30 s 才失败）。界面这一档叫「等待电脑上确认」。
+   */
+  waitingConfirm: boolean;
 }
 
 export const EMPTY_STATUS: LinkStatus = {
@@ -93,6 +99,7 @@ export const EMPTY_STATUS: LinkStatus = {
   firewallHint: false,
   openShared: 0,
   testPair: false,
+  waitingConfirm: false,
 };
 
 /** Rust 侧 `Refused.code` 的稳定取值；UI 按它出双语标签，原始 reason 作次要信息 */
@@ -128,6 +135,7 @@ export function normalizeStatus(raw: unknown): LinkStatus {
     firewallHint: o.firewallHint === true,
     openShared: typeof o.openShared === 'number' ? o.openShared : 0,
     testPair: o.testPair === true,
+    waitingConfirm: o.waitingConfirm === true,
   };
 }
 

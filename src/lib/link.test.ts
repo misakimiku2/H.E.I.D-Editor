@@ -40,6 +40,14 @@ describe('normalizeStatus', () => {
     expect(EMPTY_STATUS.testPair).toBe(false);
   });
 
+  it('手机的中档「等待电脑上确认」按字面采信', () => {
+    // 握手已完成但对端还没发过任何帧：这一档既不是没连上、也不能报成已连接（(b)）
+    expect(normalizeStatus({ waitingConfirm: true }).waitingConfirm).toBe(true);
+    expect(normalizeStatus({ waitingConfirm: 'yes' }).waitingConfirm).toBe(false);
+    expect(normalizeStatus({}).waitingConfirm).toBe(false);
+    expect(EMPTY_STATUS.waitingConfirm).toBe(false);
+  });
+
   it('测试配对不进偏好（重启必须是关的）', () => {
     expect(parsePrefs('{"testPair":true}')).not.toHaveProperty('testPair');
     expect(DEFAULT_PREFS).not.toHaveProperty('testPair');

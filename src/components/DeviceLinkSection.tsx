@@ -209,7 +209,11 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
     : s.connected
       ? t('link.stateConnected', { device: s.peerDevice || initial.current.peerName || s.peerAddr })
       : asClient
-        ? t('link.stateIdle')
+        ? /* 手机的中档：握手已过、桌面还没开始服务（它在等用户点「允许」）。
+             这一段既不能显示成"已连接"（做什么都没反应），也不该显示成"没连上"（明明配好了）。 */
+          s.waitingConfirm
+          ? t('link.stateAwaitConfirm')
+          : t('link.stateIdle')
         : t('link.stateListening', { port: s.port });
   const errorText = localError || s?.lastError || '';
 

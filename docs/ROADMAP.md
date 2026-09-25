@@ -855,6 +855,48 @@ node_modules 里 40 次写入**一帧都不产生**、风暴之后主路还在�
 **注意**：共享根必须由前端报（脚本换 `localStorage['heid-tree-root']` + reload），
 只 invoke `link_set_root` 会被前端下一次上报盖回去 —— 暴露面按聚焦窗口取，谁报的才算数。
 
+### 2026-09-25 收口：配对状态面四条小的（四条全做完并实测）
+
+四条都按工单原判据做完；"当时是怎么定位的"逐条写在
+`docs/bugs/2026-09-25-link-lan-findings.md`，这里只留结论与验收数字。
+
+1. ✅ **(a) 归因不是写反，是被冲掉。** 跑 A 段那对判据现形：过期票那次**确实**先落到
+   「配对码已过期或已用过」，随后一条 `nc host port`（连上、一个字都不发、断开）把它改成
+   「对端已关闭连接」—— 那条连接连 `read_plain` 都没过去，却和一次真配对尝试共用同一行状态。
+   口径改成：`server_handshake` 的失败带 `HandshakeFail.peer_spoke`，**对端至少完整地发来过一帧**
+   才有资格写「上次失败」那一行（后面真来一次失败照旧覆盖 —— 那是新的一次尝试）。
+2. ✅ **(b) `connected` 押到对端第一帧。** 桌面进 `run_pump` 立刻发一个 Ping（原来要等 15 s 心跳），
+   手机把 `connected` 推到收到第一帧，中间新增一档 `waitingConfirm` → 界面「等待电脑上确认」；
+   `run_pump` 另外接住 `Refused`，桌面拒绝的原话因此能落到手机上（原来它掉进"不支持的消息"）。
+   连带成本照工单落地：`link-verify` B/G 段里 Node 扮桌面也补那一下 Ping（`ctl.serve()`）——
+   判据跟着协议走，不是给测试开后门。
+3. ✅ **(c) 桌面名走 `Auth.name`**（工单选的那条：免扫重连路上没有配对码可查）。
+   `ClientIntent` 里那个 `name` 随之删掉，配对码里的 `name` 不再是显示名来源。
+4. ✅ **(d) `toobig` 那句不再自己算尺寸**：病灶就是 `fsrv.rs` 里那个整除。尺寸只有一个口径
+   （前端 `largeFile.formatBytes`），数字走 `stat`，带数字的那句是手机端 `remote.errTooLarge`
+   （打开路径上的预检，阶段 2 就在那儿、本批没动）。两侧各钉一条：Rust 用例断言服务端那句里
+   不出现任何数字，`remote.test.ts` 断言 `formatBytes` 把 7,000,000 与上限算成「6.7 MB / 6.0 MB」。
+   **真机实测**（aurora35 点共享根里那个 7,000,000 字节的 `blob.dat`）：
+   弹的就是「这个文件 6.7 MB，超过手机可远程打开的上限 6.0 MB」，两个数不再撞在一起。
+
+**本批验收**：`cargo test --lib link::` **101 例**（新增 3：归因分类 / 桌面名到手机 / 超限文案不报尺寸）
++ `cargo test --lib` 175 例 + `npx vitest run` **90 文件 / 1086 例** + `node scripts/link-verify.mjs`
+A–J **105 项 PASS / 0 FAIL**（A 段 +3 条：票过期时那行是什么、空连接不许改它、桌面开始服务即发 ping；
+B 段重写成时机判据：握手后不谎报 / 1 s 内转已连接 / 拒绝拿到原话 / 中间档就叫得出电脑名）
++ **真 TOFU 一轮**（普通票、测试档关着、桌面点真按钮）：`aurora35` 本批 x86_64 debug 包 ↔ 本机 dev 桌面，
+中档→已连接 231 ms（同钟量在 B 段是 139 ms）、拒绝那次手机拿到「桌面端拒绝了这次配对」、
+`peerDevice=MISAKIMIKU` 从中档一路带到已连接。工具：
+`node scripts/link-lan-check.mjs tofu <6位短码> --host=IP --serial=emulator-5554`。
+
+**本批顺手收掉的一处工具债**（会反复用到）：`link-verify` 的读取器现在**一条连接只在握手时建一次**、
+由 `phoneHandshake` 带出去（`pair.next`）。桌面一开始服务就先推一帧之后，
+"一次 data 事件只取一帧、其余字节被扔掉"的裸 `readFrame` 必然把后续帧读丢
+（F 段那次 `Unsupported state or unable to authenticate data` 就是这么来的）——
+与阶段 4 那条「超时不摘 waiter」同族：**判据工具自己漏帧时，两侧判据会一起给出错答案**。
+另一条同类的新账：手机上验"中间那一档"不能靠轮询 `link_status`（它只活几百毫秒，第一版就是这么
+误判成 FAIL 的），要订 `heid-link` 事件流；而界面上的文案得**下一帧**再读，
+回调里同步取 `innerText` 拿到的是上一份状态渲染出来的界面。
+
 ### 下一会话开工单：配对状态面四条小的 → 阶段 5（离线队列）
 
 **顺序是定的：先做第 1 条那批小的（一次做完，半天量级），再单开一轮做阶段 5。**

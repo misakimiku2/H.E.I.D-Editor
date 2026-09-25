@@ -109,11 +109,16 @@ pub enum Msg {
         #[serde(rename = "pub")]
         pub_key: String,
     },
-    /// 握手后服务端发的第一帧**密文**：桌面长期身份的公钥 + 对握手内容的签名。
+    /// 握手后服务端发的第一帧**密文**：桌面长期身份的公钥 + 对握手内容的签名 + 桌面设备名。
     /// 手机据此校验指纹是否与码里/钉住的一致，从而挡住同网段抢答与"地址被换了机器"。
+    ///
+    /// `name` 必须走这一帧而不是 `hello`：`hello.device` 是**手机→桌面**方向的名字，
+    /// 而免扫重连那条路上根本没有配对码可查 —— 手机要显示"连着哪台电脑"，
+    /// 只有这一帧是每次连接都会经过的通道（2026-09-25 实测的 (c)：桌面名从没上过网）。
     Auth {
         id: String,
         sig: String,
+        name: String,
     },
     Ping {},
     Pong {},
@@ -432,6 +437,29 @@ pub struct ServerHandshake {
     pub peer_device: String,
 }
 
+/// 握手失败。`peer_spoke` = 对端至少完整地发来过一帧。
+///
+/// 这个区分只服务于一件事：面板「上次失败」那一行要说的是**谁拒了谁**。
+/// 局域网里总有一条拨开就断的空连接（`nc host port`、端口扫描、半开的sockets），
+/// 它什么也没说，让它把「配对码已过期或已用过」冲成「对端已关闭连接」，
+/// 用户就会去查网络而不是去刷新配对码 —— 2026-09-25 跨机实测的 (a) 就是这个形状。
+#[derive(Debug, Clone)]
+pub struct HandshakeFail {
+    pub reason: String,
+    pub peer_spoke: bool,
+}
+
+impl HandshakeFail {
+    /// 对端报上过自己之后的失败：值得写进「上次失败」
+    fn spoke(reason: impl Into<String>) -> Self {
+        HandshakeFail { reason: reason.into(), peer_spoke: true }
+    }
+    /// 一个字都没等到：这不是一次设备发起的尝试，别占用那一行
+    fn mute(reason: impl Into<String>) -> Self {
+        HandshakeFail { reason: reason.into(), peer_spoke: false }
+    }
+}
+
 /// 服务端握手：读 Hello（明文）→ 用 `resolve_salt` 选出 salt（票 / 短码 / 某把 LS）→ 换 Welcome →
 /// 协商 → 用桌面长期身份对握手内容签名，作为第一帧密文发给对端。
 ///
@@ -442,32 +470,56 @@ pub fn server_handshake<S: Read + Write>(
     framer: &mut Framer,
     resolve_salt: &dyn Fn(Mode, &str, &str) -> Result<String, String>,
     id: &identity::Identity,
-) -> Result<ServerHandshake, String> {
-    let (priv_key, my_pub) = gen_ephemeral()?;
-    let (peer_pub, peer_device, mode, key_id, slot) = match read_plain(s, framer)? {
+    my_device: &str,
+) -> Result<ServerHandshake, HandshakeFail> {
+    let (priv_key, my_pub) = gen_ephemeral().map_err(HandshakeFail::mute)?;
+    let first = match read_plain(s, framer) {
+        Ok(m) => m,
+        Err(e) => return Err(HandshakeFail::mute(e)),
+    };
+    let (peer_pub, peer_device, mode, key_id, slot) = match first {
         Msg::Hello { ver, pub_key, device, mode, key_id, slot, .. } => {
-            check_version(ver)?;
+            if let Err(e) = check_version(ver) {
+                return Err(HandshakeFail::spoke(e));
+            }
             (pub_key, device, mode, key_id, slot)
         }
-        other => return Err(format!("握手期望 hello，收到 {other:?}")),
+        other => return Err(HandshakeFail::spoke(format!("握手期望 hello，收到 {other:?}"))),
     };
-    let salt = resolve_salt(mode, &key_id, &slot)?;
+    let salt = resolve_salt(mode, &key_id, &slot).map_err(HandshakeFail::spoke)?;
     write_plain(
         s,
         &Msg::Welcome { ver: PROTOCOL_VERSION, pub_key: encode_pub(&my_pub) },
-    )?;
-    let (mut session, ls) = agree_keys(priv_key, &peer_pub, &salt, false)?;
+    )
+    .map_err(HandshakeFail::spoke)?;
+    let (mut session, ls) =
+        agree_keys(priv_key, &peer_pub, &salt, false).map_err(HandshakeFail::spoke)?;
     let id_pub = id.public_key();
-    let msg = identity::auth_message(b"srv\0", &decode_pub(&peer_pub)?, &my_pub, &id_pub);
+    let msg = identity::auth_message(
+        b"srv\0",
+        &decode_pub(&peer_pub).map_err(HandshakeFail::spoke)?,
+        &my_pub,
+        &id_pub,
+    );
     let sig = id.sign(&msg);
-    session.send(
-        s,
-        &Msg::Auth {
-            id: encode_pub(&id_pub),
-            sig: base64::engine::general_purpose::STANDARD.encode(&sig),
-        },
-    )?;
+    session
+        .send(
+            s,
+            &Msg::Auth {
+                id: encode_pub(&id_pub),
+                sig: base64::engine::general_purpose::STANDARD.encode(&sig),
+                name: my_device.to_string(),
+            },
+        )
+        .map_err(HandshakeFail::spoke)?;
     Ok(ServerHandshake { session, ls, mode, peer_device })
+}
+
+/// 客户端握手结果：会话 + LS + 桌面设备名（来自那一帧 `Auth`，见 (c)）。
+pub struct ClientHandshake {
+    pub session: Session,
+    pub ls: [u8; 32],
+    pub device: String,
 }
 
 /// 客户端握手：发 Hello（带模式与 keyId/slot）→ 收 Welcome（或对端的 Refused）→ 协商 →
@@ -484,7 +536,7 @@ pub fn client_handshake<S: Read + Write>(
     agent: &str,
     device: &str,
     expected_fp: &str,
-) -> Result<(Session, [u8; 32], Vec<u8>), String> {
+) -> Result<ClientHandshake, String> {
     let (priv_key, my_pub) = gen_ephemeral()?;
     write_plain(
         s,
@@ -510,7 +562,7 @@ pub fn client_handshake<S: Read + Write>(
     // 对端的第一帧必须是 Auth；解不开即 salt 不对（票/LS 不匹配）——与阶段 0 同一处暴露点。
     // 带截止时间循环收：真实链路上它会比 Welcome 晚几毫秒到。
     let auth = match recv_msg_deadline(s, &mut session, framer, Instant::now() + HANDSHAKE_DEADLINE)? {
-        Msg::Auth { id, sig } => (id, sig),
+        Msg::Auth { id, sig, name } => (id, sig, name),
         other => return Err(format!("握手期望 auth，收到 {other:?}")),
     };
     let id_pub = decode_pub(&auth.0)?;
@@ -529,7 +581,7 @@ pub fn client_handshake<S: Read + Write>(
     }
     // 通过：回 Pong 完成双向证明。
     session.send(s, &Msg::Pong {})?;
-    Ok((session, ls, id_pub.to_vec()))
+    Ok(ClientHandshake { session, ls, device: auth.2 })
 }
 
 fn write_plain<W: Write>(w: &mut W, msg: &Msg) -> Result<(), String> {
@@ -643,6 +695,10 @@ pub struct LinkStatus {
     /// 这是一扇开着的门，所以它必须像总开关那样**在界面上常驻可见**，而不是只活在设置页里；
     /// 且**不跨重启记忆**（`LinkState::test_pair` 是普通 bool，不写进 link.json）。
     pub test_pair: bool,
+    /// 手机侧：握手已通过、但对端还没发过任何帧 —— 桌面在用户点「允许」之前一帧都不发，
+    /// 所以这一档既不是"没连上"也不是"已连接"，界面叫「等待电脑上确认」。
+    /// 它存在的唯一理由：把 `connected` 押到对端第一帧（2026-09-25 实测的 (b)）。
+    pub waiting_confirm: bool,
 }
 
 /// `protocol` 必须是本地常量而不是 0：前端拿它自证"我这一端说的是哪版协议"。
@@ -663,6 +719,7 @@ impl Default for LinkStatus {
             firewall_hint: false,
             open_shared: 0,
             test_pair: false,
+            waiting_confirm: false,
         }
     }
 }
@@ -930,6 +987,7 @@ fn mark_error(app: &AppHandle, msg: impl Into<String>) {
     let msg = msg.into();
     publish(app, |s| {
         s.connected = false;
+        s.waiting_confirm = false;
         s.peer_device.clear();
         s.peer_addr.clear();
         s.last_error = msg;
@@ -1058,7 +1116,19 @@ fn run_pump(
     let mut framer = Framer::default();
     let mut last_ping = Instant::now();
     let mut misses: u32 = 0;
-    let mut awaiting_pong = false;
+    /* 一进泵就发一个 Ping：它是「我开始服务你了」的第一个信号。
+       没有这一发，手机侧那份 `connected` 要等满一个 HEARTBEAT（15 s）才转得过来 ——
+       而它等的正是这一件事（见下面 `announced` 那一段）。 */
+    if let Err(e) = session.send(&mut stream, &Msg::Ping {}) {
+        mark_error(app, e);
+        return;
+    }
+    let mut awaiting_pong = true;
+    /* 手机侧把 `connected` 押到收到对端第一帧为止：桌面在用户点「允许」之前一帧都不发
+       （TOFU 挂在 serve_conn 里等最多 60 s），提前转已连接等于让界面谎报，
+       而用户看到的是"扫完码手机说连上了、做什么都没反应、报错还都指向网络方向"。
+       桌面侧没有这一档：它是服务方，进泵即在服务。 */
+    let mut announced = role != Role::Client;
     loop {
         if stop.load(Ordering::SeqCst) {
             let _ = session.send(&mut stream, &Msg::Bye {});
@@ -1089,7 +1159,16 @@ fn run_pump(
                 }
             }
         }
-        match session.recv(&mut stream, &mut framer) {
+        let incoming = session.recv(&mut stream, &mut framer);
+        // 对端的第一帧到达 = 它真的在服务我们了（手机侧 `connected` 的权威时刻，见上面 `announced`）
+        if !announced && matches!(incoming, Ok(Some(_))) {
+            announced = true;
+            publish(app, |s| {
+                s.connected = true;
+                s.waiting_confirm = false;
+            });
+        }
+        match incoming {
             Ok(Some(Msg::Pong {})) => {
                 misses = 0;
                 awaiting_pong = false;
@@ -1099,6 +1178,12 @@ fn run_pump(
                     mark_error(app, e);
                     return;
                 }
+            }
+            Ok(Some(Msg::Refused { reason, .. })) => {
+                // 桌面点「拒绝」或确认超时到点发的就是这一帧（密文）。
+                // 原因要原样落到手机上，别让它退化成"每条请求等满 30 s"那种指向网络方向的报错。
+                mark_error(app, reason);
+                return;
             }
             Ok(Some(Msg::Req { id, method, params })) => {
                 if role != Role::Server {
@@ -1412,15 +1497,20 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
         }
     };
 
-    let hs = match server_handshake(&mut stream, &mut framer, &resolve, id) {
+    let hs = match server_handshake(&mut stream, &mut framer, &resolve, id, &desktop_name()) {
         Ok(hs) => hs,
-        Err(e) => {
-            // 握手没走通：把原因归成稳定码回一帧 Refused（票不匹配 / 版本 / 未配对），再记状态
+        Err(f) => {
+            // 握手没走通：把原因归成稳定码回一帧 Refused（票不匹配 / 版本 / 未配对）
             let _ = write_plain(
                 &mut stream,
-                &Msg::Refused { code: refuse_code(&e).into(), reason: e.clone() },
+                &Msg::Refused { code: refuse_code(&f.reason).into(), reason: f.reason.clone() },
             );
-            publish(&app, |s| s.last_error = e);
+            /* 只有对端报上过自己是谁，这次失败才配占用面板「上次失败」那一行。
+               一条拨开就断的空连接没有 hello、没有票、没有任何可归因的信息，
+               让它写进来就会把"我们自己拒掉的票"冲成"对端已关闭连接"（(a)）。 */
+            if f.peer_spoke {
+                publish(&app, |s| s.last_error = f.reason);
+            }
             return;
         }
     };
@@ -1525,9 +1615,13 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
 /* ------------------------------------------------------------------ 客户端 */
 
 /// 手机这一趟连接要做什么。配对带一次性票或 6 位短码 + 期望指纹；重连带已存的 LS 与钉住的指纹。
+///
+/// 这里**不带桌面设备名**：桌面叫什么只由那一帧 `Auth` 说（见 (c)），
+/// 配对码里的 `name` 只是码面上的一份副本，两条路都从 Auth 取才只有一个口径
+/// —— 免扫重连那条路上根本没有配对码可查。
 pub enum ClientIntent {
-    Pair { salt: String, slot: String, fp: String, name: String },
-    Reconnect { key_id: String, ls_hex: String, fp: String, name: String },
+    Pair { salt: String, slot: String, fp: String },
+    Reconnect { key_id: String, ls_hex: String, fp: String },
 }
 
 fn connect_and_pump(
@@ -1547,15 +1641,15 @@ fn connect_and_pump(
     };
     prepare(&mut stream);
     let mut framer = Framer::default();
-    let (salt, mode, key_id, slot, fp, name) = match &intent {
-        ClientIntent::Pair { salt, slot, fp, name } => {
-            (salt.clone(), Mode::Pair, String::new(), slot.clone(), fp.clone(), name.clone())
+    let (salt, mode, key_id, slot, fp) = match &intent {
+        ClientIntent::Pair { salt, slot, fp } => {
+            (salt.clone(), Mode::Pair, String::new(), slot.clone(), fp.clone())
         }
-        ClientIntent::Reconnect { key_id, ls_hex, fp, name } => {
-            (ls_hex.clone(), Mode::Reconnect, key_id.clone(), String::new(), fp.clone(), name.clone())
+        ClientIntent::Reconnect { key_id, ls_hex, fp } => {
+            (ls_hex.clone(), Mode::Reconnect, key_id.clone(), String::new(), fp.clone())
         }
     };
-    let (session, ls, _id_pub) = match client_handshake(
+    let hs = match client_handshake(
         &mut stream,
         &mut framer,
         &salt,
@@ -1578,9 +1672,9 @@ fn connect_and_pump(
         {
             let mut g = state.store.lock().unwrap_or_else(|p| p.into_inner());
             g.upsert(pair::PairedDevice {
-                key_id: pair::key_id(&ls),
-                ls: pair::ls_to_hex(&ls),
-                name,
+                key_id: pair::key_id(&hs.ls),
+                ls: pair::ls_to_hex(&hs.ls),
+                name: hs.device.clone(),
                 paired_at: now_millis(),
                 peer_fp: fp,
                 // `via_test` 是桌面那侧的记账（哪台设备是走测试通道进来的）；
@@ -1593,9 +1687,9 @@ fn connect_and_pump(
     // 对端设备 id：配对时用刚算出、刚存盘的那把 LS 的 keyId；重连时用当初存下的那个 keyId。
     // 两者必须同源，否则重连一次之后 `hide-remote://<deviceId>/…` 就换了一个键，
     // 手机上已经打开的标签会指向一台「不存在」的设备。
-    // （每次重连都重新生成临时 X25519，所以 `ls` 本身每趟都在变，只有存下来的 keyId 稳定。）
+    // （每次重连都重新生成临时 X25519，所以 LS 本身每趟都在变，只有存下来的 keyId 稳定。）
     let peer_key_id = match &intent {
-        ClientIntent::Pair { .. } => pair::key_id(&ls),
+        ClientIntent::Pair { .. } => pair::key_id(&hs.ls),
         ClientIntent::Reconnect { key_id, .. } => key_id.clone(),
     };
     // 这条连接的远程命令通路：挂上 state，前端 `link_request` 才找得到它
@@ -1604,13 +1698,18 @@ fn connect_and_pump(
         let state = app.state::<LinkState>();
         *state.conn.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&conn));
     }
-    publish(&app, |s| {
-        s.connected = true;
+    publish(&app, move |s| {
+        /* 这里**不**置 `connected`：桌面要到用户点完「允许」、进 run_pump 才发第一帧，
+           在那之前手机停在中档「等待电脑上确认」（(b)）。
+           桌面名一到手就先报出去，那一档才显示得出"在等哪台电脑"。 */
+        s.connected = false;
+        s.waiting_confirm = true;
         s.peer_addr = format!("{host}:{port}");
         s.peer_key_id = peer_key_id;
+        s.peer_device = hs.device;
         s.last_error.clear();
     });
-    run_pump(stream, session, &app, &stop, Role::Client);
+    run_pump(stream, hs.session, &app, &stop, Role::Client);
     conn.shutdown("连接已结束");
     {
         let state = app.state::<LinkState>();
@@ -1622,6 +1721,7 @@ fn connect_and_pump(
     }
     publish(&app, |s| {
         s.connected = false;
+        s.waiting_confirm = false;
         s.peer_addr.clear();
         s.peer_key_id.clear();
     });
@@ -1692,6 +1792,7 @@ pub fn link_server_stop(app: AppHandle) -> LinkStatus {
         s.role = Role::Off;
         s.listening = false;
         s.connected = false;
+        s.waiting_confirm = false;
         s.peer_device.clear();
         s.peer_addr.clear();
         s.firewall_hint = false;
@@ -1725,6 +1826,7 @@ fn start_client(
         s.listening = false;
         s.port = port;
         s.connected = false;
+        s.waiting_confirm = false;
         s.peer_device.clear();
         s.last_error.clear();
         /* 不写 s.ticket：那张票是"桌面共享给手机"的凭证，归服务端。
@@ -1756,7 +1858,7 @@ pub fn link_client_connect(
         &app,
         host,
         port,
-        ClientIntent::Pair { salt: ticket, slot: "ticket".into(), fp: String::new(), name: String::new() },
+        ClientIntent::Pair { salt: ticket, slot: "ticket".into(), fp: String::new() },
         device,
     )
 }
@@ -1770,7 +1872,7 @@ pub fn link_client_pair(
 ) -> Result<LinkStatus, String> {
     let p = pair::PairingPayload::parse(&uri)?;
     let intent = if is_valid_ticket(&p.ticket) {
-        ClientIntent::Pair { salt: p.ticket, slot: "ticket".into(), fp: p.fp, name: p.name }
+        ClientIntent::Pair { salt: p.ticket, slot: "ticket".into(), fp: p.fp }
     } else {
         return Err("这个配对码里没有有效的配对票".to_string());
     };
@@ -1794,7 +1896,7 @@ pub fn link_client_pair_code(
         &app,
         host,
         port,
-        ClientIntent::Pair { salt: code, slot: "code".into(), fp: String::new(), name: String::new() },
+        ClientIntent::Pair { salt: code, slot: "code".into(), fp: String::new() },
         device,
     )
 }
@@ -1809,20 +1911,20 @@ pub fn link_client_reconnect(
     device: String,
 ) -> Result<LinkStatus, String> {
     let state = app.state::<LinkState>();
-    let (ls_hex, fp, name) = {
+    let (ls_hex, fp) = {
         let g = state.store.lock().unwrap_or_else(|p| p.into_inner());
         let dev = g
             .devices
             .iter()
             .find(|d| d.key_id == key_id)
             .ok_or("本机没有这台设备的配对记录，请重新扫码")?;
-        (dev.ls.clone(), dev.peer_fp.clone(), dev.name.clone())
+        (dev.ls.clone(), dev.peer_fp.clone())
     };
     start_client(
         &app,
         host,
         port,
-        ClientIntent::Reconnect { key_id, ls_hex, fp, name },
+        ClientIntent::Reconnect { key_id, ls_hex, fp },
         device,
     )
 }
@@ -1956,6 +2058,7 @@ pub fn link_client_disconnect(app: AppHandle) -> LinkStatus {
     publish(&app, |s| {
         s.role = Role::Off;
         s.connected = false;
+        s.waiting_confirm = false;
         s.peer_addr.clear();
     });
     state.snapshot()
