@@ -144,6 +144,18 @@ impl Batch {
                 return;
             }
         }
+        // 最后一层单独判，且**要问过文件系统才算**：Windows 在一个目录里建/删条目时，
+        // 会把「那个目录本身」也通知一次，于是 `<根>\node_modules` 这一条的 parent 恰好是根 ——
+        // 只看祖先的话，一次 `npm install` 仍会漏出「重列根」的帧（2026-09-25 I 段抓到 1 帧 `[""]`）。
+        // 不能顺手把所有黑名单**名字**都按字面丢掉：`.gitignore` / `.env` 这类点文件是文本编辑器
+        // 真要改的东西，它们的名字也以 `.` 开头，按字面判会让这些变更从此不再产生提示。
+        // 所以这里只在"它确实是个目录"时丢，代价是一条名字命中黑名单的事件多问一次 `is_dir()`
+        // （npm install 期间也就是 `node_modules` 这一条反复被通知，量级上完全够）。
+        // 目录被删掉的那一刻 `is_dir()` 为假 → 照旧报根，而那正是根的内容变了，该让手机重列。
+        if is_skipped_dir(parts[parts.len() - 1]) && path.is_dir() {
+            self.dropped += 1;
+            return;
+        }
         let parent = parts[..parts.len() - 1].join("/");
         if self.link_ancestor(root, &parent) {
             self.dropped += 1;
@@ -342,6 +354,35 @@ mod tests {
     /// 一帧里装了哪些目录
     fn dirs_of(batch: &Batch) -> Vec<String> {
         batch.dirs_sorted().iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn 黑名单目录自身的变更也不报_但点文件照报() {
+        // Windows 在一个目录里建/删条目时会把「那个目录本身」也通知一次。
+        // `<根>\node_modules` 这一条按祖先判是漏网的（它没有祖先层），而它的 parent 恰好是根 →
+        // 于是 `npm install` 期间手机端还会收到"重列根"的帧。2026-09-25 I 段稳定复现的那 1 帧 `[""]` 就是它。
+        //
+        // 这条判据要问文件系统，所以用真目录测；同时钉住反方向：
+        // `.gitignore` 这种**名字**也进黑名单的文件，绝不能被按字面吃掉 ——
+        // 那是文本编辑器真要改的东西，吞掉就等于它们的变更从此没有提示。
+        let dir = std::env::temp_dir().join(format!("heid-watch-blacklist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("node_modules").join("pkg")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "target\n").unwrap();
+        std::fs::write(dir.join("node_modules").join("pkg").join("i.js"), "1\n").unwrap();
+
+        let mut b = Batch::default();
+        b.add(&dir, &dir.join("node_modules"), Signal::Change);
+        assert_eq!(b.dropped, 1, "node_modules 自己变了也不该报");
+        assert!(b.is_empty());
+        // 点文件：报的是它所在的那一层（这里就是根 → `""`），不能因为名字进黑名单就连文件一起丢
+        b.add(&dir, &dir.join(".gitignore"), Signal::Change);
+        assert_eq!(dirs_of(&b), vec![String::new()], "点文件是用户真会改的东西，提示要留着");
+        // 依赖树内部照旧整棵滤掉
+        let before = b.dropped;
+        b.add(&dir, &dir.join("node_modules").join("pkg").join("i.js"), Signal::Change);
+        assert_eq!(b.dropped, before + 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

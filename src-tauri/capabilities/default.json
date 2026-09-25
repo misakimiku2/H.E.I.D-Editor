@@ -21,6 +21,7 @@
     "allow-link-client-reconnect",
     "allow-link-client-disconnect",
     "allow-link-pair-qr",
+    "allow-link-test-pair-set",
     "allow-link-pair-approve",
     "allow-link-pair-deny",
     "allow-link-pairings-list",

@@ -19,6 +19,11 @@ use super::identity;
 /// 一次性配对票的有效期（设计稿 §7.1 第 2 条：票 2 分钟有效）。超时得让桌面重开一次配对。
 pub const PAIRING_TTL: Duration = Duration::from_secs(120);
 
+/// 测试配对模式的哨兵票（32 位十六进制，与随机票同形状，所以手机侧的三条入口一行都不用改）。
+/// 值公开在源码里 —— 这不是一个秘密，它的作用只是让「开着开发配对时任何设备都能连」这件事
+/// 有一个稳定的入口，详见 [`PairingTicket::test`]。
+pub const TEST_TICKET: &str = "5eedc0de5eedc0de5eedc0de5eedc0de";
+
 const LS_INFO: &[u8] = b"heid-link-ls-v1";
 const CODE_PREFIX: &[u8] = b"heid-link-shortcode-v1";
 
@@ -178,11 +183,29 @@ pub struct PairingTicket {
     value: String,
     created: Instant,
     used: bool,
+    /// 测试配对模式下的那张哨兵票：不过期、用不完，且由服务端**自动允许**（见 [`Self::test`]）。
+    test: bool,
 }
 
 impl PairingTicket {
     pub fn new(value: String) -> Self {
-        PairingTicket { value, created: Instant::now(), used: false }
+        PairingTicket { value, created: Instant::now(), used: false, test: false }
+    }
+    /// 测试配对模式下挂着的那张票（v1.5 开工单第 2 条）。
+    ///
+    /// 为什么用「一张固定的普通票」而不是在协议里加一个 `slot="test"`：
+    /// 手机侧的扫码 / 粘贴配对码 / 6 位短码三条入口**一行都不用改**，看到的就是一张普通的票，
+    /// 于是「测试通道」在协议面上完全隐形，也就不存在旧版手机连不上或新版手机误连的问题。
+    ///
+    /// 代价要如实说：这张票的值是**公开在源码里的**，所以开着这个模式时，准入条件从
+    /// 「知道票」变成「那台电脑把开发用配对开着了」—— 局域网内任何设备都能读写共享根。
+    /// 因此它必须显式开启、不跨重启记忆、开启态在界面上常驻可见，且这样配进来的设备要打上标记。
+    pub fn test() -> Self {
+        PairingTicket { value: TEST_TICKET.to_string(), created: Instant::now(), used: false, test: true }
+    }
+    /// 这次配对是不是走测试通道进来的（服务端据此跳过 TOFU，但仍落配对记录）。
+    pub fn is_test(&self) -> bool {
+        self.test
     }
     pub fn value(&self) -> &str {
         &self.value
@@ -191,16 +214,20 @@ impl PairingTicket {
         short_code(&self.value)
     }
     fn expired(&self) -> bool {
-        self.created.elapsed() > PAIRING_TTL
+        !self.test && self.created.elapsed() > PAIRING_TTL
     }
     /// 这张票现在还能不能用（没被用过、没过期）。
     pub fn usable(&self) -> bool {
         !self.used && !self.expired()
     }
     /// 消费一次：成功配对后调用，把它置为已用；同时返回是否本来可用。用后即废在这里落实。
+    /// 测试票例外 —— 它要能被反复配对（否则第一次之后这道「门」就自己关了，
+    /// 表现成「刚开的时候能连、之后怎么都连不上」，正是这个模式最不该有的形状）。
     pub fn consume(&mut self) -> bool {
         if self.usable() {
-            self.used = true;
+            if !self.test {
+                self.used = true;
+            }
             true
         } else {
             false
@@ -221,6 +248,10 @@ pub struct PairedDevice {
     /// 手机侧才会用到：它把桌面的身份指纹钉在这，重连时再验一次「还是这台」。
     #[serde(default)]
     pub peer_fp: String,
+    /// 这台是**开着测试配对模式时**自动放进来的一台（只桌面侧用）：
+    /// 跳过 TOFU 不等于跳过记账 —— 「谁进来过」必须留在「已配对设备」里看得见、可撤销。
+    #[serde(default)]
+    pub via_test: bool,
 }
 
 /// 跨重启存下来的东西：桌面长期身份（PKCS#8）+ 已配对设备集。两端各存各的、字段同构，
@@ -396,6 +427,53 @@ mod tests {
     }
 
     #[test]
+    fn 测试票与随机票同形状_但永不过期也用不完() {
+        // 同形状这条是设计的前提：手机侧的扫码 / 粘贴 / 短码三条入口都不认识"测试票"这个概念，
+        // 它看到的就是一个 32 位十六进制的普通配对码，所以一行都不用改。
+        assert!(crate::link::is_valid_ticket(TEST_TICKET), "测试票必须是合法票形状");
+        let mut t = PairingTicket::test();
+        assert!(t.is_test());
+        assert_eq!(t.value(), TEST_TICKET);
+        for _ in 0..3 {
+            assert!(t.usable(), "测试票不该过期");
+            assert!(t.consume(), "自动允许可该反复发生");
+        }
+        assert_eq!(t.code(), short_code(TEST_TICKET), "短码固定，才谈得上「不用每次去电脑前刷新」");
+        assert_eq!(t.code().len(), 6);
+        assert!(t.code().chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn 测试模式不放松普通票的用后即废() {
+        // 开着测试模式时，走正常二维码/短码进来的那次仍然是「一次一票」：
+        // 别把应急通道的宽松顺手带到用户路径上。
+        let mut n = PairingTicket::new("00112233445566778899aabbccddeeff".into());
+        assert!(!n.is_test());
+        assert!(n.consume());
+        assert!(!n.usable());
+    }
+
+    #[test]
+    fn 存储往返保留测试配对标记() {
+        let mut s = Store::default();
+        let ls = derive_link_secret(&[0x22u8; 32]);
+        s.upsert(PairedDevice {
+            key_id: key_id(&ls),
+            ls: ls_to_hex(&ls),
+            name: "aurora35".into(),
+            paired_at: 7,
+            peer_fp: String::new(),
+            via_test: true,
+        });
+        let dir = std::env::temp_dir().join(format!("heid-link-test-flag-{}", std::process::id()));
+        let path = dir.join("link.json");
+        s.save(&path).unwrap();
+        let back = Store::load(&path);
+        assert!(back.devices[0].via_test, "跳过确认这件事要能在「已配对设备」里事后看出来");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn 存储往返与LS反查() {
         let dir = std::env::temp_dir().join(format!("heid-link-store-{}", std::process::id()));
         let path = dir.join("link.json");
@@ -408,6 +486,7 @@ mod tests {
             name: "SM-X808U".into(),
             paired_at: 123,
             peer_fp: "ABC".into(),
+            via_test: false,
         });
         s.save(&path).unwrap();
         let back = Store::load(&path);
@@ -423,10 +502,11 @@ mod tests {
         let mut s = Store::default();
         let ls = derive_link_secret(&[0x01u8; 32]);
         let kid = key_id(&ls);
-        s.upsert(PairedDevice { key_id: kid.clone(), ls: ls_to_hex(&ls), name: "a".into(), paired_at: 1, peer_fp: String::new() });
-        s.upsert(PairedDevice { key_id: kid.clone(), ls: ls_to_hex(&ls), name: "b".into(), paired_at: 2, peer_fp: String::new() });
+        s.upsert(PairedDevice { key_id: kid.clone(), ls: ls_to_hex(&ls), name: "a".into(), paired_at: 1, peer_fp: String::new(), via_test: false });
+        s.upsert(PairedDevice { key_id: kid.clone(), ls: ls_to_hex(&ls), name: "b".into(), paired_at: 2, peer_fp: String::new(), via_test: true });
         assert_eq!(s.devices.len(), 1, "同 keyId 重复登记要覆盖不是追加");
         assert_eq!(s.devices[0].name, "b");
+        assert!(s.devices[0].via_test, "覆盖登记时新那份的标记要留下，别拿旧行的字段凑数");
         assert!(s.revoke(&kid));
         assert!(!s.revoke(&kid), "撤销不存在的设备返回 false");
         assert!(s.devices.is_empty());

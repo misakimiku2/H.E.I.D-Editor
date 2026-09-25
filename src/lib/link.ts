@@ -48,6 +48,8 @@ export interface PairInfo {
   keyId: string;
   name: string;
   pairedAt: number;
+  /** 这台是开着测试配对模式自动放进来的一台 —— 列表里要标出来，才知道该撤哪几行 */
+  viaTest: boolean;
 }
 
 export interface LinkStatus {
@@ -68,6 +70,12 @@ export interface LinkStatus {
   firewallHint: boolean;
   /** 共享根之外、因「桌面上正开着」而暴露给手机的文件数（阶段 3 的白名单） */
   openShared: number;
+  /**
+   * 测试配对模式开着：不过期、任何设备都能连、来了自动允许。
+   * 这是一扇开着的门，所以它和 `rootDisplay` / `openShared` 同一条规矩 —— 必须常驻可见。
+   * 故意不进 `LinkPrefs`：重启之后应当是关的。
+   */
+  testPair: boolean;
 }
 
 export const EMPTY_STATUS: LinkStatus = {
@@ -84,6 +92,7 @@ export const EMPTY_STATUS: LinkStatus = {
   peerKeyId: '',
   firewallHint: false,
   openShared: 0,
+  testPair: false,
 };
 
 /** Rust 侧 `Refused.code` 的稳定取值；UI 按它出双语标签，原始 reason 作次要信息 */
@@ -118,6 +127,7 @@ export function normalizeStatus(raw: unknown): LinkStatus {
     peerKeyId: typeof o.peerKeyId === 'string' ? o.peerKeyId : '',
     firewallHint: o.firewallHint === true,
     openShared: typeof o.openShared === 'number' ? o.openShared : 0,
+    testPair: o.testPair === true,
   };
 }
 
@@ -243,6 +253,15 @@ export async function fetchTicket(): Promise<string> {
   return call<string>('link_ticket');
 }
 
+/**
+ * 开 / 关「测试配对模式」（开发用，见 Rust `link_test_pair_set`）。
+ * 开着时那台电脑接受任何设备的配对并自动允许，所以界面上必须常驻显示 —— 返回的状态就是那份。
+ */
+export async function setTestPair(on: boolean): Promise<LinkStatus> {
+  if (!isTauri) return { ...EMPTY_STATUS };
+  return normalizeStatus(await call<LinkStatus>('link_test_pair_set', { on }));
+}
+
 /** 桌面把**本窗口**文件树当前的根报给链路层当共享范围（设计稿 §2.3：不让用户再选第二遍）。
     传 null 即清除；手机端不用（手机恒为客户端，不暴露任何文件）。
     多窗口下每台各有一份树，哪一份暴露出去由聚焦窗口决定（§6.1），所以带上窗口标签。 */
@@ -345,6 +364,7 @@ function normPairings(raw: unknown): PairInfo[] {
       keyId: typeof o.keyId === 'string' ? o.keyId : '',
       name: typeof o.name === 'string' ? o.name : '',
       pairedAt: typeof o.pairedAt === 'number' ? o.pairedAt : 0,
+      viaTest: o.viaTest === true,
     };
   });
 }

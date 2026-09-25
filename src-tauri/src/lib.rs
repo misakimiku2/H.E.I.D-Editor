@@ -191,6 +191,7 @@ pub fn run() {
             link::link_client_reconnect,
             link::link_client_disconnect,
             link::link_pair_qr,
+            link::link_test_pair_set,
             link::link_pair_approve,
             link::link_pair_deny,
             link::link_pairings_list,

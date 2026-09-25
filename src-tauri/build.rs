@@ -46,6 +46,7 @@ fn main() {
             "link_client_reconnect",
             "link_client_disconnect",
             "link_pair_qr",
+            "link_test_pair_set",
             "link_pair_approve",
             "link_pair_deny",
             "link_pairings_list",

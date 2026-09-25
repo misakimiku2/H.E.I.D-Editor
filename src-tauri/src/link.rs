@@ -636,10 +636,13 @@ pub struct LinkStatus {
     /// bind 成功但迟迟没有任何连接尝试 → 提示「可能被 Windows 防火墙拦截」。
     /// 这条是设计稿 §11.1 的实现要求：「端口开着、包进不来」这种半死状态比直接报错难查得多，
     /// 而这在本机环境（有历史 node 放行规则）测不出用户侧结论，只能靠应用自己 bind 时才成立。
-    pub firewall_hint: bool,
-    /// 共享根之外、因「桌面上正开着」而暴露给手机的**文件**数（阶段 3 的白名单）。
+    pub firewall_hint: bool,    /// 共享根之外、因「桌面上正开着」而暴露给手机的**文件**数（阶段 3 的白名单）。
     /// 与 `root_display` 同一条理由：多交出去一分，就得让用户看得见一分。
     pub open_shared: usize,
+    /// 「测试配对模式」开着（v1.5 开工单第 2 条）：不过期、任何设备都能连、来了就自动允许。
+    /// 这是一扇开着的门，所以它必须像总开关那样**在界面上常驻可见**，而不是只活在设置页里；
+    /// 且**不跨重启记忆**（`LinkState::test_pair` 是普通 bool，不写进 link.json）。
+    pub test_pair: bool,
 }
 
 /// `protocol` 必须是本地常量而不是 0：前端拿它自证"我这一端说的是哪版协议"。
@@ -659,6 +662,7 @@ impl Default for LinkStatus {
             peer_key_id: String::new(),
             firewall_hint: false,
             open_shared: 0,
+            test_pair: false,
         }
     }
 }
@@ -670,6 +674,8 @@ pub struct PairInfo {
     pub key_id: String,
     pub name: String,
     pub paired_at: i64,
+    /// 这台是开着测试配对模式时自动放进来的一台 —— 界面上要标出来，用户才知道该撤哪几行。
+    pub via_test: bool,
 }
 
 #[derive(Default)]
@@ -698,6 +704,10 @@ pub struct LinkState {
     /// 断开或换根即释放/重建 —— 见 [`sync_fs_watch`]
     #[cfg(desktop)]
     fs_watch: Mutex<Option<watch::Handle>>,
+    /// 测试配对模式的开关（见 [`pair::PairingTicket::test`]）。用原子位而不是塞进 `LinkStatus`：
+    /// 读它的是连接线程（每个配对请求一次），写它的是设置里那个开关，两边都不该为了一个 bool 排队。
+    /// **故意不落盘** —— 这扇门不该在没人看着的时候自己开着。
+    test_pair: AtomicBool,
 }
 
 /// 推给手机前端的对端事件载荷：`typ` 与帧里的 `event.type` 同名，`data` 是 JSON 文本。
@@ -1116,7 +1126,11 @@ fn run_pump(
                 }
                 // 转成前端事件就完事：手机上「哪个类型该重取什么」由 `link.ts` 那侧决定，
                 // 帧层与这里都不认识具体事件类型的语义（加一类事件不用动这个函数）。
-                let _ = app.emit(EVENT_REMOTE, &RemoteEvent { typ, data });
+                // 送不进界面只是丢一次提示（读写与链路都不受影响），所以只记一行，
+                // 更不像 `let _ =` 那样把它整个咽掉 —— 2026-09-25 定位掉帧时正是这行了无痕迹。
+                if let Err(e) = app.emit(EVENT_REMOTE, &RemoteEvent { typ, data }) {
+                    eprintln!("[heid-link] 对端事件没送进界面：{e}");
+                }
             }
             Ok(Some(Msg::Bye {})) => return,
             Ok(Some(other)) => {
@@ -1279,16 +1293,23 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
         .map_err(|e| format!("监听套接字设置失败：{e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let ticket = new_ticket();
+    let armed = app.state::<LinkState>().test_pair.load(Ordering::SeqCst);
     {
         let state = app.state::<LinkState>();
         if let Some(old) = replace_stop(&state, Some(Arc::clone(&stop))) {
             old.store(true, Ordering::SeqCst);
         }
-        // 开一次共享就发一张全新的一次性配对票（2 分钟 / 用后即废），旧的当场作废
-        *state.pairing.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some(pair::PairingTicket::new(ticket.clone()));
+        // 开一次共享就发一张全新的一次性配对票（2 分钟 / 用后即废），旧的当场作废。
+        // 唯独测试配对模式开着时不换：那扇门是靠那张固定的哨兵票开的，
+        // 这里顺手发一张随机票就会把它关成「刚开的时候连得上、重开共享之后再也连不上」。
+        *state.pairing.lock().unwrap_or_else(|p| p.into_inner()) = Some(if armed {
+            pair::PairingTicket::test()
+        } else {
+            pair::PairingTicket::new(ticket.clone())
+        });
         *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
+    let shown = if armed { pair::TEST_TICKET.to_string() } else { ticket };
     publish(&app, move |s| {
         s.role = Role::Server;
         s.listening = true;
@@ -1297,7 +1318,7 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
         s.peer_device.clear();
         s.peer_addr.clear();
         s.last_error.clear();
-        s.ticket = ticket;
+        s.ticket = shown;
     });
 
     let app_thread = app.clone();
@@ -1424,23 +1445,39 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
 
     let key_id = pair::key_id(&hs.ls);
     if hs.mode == Mode::Pair {
-        // 持票且已证明 → 挂一条待确认、弹 TOFU，等用户决定（超时/关共享视为拒绝）
-        let req = PairReq { device: hs.peer_device.clone(), key_id: key_id.clone() };
-        {
-            *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = Some(());
-            *state.decision.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        }
-        let _ = app.emit(EVENT_PAIR, &req);
-        if !wait_decision(&app, &state, PAIR_CONFIRM_TIMEOUT) {
-            let _ = session.send(&mut stream, &Msg::Refused {
-                code: "denied".into(),
-                reason: "桌面端拒绝了这次配对".into(),
-            });
+        // 只有「模式开着 + 此刻挂着的确实是一张测试票」两条同时成立才算走测试通道。
+        // 后者不能省：开着模式再点「让手机连接」会换成一张普通票，那次就该照旧弹 TOFU。
+        let via_test = state.test_pair.load(Ordering::SeqCst)
+            && state
+                .pairing
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .map(|t| t.is_test())
+                .unwrap_or(false);
+        if via_test {
+            // 跨机实测时电脑旁没人点确认（票又只有 120 秒），所以这一条不等用户。
+            // 但**其余每一步照旧**：登记、落盘、界面上「谁连着」都在，账上多一个 `via_test` 标记。
+            eprintln!("[heid-link] 测试配对模式自动允许了 {}（keyId {key_id}）", hs.peer_device);
+        } else {
+            // 持票且已证明 → 挂一条待确认、弹 TOFU，等用户决定（超时/关共享视为拒绝）
+            let req = PairReq { device: hs.peer_device.clone(), key_id: key_id.clone() };
+            {
+                *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = Some(());
+                *state.decision.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            }
+            let _ = app.emit(EVENT_PAIR, &req);
+            if !wait_decision(&app, &state, PAIR_CONFIRM_TIMEOUT) {
+                let _ = session.send(&mut stream, &Msg::Refused {
+                    code: "denied".into(),
+                    reason: "桌面端拒绝了这次配对".into(),
+                });
+                clear_pending(&state);
+                publish(&app, |s| s.last_error = "配对请求被拒绝或超时".into());
+                return;
+            }
             clear_pending(&state);
-            publish(&app, |s| s.last_error = "配对请求被拒绝或超时".into());
-            return;
         }
-        clear_pending(&state);
         // 允许才登记：消费票（用后即废）+ 存 LS + 落盘
         {
             let mut g = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
@@ -1456,6 +1493,7 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
                 name: hs.peer_device.clone(),
                 paired_at: now_millis(),
                 peer_fp: String::new(),
+                via_test,
             });
         }
         persist(&state); // 出了 store 锁再落盘：persist 内部会重新锁 store，不可重入
@@ -1545,6 +1583,9 @@ fn connect_and_pump(
                 name,
                 paired_at: now_millis(),
                 peer_fp: fp,
+                // `via_test` 是桌面那侧的记账（哪台设备是走测试通道进来的）；
+                // 手机只有一台桌面，无所谓从哪条路配上的。
+                via_test: false,
             });
         }
         persist(&state); // 出锁再落盘（persist 会重新锁 store）
@@ -1790,6 +1831,8 @@ pub fn link_client_reconnect(
 
 /// 桌面：生成/刷新一次配对的二维码信息（含一次性票 + 6 位短码 + 本机地址）。
 /// 每次调用都换新票并重置有效期——「点让手机连接」就是开一扇新的 2 分钟配对窗。
+/// 唯独开着测试配对模式时不换：那张哨兵票的价值就在于固定，换掉之后「刚开的时候连得上、
+/// 点过一次之后就再也连不上」是最难查的形状。
 #[tauri::command]
 pub fn link_pair_qr(app: AppHandle) -> Result<QrInfo, String> {
     let state = app.state::<LinkState>();
@@ -1797,9 +1840,13 @@ pub fn link_pair_qr(app: AppHandle) -> Result<QrInfo, String> {
     if !s.listening {
         return Err("请先打开「共享这台电脑」".to_string());
     }
-    let ticket = new_ticket();
+    let ticket = if state.test_pair.load(Ordering::SeqCst) {
+        pair::TEST_TICKET.to_string()
+    } else {
+        new_ticket()
+    };
     *state.pairing.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some(pair::PairingTicket::new(ticket.clone()));
+        Some(if ticket == pair::TEST_TICKET { pair::PairingTicket::test() } else { pair::PairingTicket::new(ticket.clone()) });
     *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
     publish(&app, |st| {
         st.ticket = ticket.clone();
@@ -1817,6 +1864,40 @@ pub fn link_pair_qr(app: AppHandle) -> Result<QrInfo, String> {
         fp,
         name,
     })
+}
+
+/// 桌面：开 / 关「测试配对模式」（v1.5 开工单第 2 条：跨机实测时电脑旁没人点确认，而票只有 120 秒）。
+///
+/// 开着时挂的是一张固定的哨兵票 —— 不过期、局域网内任何设备都能配、来了自动允许。
+/// 协议面上它只是一张普通票，所以**手机侧一行都没改**，扫码 / 粘贴 / 短码三条入口照常能用。
+///
+/// 三条边界（设计时是照这三条定的，别再放宽）：
+/// - **不跨重启**：`LinkState::test_pair` 不落盘，下次启动是关的（这扇门不该在没人看着时自己开着）；
+/// - **开启态常驻可见**：`LinkStatus.test_pair` 进状态快照，界面在状态栏常驻显示（见前端）；
+/// - **不跳过记账**：自动允许的那次照样落配对记录、照样显示「谁连着」，并在记录上打 `via_test`，
+///   「已配对设备」里看得到是走这扇门进来的，也照样能撤销。
+#[tauri::command]
+pub fn link_test_pair_set(app: AppHandle, on: bool) -> LinkStatus {
+    let state = app.state::<LinkState>();
+    state.test_pair.store(on, Ordering::SeqCst);
+    {
+        let mut g = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
+        if on {
+            *g = Some(pair::PairingTicket::test());
+        } else if g.as_ref().map(|t| t.is_test()).unwrap_or(false) {
+            // 关掉即把哨兵票摘掉：留在场上的话，「设置里已经关了但还能连」比不开还糟
+            *g = None;
+        }
+    }
+    *state.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    publish(&app, |st| {
+        st.test_pair = on;
+        if on {
+            st.ticket = pair::TEST_TICKET.to_string();
+        }
+        st.last_error.clear();
+    });
+    state.snapshot()
 }
 
 /// 前端对当前配对请求表态。只有确实挂着一条待确认时才生效，避免误点把上一次的决定带进下一次。
@@ -1846,7 +1927,7 @@ pub fn link_pairings_list(app: AppHandle) -> Vec<PairInfo> {
     let mut v: Vec<PairInfo> = g
         .devices
         .iter()
-        .map(|d| PairInfo { key_id: d.key_id.clone(), name: d.name.clone(), paired_at: d.paired_at })
+        .map(|d| PairInfo { key_id: d.key_id.clone(), name: d.name.clone(), paired_at: d.paired_at, via_test: d.via_test })
         .collect();
     v.sort_by(|a, b| b.paired_at.cmp(&a.paired_at));
     v

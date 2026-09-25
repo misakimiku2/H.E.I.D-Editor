@@ -25,6 +25,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { AlertDialog } from './components/AlertDialog';
 import { NotificationStack } from './components/NotificationStack';
 import { OtherPlatformPanel } from './components/OtherPlatformPanel';
+import { LinkShareChip } from './components/LinkShareChip';
 import { ImageViewer } from './components/ImageViewer';
 import { SvgWorkbench } from './components/SvgWorkbench';
 import { resolveImageSrc, ImageForbiddenError } from './lib/imageSrc';
@@ -2456,6 +2457,8 @@ export default function App() {
               )}
               {activeTab.isDirty && <span className="shrink-0 text-amber-500 font-medium">{t('status.unsavedPath')}</span>}
               <div className="flex-1" />
+              {/* 「手机可访问」常驻标记：关掉设置窗口之后，这扇门还开着这件事得有个地方说 */}
+              <LinkShareChip dark={isDarkMode} />
 
               {/* 换行符菜单（大文件预览无编辑/保存概念，隐藏） */}
               {!isLargePreview && (

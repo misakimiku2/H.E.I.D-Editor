@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_LINK_PORT, autoReconnectFromPrefs, autoStartFromPrefs, deviceName, isKeyId,
+  DEFAULT_LINK_PORT, DEFAULT_PREFS, EMPTY_STATUS, autoReconnectFromPrefs, autoStartFromPrefs, deviceName, isKeyId,
   isTicket, isUsablePort, linkRole, normalizePairReq, normalizeStatus, parsePrefs,
   subscribeLinkStatus, tabReports,
 } from './link';
@@ -30,6 +30,19 @@ describe('normalizeStatus', () => {
 
   it('客户端角色保留（手机侧 UI 靠它区分两半）', () => {
     expect(normalizeStatus({ role: 'client' }).role).toBe('client');
+  });
+
+  it('测试配对标记按字面采信，缺字段即视为关', () => {
+    // 这条位是「一扇开着的门」的可见状态：脏数据宁可判成关（少报一份风险）也不能抛错
+    expect(normalizeStatus({ testPair: true }).testPair).toBe(true);
+    expect(normalizeStatus({ testPair: 'yes' }).testPair).toBe(false);
+    expect(normalizeStatus({}).testPair).toBe(false);
+    expect(EMPTY_STATUS.testPair).toBe(false);
+  });
+
+  it('测试配对不进偏好（重启必须是关的）', () => {
+    expect(parsePrefs('{"testPair":true}')).not.toHaveProperty('testPair');
+    expect(DEFAULT_PREFS).not.toHaveProperty('testPair');
   });
 });
 

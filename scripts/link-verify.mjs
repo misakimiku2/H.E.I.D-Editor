@@ -319,6 +319,77 @@ async function appAsServer(invoke) {
   await invoke('link_server_stop');
 }
 
+/* ------------------------ J：测试配对模式（v1.5 开工单第 2 条，跨机实测用） */
+
+/** 那张哨兵票的票面（与 `pair::TEST_TICKET` 同一个字面）。两处对不上就说明有人改了一边没改另一边。 */
+const TEST_TICKET = '5eedc0de5eedc0de5eedc0de5eedc0de';
+
+/**
+ * 这一段验的是「这扇开着的门被关好了三次」：
+ * 开着时任何设备拿固定码就能连（不用谁点允许）、连上的设备在账上打得清清楚楚、
+ * 关掉之后那个固定码立刻失效。少了任何一条，这个模式就从"省一次点击"变成"留了一道后门"。
+ */
+async function testPairMode(invoke) {
+  const PORT = 47128;
+  log('\n=== J. 测试配对：固定码免确认 → 记账带标记 → 关掉即失效 ===');
+  await invoke('link_test_pair_set', { on: false });
+  const st = await invoke('link_server_start', { port: PORT });
+  ok('J 段起监听', st.listening === true, `port=${st.port}`);
+
+  ok('没开测试模式时，拿固定测试票配不上（默认不是一扇开着的门）', await (() => {
+    // 盐不匹配这件事在服务端表现为「等不到 pong」，所以判据是应用没有转成已连接，而不是收到 refused
+    phoneHandshake(PORT, { mode: 'pair', saltStr: TEST_TICKET, ticket: TEST_TICKET }).then((r) => r.conn.destroy()).catch(() => {});
+    return waitStatus(invoke, (x) => x.connected, 2500).then((x) => !x.connected);
+  })());
+
+  const armed = await invoke('link_test_pair_set', { on: true });
+  ok('link_test_pair_set(true) → 状态位 testPair', armed.testPair === true);
+  const qr = await invoke('link_pair_qr');
+  ok('开着模式时 pair_qr 不冲掉固定票（否则点一次面板门就关了）',
+    parsePairUri(qr.uri).ticket === TEST_TICKET && qr.code === shortCode(TEST_TICKET),
+    `code=${qr.code} 状态里的票=${armed.ticket?.slice(0, 8)}…`);
+  ok('状态快照里的票就是那张哨兵票（手机侧照旧走同一个入口）', armed.ticket === TEST_TICKET);
+
+  // 关键一条：这一段**从头到尾不调 link_pair_approve**。连上了就证明自动允许真生效了。
+  const pair = await phoneHandshake(PORT, { mode: 'pair', saltStr: TEST_TICKET, ticket: TEST_TICKET });
+  ok('测试票握手：桌面身份签名验得过', pair.sigOk);
+  let status = null;
+  for (let i = 0; i < 12 && !(status && status.connected); i++) {
+    status = await waitStatus(invoke, (x) => x.connected, 1000);
+  }
+  ok('没有人点允许也连上了，且带上了设备名',
+    status?.connected === true && status?.peerDevice === 'Node-Probe',
+    status ? `${status.peerDevice} @ ${status.peerAddr}` : '未连上');
+
+  const list = await invoke('link_pairings_list');
+  const kid = keyIdHex(pair.ls);
+  const mine = list.find((d) => d.keyId === kid);
+  ok('跳过确认没跳过记账：这台落在「已配对设备」里且打了 viaTest 标记',
+    !!mine && mine.viaTest === true, JSON.stringify(list.map((d) => [d.keyId.slice(0, 6), d.viaTest])));
+
+  // 关掉之后：哨兵票立刻失效
+  pair.conn.destroy();
+  await waitStatus(invoke, (x) => !x.connected, 4000);
+  const off = await invoke('link_test_pair_set', { on: false });
+  ok('link_test_pair_set(false) → 状态位归零', off.testPair === false);
+  const after = await tcp(PORT);
+  const eph = newKeyPair();
+  writeFrame(after, Buffer.from(JSON.stringify({
+    t: 'hello', ver: 1, pub: eph.rawPub.toString('base64'), agent: 'x', device: 'Ghost',
+    mode: 'pair', key_id: '', slot: 'ticket',
+  })));
+  const rj = JSON.parse((await readFrame(after)).payload.toString());
+  ok('关掉后固定码立刻被拒', rj.t === 'refused' && rj.code === 'ticket', rj.reason || JSON.stringify(rj));
+  after.destroy();
+
+  // 再确认可普通配对这条路没被这个模式带松：重新开一次共享走一次正常票 + TOFU
+  const qr2 = await invoke('link_pair_qr');
+  const p2 = parsePairUri(qr2.uri);
+  ok('关掉之后 pair_qr 回到随机票（不是那张公开的哨兵票）',
+    /^[0-9a-f]{32}$/.test(p2.ticket) && p2.ticket !== TEST_TICKET, `${p2.ticket.slice(0, 8)}…`);
+  await invoke('link_server_stop');
+}
+
 /* ---------------------------------------------------- B/C/D/E：Node 当桌面 与错误路径 */
 
 /** 起一个 Node 侧「桌面」：带一把身份、握手后发 Auth。返回它观察到的东西。 */
@@ -1242,7 +1313,11 @@ async function stage4Live() {
     const e2 = await collect(4000, 'fs');
     ok('子目录里的变更按 src 这一层报上来', dirsOf(e2).includes('src'), JSON.stringify(dirsOf(e2)));
 
-    /* 4) 逐层黑名单：40 次写入进 node_modules/pkg，一帧都不该有 */
+    /* 4) 逐层黑名单：40 次写入进 node_modules/pkg，一帧都不该有。
+       动手前要先排空到"连续一个窗口安静"：Windows 会把前一轮那次根目录写入分成几条通知，
+       彼此间隔能越过一个 300 ms 合并窗口（上面第 2 条注释记的就是这件事），
+       只排 900 ms 时那条 `dirs:[""]` 的尾巴会掉进这一轮的零帧判据里 —— 2026-09-25 两次误报就是这么来的。 */
+    for (let q = 0; q < 5; q += 1) { if ((await collect(900, 'fs')).length === 0) break; }
     for (let i = 0; i < 40; i += 1) fs.writeFileSync(path.join(root, 'node_modules', 'pkg', `f${i}.js`), 'export default 1\n');
     const storm = await collect(1800, 'fs');
     ok('node_modules 里的 40 次写入不产生任何 fs 帧（一次 npm install 不会涌进推送队列）',
@@ -1301,9 +1376,13 @@ async function safe(name, fn) {
 try {
   try { await invoke('link_server_stop'); } catch { /* */ }
   try { await invoke('link_client_disconnect'); } catch { /* */ }
+  /* 上一轮把「测试配对模式」留着开了的话，A 段的「一次性票用后即废」必然假失败：
+     开着那一档时挂的就是那张固定哨兵票，它按设计不会被消费掉。先归位再测。 */
+  try { await invoke('link_test_pair_set', { on: false }); } catch { /* */ }
   await normalizeAppState(invoke, evalJs);
   await safe('入参校验', () => badInputs(invoke));
   await safe('A 应用当服务端', () => appAsServer(invoke));
+  await safe('J 测试配对模式', () => testPairMode(invoke));
   await safe('F 阶段 2 命令面', () => stage2Files(invoke));
   await safe('G 阶段 2 手机侧通路', () => appAsClientFiles(invoke));
   await safe('B 应用当客户端', () => appAsClient(invoke));

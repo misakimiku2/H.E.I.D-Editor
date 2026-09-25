@@ -7,7 +7,7 @@ import { isTauri } from '../lib/fileIO';
 import {
   DEFAULT_LINK_PORT, approvePair, connectTo, denyPair, deviceName, disconnectClient,
   fetchStatus, isUsablePort, loadPrefs, pairCode, pairQr, pairUri, pairingsList, reconnect,
-  revokePairing, savePrefs, startServer, stopServer, subscribeLinkStatus, subscribePairRequests,
+  revokePairing, savePrefs, setTestPair, startServer, stopServer, subscribeLinkStatus, subscribePairRequests,
   type LinkPairReq, type LinkStatus, type PairInfo, type QrInfo,
 } from '../lib/link';
 import { makeRemotePath } from '../lib/remote';
@@ -110,6 +110,23 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
     setPort(v);
     const n = Number(v);
     if (isUsablePort(n)) savePrefs({ port: n });
+  };
+
+  /**
+   * 测试配对模式：开的时候顺手把配对面板打开 —— 那张哨兵票的短码是固定的，
+   * 面板上的码就是手机要用的码，不用再点一次「让手机连接」。
+   */
+  const onTestPairToggle = async (on: boolean) => {
+    setBusy(true);
+    setLocalError('');
+    try {
+      setStatus(await setTestPair(on));
+      if (on) setQr(await pairQr().catch(() => null));
+    } catch (e) {
+      setLocalError(String((e as { message?: string })?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const onShowQr = () => {
@@ -382,6 +399,51 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
               </span>
             </div>
           )}
+          {/* 测试配对模式（v1.5 开工单第 2 条）：跨机实测时电脑旁没人点 TOFU，而票只有 120 秒。
+              只在共享开着这一格里出现——不监听端口时它没有意义，也就不会看不见了 yet 还开着。
+              开关本身不跨重启（Rust 那边不落盘），所以最坏的形态是"这次运行忘了关"。 */}
+          {enabled && (
+            <div className={rowCls}>
+              <span className={cn(labelCls, 'flex items-center gap-1.5')}>
+                {t('link.testPairLabel')}
+                <span className={cn(
+                  'rounded px-1 py-px text-[9px] leading-none',
+                  status?.testPair
+                    ? 'bg-amber-500/20 text-amber-600'
+                    : dark ? 'bg-zinc-700 text-zinc-400' : 'bg-zinc-200 text-zinc-500',
+                )}>
+                  {t('link.testPairBadge')}
+                </span>
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!!status?.testPair}
+                onClick={() => onTestPairToggle(!status?.testPair)}
+                disabled={busy}
+                className={cn(
+                  'relative block w-9 h-5 rounded-full transition-all shrink-0 disabled:opacity-50',
+                  status?.testPair ? 'bg-amber-500' : 'bg-zinc-400/50',
+                )}
+              >
+                <span
+                  className={cn(
+                    'absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all',
+                    status?.testPair ? 'left-[18px]' : 'left-0.5',
+                  )}
+                />
+              </button>
+            </div>
+          )}
+          {status?.testPair && (
+            <p className="mx-5 my-1 flex gap-1.5 rounded-lg bg-amber-500/10 p-2 text-[10px] leading-relaxed text-amber-600 pointer-coarse:text-xs">
+              <ShieldAlert size={13} className="mt-0.5 shrink-0" />
+              <span>
+                {t('link.testPairWarn')}
+                {qr?.code ? <span className="block mt-1 font-mono">{t('link.testPairOn', { code: qr.code })}</span> : null}
+              </span>
+            </p>
+          )}
           {/* 根外白名单也在暴露范围内（阶段 3 §6.3）：标签关一个少一个，所以只报数量不列路径 */}
           {enabled && (s?.openShared ?? 0) > 0 && (
             <div className={rowCls}>
@@ -475,7 +537,15 @@ export function DeviceLinkSection({ dark, rowCls, labelCls, onBrowseRemote, onOp
               <div className="text-[10px] opacity-70 pointer-coarse:text-xs mb-1">{t('link.pairedDevices')}</div>
               {devices.map((d) => (
                 <div key={d.keyId} className="flex items-center justify-between py-0.5 text-xs pointer-coarse:text-sm">
-                  <span className="truncate">{d.name || d.keyId}</span>
+                  <span className="truncate">
+                    {d.name || d.keyId}
+                    {/* 自动允许过的那几台要能在事后看出来是谁 —— 跳过确认不等于跳过记账 */}
+                    {d.viaTest && (
+                      <span className="ml-1.5 rounded bg-amber-500/20 px-1 py-px text-[9px] leading-none text-amber-600">
+                        {t('link.viaTestTag')}
+                      </span>
+                    )}
+                  </span>
                   <button type="button" onClick={() => onRevoke(d.keyId)} className="opacity-60 hover:opacity-100 underline decoration-dotted">
                     {t('link.revoke')}
                   </button>
