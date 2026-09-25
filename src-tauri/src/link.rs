@@ -826,6 +826,18 @@ struct Slot {
 /// 宁可明确报「超时」也不要让前端的保存按钮一直转。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/* ------------------------------------------------------- 链路级失败的稳定码 */
+
+/// 没有可发的连接（没配对 / 已断开 / 任务被丢）：手机侧把这三个码归为**暂时**失败，
+/// 存进离线队列等重连；`fsrv` 那批码（`outside` / `badpath` / `toobig` …）是**永久**失败，
+/// 必须照原样报错。两种混成一个「失败了」，就会拿一份改错的文案在队列里无限重试。
+///
+/// 为什么超时也算暂时：真关 WiFi 之后心跳要 15 s × 2 次才判定断连，那期间保存就是等满 30 s
+/// 拿到 `timeout` —— 把这条判成永久等于「拔网线编辑会丢」，正是阶段 5 要堵的那个洞。
+pub const CODE_NOLINK: &str = "nolink";
+pub const CODE_DROPPED: &str = "dropped";
+pub const CODE_TIMEOUT: &str = "timeout";
+
 impl Conn {
     fn new() -> Arc<Conn> {
         Arc::new(Conn {
@@ -860,13 +872,13 @@ impl Conn {
             if !self.alive.load(Ordering::SeqCst) {
                 drop(g);
                 self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
-                return Err("链路已断开，这次没有送达桌面".to_string());
+                return Err(format!("{CODE_DROPPED}: 链路已断开，这次没有送达桌面"));
             }
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 drop(g);
                 self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
-                return Err("桌面 30 秒内没有回话，请检查连接".to_string());
+                return Err(format!("{CODE_TIMEOUT}: 桌面 30 秒内没有回话，请检查连接"));
             }
             g = match slot.cv.wait_timeout_while(g, left, |v| v.is_none()) {
                 Ok((g, _)) => g,
@@ -901,7 +913,7 @@ impl Conn {
             .collect();
         for slot in drained {
             *slot.done.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some(Err(format!("链路已断开：{why}")));
+                Some(Err(format!("{CODE_DROPPED}: 链路已断开：{why}")));
             slot.cv.notify_all();
         }
     }
@@ -2189,10 +2201,10 @@ pub fn on_window_closed(app: &AppHandle, label: &str) {
 /// 那样会把整个窗口冻成「未响应」（同 `http.rs:86` 的理由）。
 #[tauri::command]
 pub async fn link_request(app: AppHandle, method: String, params: String) -> Result<String, String> {
-    let conn = client_conn(&app).ok_or("手机上还没有连着桌面，请先完成配对")?;
+    let conn = client_conn(&app).ok_or(format!("{CODE_NOLINK}: 手机上还没有连着桌面，请先完成配对"))?;
     tauri::async_runtime::spawn_blocking(move || conn.call(&method, params))
         .await
-        .map_err(|e| format!("远程命令任务失败：{e}"))?
+        .map_err(|e| format!("{CODE_DROPPED}: 远程命令任务失败：{e}"))?
 }
 
 /// 给人看的根路径：去掉 Windows `canonicalize` 加的 `\\?\` 前缀。

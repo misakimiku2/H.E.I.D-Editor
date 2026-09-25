@@ -107,6 +107,27 @@ export function isRemoteError(e: unknown): e is RemoteError {
   return e instanceof RemoteError;
 }
 
+/**
+ * 链路级失败的码：这次**没送到 / 没回话**，而不是桌面拒绝了这个路径。
+ *
+ * 这条分界是阶段 5 离线队列的唯一判据，所以两边各只写一份：Rust 侧在 `link.rs` 的
+ * `CODE_NOLINK` / `CODE_DROPPED` / `CODE_TIMEOUT`，这里跟着它列。
+ * `unavailable` 是前端自己那条（这台设备此刻根本没有链路，`unavailable()`）。
+ *
+ * 混错的代价不对称，所以宁可少认：把桌面的永久拒绝（`outside` / `badpath` / `toobig`）
+ * 当成断连，就会拿一份改错的文案在队列里每次重连重试一遍；反过来把超时当成永久失败，
+ * 就是「拔网线编辑会丢」—— 真关 WiFi 之后心跳要 15 s × 2 次才判出断连，
+ * 那期间的保存**就是**等满 30 s 拿一个 `timeout`，所以它必须在另一边。
+ */
+export const LINK_DOWN_CODES: ReadonlySet<string> = new Set([
+  'nolink', 'dropped', 'timeout', 'unavailable',
+]);
+
+/** 这个失败该不该按「暂时连不上」处理（入离线队列而不是报错） */
+export function isLinkDown(e: unknown): boolean {
+  return isRemoteError(e) && LINK_DOWN_CODES.has(e.code);
+}
+
 /** Rust 的 Err 串约定为 `"<稳定码>: <给人看的中文原因>"`（`link.rs` 组帧时按此拼接）。
     只切**第一个**分隔符，所以原因里的全角冒号不会被当成码的分隔；码按形状限定成小写字母数字，
     于是一句本来只给人看的话（`C:\tmp: 打不开`）不会被拆出一个假码，而是整串留作原因。 */

@@ -232,18 +232,21 @@ function parsePairUri(uri) {
 
 /* ---------------------------------------------------- Node 当手机：配对一次握手 */
 
-/** 连上 port，按 mode 走完一次握手（含验桌面 Auth），返回握手后仍在的 socket + LS + 明文痕迹。 */
+/** 连上 port，按 mode 走完一次握手（含验桌面 Auth），返回握手后仍在的 socket + LS + 明文痕迹。
+    返回的 `next` 是这条连接**唯一**的读取器，从第一帧起就挂着 —— 调用方一律用它取帧，
+    不要再对同一个 socket 另起一个 frameReader 或 readFrame。 */
 async function phoneHandshake(port, { mode, saltStr, ticket, keyId = '', slot = 'ticket', device = 'Node-Probe', expectFp = null }) {
   const conn = await tcp(port);
+  const next = frameReader(conn);
   const mine = newKeyPair();
   writeFrame(conn, Buffer.from(JSON.stringify({
     t: 'hello', ver: 1, pub: mine.rawPub.toString('base64'), agent: 'heid-android-probe',
     device, mode, key_id: keyId, slot,
   })));
-  const welcome = JSON.parse((await readFrame(conn)).payload.toString());
+  const welcome = JSON.parse((await next()).payload.toString());
   const shared = sharedSecret(mine, welcome.pub);
   const { c2s, s2c } = keysFrom(shared, saltStr);
-  const first = await readFrame(conn);
+  const first = await next();
   const env = JSON.parse(open(s2c, 0, first.payload).toString());
   const auth = env.msg;
   const idPub = Buffer.from(auth.id, 'base64');
@@ -254,7 +257,7 @@ async function phoneHandshake(port, { mode, saltStr, ticket, keyId = '', slot = 
   const ls = deriveLS(shared);
   const fpMatch = !expectFp || fp === expectFp;
   // keys 带出去才好在握手之后继续发应用帧：两个方向的 seq 0 已被 pong / Auth 用掉
-  return { conn, ls, fp, sigOk, fpMatch, cipherHead: first.head, mode, ticket, keys: { c2s, s2c } };
+  return { conn, next, ls, fp, sigOk, fpMatch, cipherHead: first.head, mode, ticket, keys: { c2s, s2c } };
 }
 
 /* ---------------------------------------------------- A：应用当服务端（手机视角） */
@@ -276,6 +279,8 @@ async function appAsServer(invoke) {
   ok('Node 验出桌面身份签名', pair.sigOk);
   ok('桌面身份指纹 = 二维码里的指纹（防抢答）', pair.fpMatch, `live=${pair.fp}`);
   const cipher = pair.cipherHead.subarray(4).toString('latin1');
+  // 从现在开始这条 socket 上的帧只由这一个读取器经手（它在握手前就挂上了）
+  const nextOnPair = pair.next;
   ok('握手后首帧密文无明文痕迹', !/auth|sig|pong|seq|heid-link/.test(cipher) && !cipher.includes(p.ticket));
 
   // TOFU 有竞态：服务端读完 pong 才挂 pending；approve 到生效前反复点，直到连上
@@ -288,6 +293,15 @@ async function appAsServer(invoke) {
   }
   ok('允许 TOFU 后应用状态转已连接 + 带手机名',
     conn && conn.connected && conn.peerDevice === 'Node-Probe', conn ? `${conn.peerDevice} @ ${conn.peerAddr}` : '未连上');
+
+  /* 桌面「开始服务你了」的信号：一进 run_pump 就发的第一帧 ping。
+     手机那份 connected 就是押在它到达之后（(b)），所以要等满一个 15 s 心跳才转已连接的说法作废。
+     序号 1：0 已被 Auth 用掉。 */
+  let served = '';
+  try {
+    served = JSON.parse(open(pair.keys.s2c, 1, (await nextOnPair(3000)).payload).toString()).msg.t;
+  } catch (e) { served = `没读到帧：${String(e?.message ?? e).slice(0, 50)}`; }
+  ok('桌面开始服务时立刻发一帧 ping（不等 15 s 心跳）', served === 'ping', served);
 
   const list = await invoke('link_pairings_list');
   const kid = keyIdHex(pair.ls);
@@ -315,7 +329,21 @@ async function appAsServer(invoke) {
   const refusedFrame = await readFrame(bad);
   const rj = JSON.parse(refusedFrame.payload.toString());
   ok('一次性票用后即废（二次配对被拒）', rj.t === 'refused' && rj.code === 'ticket', rj.reason || JSON.stringify(rj));
+
+  /* 归因（v1.5 开工单 (a)）：面板「上次失败」那一行要说清是**谁拒的**。
+     两条判据是一对：先要求具体原因落到位，再要求一条「拨开就断、连自己是谁都没说」的空连接
+     （`nc host port` 的形状）不许把它冲成「对端已关闭连接」—— 那是"谁先挂断"盖掉"谁拒的"，
+     用户会去查网络，而真相是配对码该刷新。 */
+  const why = await waitStatus(invoke, (x) => x.lastError.includes('配对码已过期'), 3000);
+  ok('票过期/已用被拒时，桌面记的是自己拒的那个具体原因',
+    why.lastError.includes('配对码已过期'), why.lastError);
   bad.destroy();
+  const silent = await tcp(47123);
+  silent.destroy();
+  await sleep(1500);
+  const still = await invoke('link_status');
+  ok('拨开就断的空连接不改动那一行',
+    still.lastError.includes('配对码已过期'), still.lastError);
   await invoke('link_server_stop');
 }
 
@@ -392,10 +420,17 @@ async function testPairMode(invoke) {
 
 /* ---------------------------------------------------- B/C/D/E：Node 当桌面 与错误路径 */
 
-/** 起一个 Node 侧「桌面」：带一把身份、握手后发 Auth。返回它观察到的东西。 */
-function nodeDesktop(port, { saltStr, identity }) {
+/** 起一个 Node 侧「桌面」：带一把身份、握手后发 Auth（含桌面设备名）。返回它观察到的东西与控制把手。
+ *
+ *  为什么这里也要发那一下 ping：手机把 `connected` 押到「对端第一帧」到达之后（(b)），
+ *  所以**任何**扮演桌面的一方都得在开始服务时发一帧，否则应用当客户端永远不转已连接。
+ *  这不是给测试开后门 —— 是这段判据本来就该跟着协议走，`serve()` 就是「我开始服务你了」那一刻。
+ *  `serveAfterPong: false` 则用来量中间那一档（等待电脑上确认）。 */
+function nodeDesktop(port, { saltStr, identity, name = 'Node-Desktop', serveAfterPong = true }) {
   const seen = { hello: null, plain: [], cipher: null, shared: null };
+  const ctl = { serve: null, refuse: null, stop: null, sock: null };
   const server = net.createServer(async (sock) => {
+    ctl.sock = sock;
     try {
       const { payload } = await readFrame(sock);
       seen.plain.push(payload);
@@ -408,13 +443,31 @@ function nodeDesktop(port, { saltStr, identity }) {
       const { c2s, s2c } = keysFrom(shared, saltStr);
       const idPub = identity.rawPub;
       const sig = identity.sign(authMessage(SRV4, Buffer.from(hello.pub, 'base64'), mine.rawPub, idPub));
-      writeFrame(sock, seal(s2c, 0, Buffer.from(JSON.stringify({ seq: 0, msg: { t: 'auth', id: idPub.toString('base64'), sig: sig.toString('base64') } }))));
+      writeFrame(sock, seal(s2c, 0, Buffer.from(JSON.stringify({
+        seq: 0, msg: { t: 'auth', id: idPub.toString('base64'), sig: sig.toString('base64'), name },
+      }))));
       const { head } = await readFrame(sock);
       seen.cipher = head;
-      setTimeout(() => sock.destroy(), 300);
+      let sseq = 1; // 0 已被 auth 用掉
+      const sendMsg = (msg) => {
+        writeFrame(sock, seal(s2c, sseq, Buffer.from(JSON.stringify({ seq: sseq, msg }))));
+        sseq += 1;
+      };
+      ctl.serve = () => sendMsg({ t: 'ping' });
+      ctl.refuse = (reason) => sendMsg({ t: 'refused', code: 'denied', reason });
+      ctl.stop = () => sock.destroy();
+      if (serveAfterPong) ctl.serve();
+      // 挂着别断：应用那一侧的连接要活到断言做完
+      await new Promise((r) => {
+        sock.once('close', r);
+        sock.once('error', r);
+      });
     } catch { sock.destroy(); }
   });
-  return new Promise((res) => server.listen(port, '127.0.0.1', () => res({ server, seen })));
+  return new Promise((res) => server.listen(port, '127.0.0.1', () => res({
+    server, seen, ctl,
+    close: () => { server.close(); ctl.stop?.(); },
+  })));
 }
 
 function newEd25519() {
@@ -428,13 +481,37 @@ function newEd25519() {
 }
 
 async function appAsClient(invoke) {
-  log('\n=== B. 应用当客户端，Node 当桌面：hello 明文只含版本/公钥/设备名/模式，票不上网 ===');
+  log('\n=== B. 应用当客户端，Node 当桌面：握手时机 + hello 明文形状 + 票不上网 ===');
   const TICKET = '0123456789abcdef0123456789abcdef';
+  const DESKTOP = 'Node-Desktop-PC';
   const id = newEd25519();
-  const { server, seen } = await nodeDesktop(47900, { saltStr: TICKET, identity: id });
+  /* 先让 Node「握着不发」：这一段第一半要量的就是桌面还没开始服务时手机不许报已连接
+     （(b) —— 桌面的 connected 那一刻对应真人点「允许」，之前每条命令都会等满 30 s） */
+  const { server, seen, ctl, close } = await nodeDesktop(47900, {
+    saltStr: TICKET, identity: id, name: DESKTOP, serveAfterPong: false,
+  });
   await invoke('link_client_connect', { host: '127.0.0.1', port: 47900, ticket: TICKET, device: 'SM-X808U' });
-  const s = await waitStatus(invoke, (x) => x.connected || x.lastError, 8000);
-  ok('应用作为客户端连上并验过桌面身份', s.connected === true, s.lastError || s.peerAddr);
+  // Node 收到 pong = 应用的客户端握手已完成，此刻桌面一帧都没发
+  const handUntil = Date.now() + 8000;
+  while (!seen.cipher && Date.now() < handUntil) await sleep(100);
+  ok('应用完成握手（验过 Auth 并回了 pong）', !!seen.cipher);
+
+  let mid = null;
+  for (let i = 0; i < 20; i += 1) {
+    mid = await invoke('link_status');
+    if (mid.waitingConfirm || mid.connected || mid.lastError) break;
+    await sleep(100);
+  }
+  ok('(b) 桌面开始服务之前，手机不谎报已连接',
+    mid.connected === false && mid.waitingConfirm === true,
+    JSON.stringify({ connected: mid.connected, waitingConfirm: mid.waitingConfirm, err: mid.lastError }));
+  ok('(c) 桌面设备名随 Auth 上来，中间那一档也叫得出对面是哪台电脑',
+    mid.peerDevice === DESKTOP, `status.peerDevice=${mid.peerDevice}`);
+
+  const t0 = Date.now();
+  ctl.serve();
+  const up = await waitStatus(invoke, (x) => x.connected, 1500);
+  ok('(b) 桌面一进泵发第一帧，手机 1 秒内转已连接', up.connected === true, `${Date.now() - t0}ms`);
   const hello = seen.hello || {};
   ok('应用发的 hello 是 pair 模式、带 32 字节公钥',
     hello.t === 'hello' && hello.ver === 1 && hello.mode === 'pair'
@@ -449,8 +526,16 @@ async function appAsClient(invoke) {
     } catch { return false; }
   })();
   ok('应用验证过 Node 出的 Auth 并回了 pong（Node 独立实现解得开）', pong);
-  server.close();
+
+  /* 会话中途对端发来 refused：原因要原样落到手机上，而不是等心跳判死或让请求等满 30 s
+     —— 桌面点「拒绝」走的就是这一帧（serve_conn 里 code=denied）。 */
+  ctl.refuse('桌面端拒绝了这次配对');
+  const denied = await waitStatus(invoke, (x) => x.lastError.includes('拒绝'), 4000);
+  ok('(b) 被拒时手机拿到桌面的原话、且不再算已连接',
+    denied.connected === false && denied.lastError.includes('桌面端拒绝了这次配对'), denied.lastError);
+  close();
   await invoke('link_client_disconnect');
+  server.unref?.();
 }
 
 async function wrongFp(invoke) {
@@ -458,13 +543,14 @@ async function wrongFp(invoke) {
   const TICKET = '0123456789abcdef0123456789abcdef';
   const wrongId = newEd25519();
   // 服务端用 wrongId 这把身份；塞给应用的期望指纹是另一串 → 必然不符
-  const { server } = await nodeDesktop(47901, { saltStr: TICKET, identity: wrongId });
+  const { server, close } = await nodeDesktop(47901, { saltStr: TICKET, identity: wrongId });
   const bogusFp = 'ABCDEFGHIJKLM'; // 与 wrongId 的真实指纹不符
   const uri = `hide-link://pair?host=127.0.0.1&port=47901&ticket=${TICKET}&name=Node-Desktop&fp=${bogusFp}`;
   await invoke('link_client_pair', { uri, device: 'SM-X808U' });
   const s = await waitStatus(invoke, (x) => x.lastError.includes('指纹') || x.connected, 8000);
   ok('指纹不符时应用如实中止、不假装连上', s.lastError.includes('指纹') && !s.connected, s.lastError);
-  server.close();
+  close();
+  server.unref?.();
   await invoke('link_client_disconnect');
 }
 
@@ -541,6 +627,8 @@ async function stage2Files(invoke) {
 
   /* 应用帧序号从 1 起：握手已用掉两个方向的 0（手机回 pong、桌面发 Auth） */
   let tx = 1, rx = 1, idc = 0;
+  // 这条连接唯一的读取器：握手时挂上的那一个（桌面一进泵就先推一帧 ping，见 (b)）
+  const nextFrame = pair.next;
   const send = (msg) => {
     writeFrame(pair.conn, seal(pair.keys.c2s, tx, Buffer.from(JSON.stringify({ seq: tx, msg }))));
     tx += 1;
@@ -549,7 +637,7 @@ async function stage2Files(invoke) {
     const id = ++idc;
     send({ t: 'req', id, method, params: JSON.stringify(params) });
     for (;;) {
-      const f = await readFrame(pair.conn, 8000);
+      const f = await nextFrame(8000);
       const env = JSON.parse(open(pair.keys.s2c, rx, f.payload).toString());
       rx += 1;
       if (env.msg.t === 'ping') { send({ t: 'pong' }); continue; }
@@ -635,7 +723,10 @@ async function stage2Files(invoke) {
 
 /** 按连接持续成帧的读取器。
     `readFrame` 每次挂一个新 listener、只取一帧，一次 data 事件里夹着的**第二帧会被丢掉**——
-    前端并发两笔远程命令会合并进同一个 TCP 段，所以服务端这一侧必须自己缓冲。 */
+    前端并发两笔远程命令会合并进同一个 TCP 段，所以服务端这一侧必须自己缓冲。
+    同理：**一条连接只许有一个读取器**，而且要尽早挂上 —— 桌面一进泵就先推一帧 ping（(b)），
+    晚一步建读取器，那一帧可能在"没有 listener 的窗口"里被吐掉，之后的每一帧就都解不开了
+    （F 段 2026-09-25 那次「Unsupported state」就是这个，`head` 一并带出以便验明文痕迹）。 */
 function frameReader(sock) {
   let buf = Buffer.alloc(0);
   const frames = [];
@@ -646,14 +737,14 @@ function frameReader(sock) {
       if (buf.length < 4) break;
       const len = buf.readUInt32BE(0);
       if (buf.length < 4 + len) break;
-      frames.push(buf.subarray(4, 4 + len));
+      frames.push({ payload: buf.subarray(4, 4 + len), head: buf.subarray(0, 4 + len) });
       buf = buf.subarray(4 + len);
     }
-    while (waiters.length && frames.length) waiters.shift()({ payload: frames.shift() });
+    while (waiters.length && frames.length) waiters.shift()(frames.shift());
   });
   return (timeoutMs = 5000) =>
     new Promise((res, rej) => {
-      if (frames.length) return res({ payload: frames.shift() });
+      if (frames.length) return res(frames.shift());
       /* 超时必须把 waiter 从队列里摘掉。留着它，下一帧会被交给这个已经 reject 的承诺
          并就地丢掉 —— 于是"之后所有帧都看不见"。阶段 4 的判据要连着等好几轮空帧，
          2026-09-24 就是这条把一次真能收到推送的链路读成了"0 帧"。 */
@@ -685,9 +776,15 @@ function nodeFileServer(port, { saltStr, identity }) {
       const { c2s, s2c } = keysFrom(shared, saltStr);
       const idPub = identity.rawPub;
       const sig = identity.sign(authMessage(SRV4, Buffer.from(hello.pub, 'base64'), mine.rawPub, idPub));
-      writeFrame(sock, seal(s2c, 0, Buffer.from(JSON.stringify({ seq: 0, msg: { t: 'auth', id: idPub.toString('base64'), sig: sig.toString('base64') } }))));
+      let sseq = 0; // 本端密文序号：每次 sendMsg 递增（auth 是 0，之后第一帧就是「我开始服务你了」）
+      const sendMsg = (msg) => {
+        writeFrame(sock, seal(s2c, sseq, Buffer.from(JSON.stringify({ seq: sseq, msg }))));
+        sseq += 1;
+      };
+      sendMsg({ t: 'auth', id: idPub.toString('base64'), sig: sig.toString('base64'), name: 'Node-FileServer-PC' });
+      // 与真实桌面同一时刻：开始服务 = 立刻发一帧 ping（手机把 `connected` 押在对端第一帧之后，见 (b)）
+      sendMsg({ t: 'ping' });
       let cseq = 0; // 应用第一帧密文是 pong（seq 0），之后每个 req 递增
-      let sseq = 1; // 本端密文序号：0 已被 auth 用掉
       for (;;) {
         const { payload: raw } = await next(30_000);
         const env = JSON.parse(open(c2s, cseq, raw).toString());
@@ -710,11 +807,9 @@ function nodeFileServer(port, { saltStr, identity }) {
         } else {
           out = { ok: false, code: 'unknown', error: '桌面不支持的命令' };
         }
-        writeFrame(sock, seal(s2c, sseq, Buffer.from(JSON.stringify({
-          seq: sseq,
-          msg: { t: 'res', id: m.id, ok: out.ok, code: out.code ?? '', error: out.error ?? '', data: out.data ?? '' },
-        }))));
-        sseq += 1;
+        sendMsg({
+          t: 'res', id: m.id, ok: out.ok, code: out.code ?? '', error: out.error ?? '', data: out.data ?? '',
+        });
       }
     } catch { /* 对端断开即收摊 */ }
   });
@@ -771,7 +866,12 @@ async function appAsClientFiles(invoke) {
   let after = '';
   try { await invoke('link_request', { method: 'list', params: '{}' }); } catch (e) { after = String(e?.message ?? e); }
   const waited = Date.now() - t0;
-  ok('断开后的请求立刻报错而不是等超时', /(没.{0,3}连着|断开|未连接)/.test(after) && waited < 12_000, `${waited}ms · ${after}`);
+  ok('断开后的请求立刻报错而不是等超时', waited < 12_000, `${waited}ms · ${after}`);
+  /* 阶段 5 的离线队列只认**码**分流「这次没送到」与「桌面拒绝了这个路径」：
+     按人话正则判会让改文案顺手把判据改掉，而前端认不出来时的表现是「拔网线编辑会丢」。 */
+  ok('断连后的失败以稳定码抛给前端（离线队列的分岔口）',
+    /^(nolink|dropped): /.test(after.replace(/^link_request 失败：/, '')), after);
+  ok('未连接时的失败码是 nolink', /nolink: /.test(after), after);
   await invoke('link_client_disconnect');
 }
 
@@ -957,7 +1057,7 @@ async function stage3Tabs() {
     norm(st?.rootDisplay) === norm(root), `rootDisplay=${st?.rootDisplay}`);
 
     pair = await pairedPhone(m.invoke, PORT);
-  const next = frameReader(pair.conn);
+  const next = pair.next; // 一条连接一个读取器，且从握手起就挂着（见 frameReader 的注释）
   let tx = 1, rx = 1, idc = 0;
   const send = (msg) => {
     writeFrame(pair.conn, seal(pair.keys.c2s, tx, Buffer.from(JSON.stringify({ seq: tx, msg }))));
@@ -1239,7 +1339,7 @@ async function stage4Live() {
     await m.invoke('link_server_start', { port: PORT });
     ok('生效的共享根就是前端自己报的那一棵（fs 判据的前提）', await rootIs(root));
     pair = await pairedPhone(m.invoke, PORT);
-    const next = frameReader(pair.conn);
+    const next = pair.next; // 一条连接一个读取器，且从握手起就挂着（见 frameReader 的注释）
     let tx = 1, rx = 1;
     const send = (msg) => {
       writeFrame(pair.conn, seal(pair.keys.c2s, tx, Buffer.from(JSON.stringify({ seq: tx, msg }))));

@@ -344,11 +344,169 @@ async function cmdPairTest(p) {
   log(`  FAIL 12 位…20 s 内没连上：${JSON.stringify((await p.invoke('link_status')).ok?.lastError)} —— 桌面那侧的测试配对开关是开的吗？`);
 }
 
+/* ------------------------------------------------------------------ tofu */
+
+/**
+ * 真 TOFU 流程的手机侧取样（(b)(c) 两条判据）。**测试配对档必须关着** ——
+ * 那一档跳过 TOFU，正好把要验的这一刻绕过去，所以这条走普通票 + 真人（或本机驱动）点「允许 / 拒绝」。
+ *
+ * 取样走**页面里常驻的 `heid-link` 监听**，每条状态变更都连界面上那一行文案一起记进 `window.__tofu`：
+ * 轮询 `link_status` 抓不到中间那一档（它只活几百毫秒，2026-09-25 第一版就是这么误判成 FAIL 的），
+ * 而事件流是产品自己推的，一条不漏。
+ * 注意 `transformCallback` 的第二个参数是 `once` 不是 persistent —— 这里故意不传（见 fsprobe 的注释）。
+ *
+ * 判据按"顺序"而不是"绝对时刻"下：模拟器的页面时钟与本机会差几十小时，跨机比时刻没意义。
+ * "点允许 → 1 s 内转已连接"那个毫秒数在 `link-verify` 的 B 段同钟量（本机量出 139 ms）。
+ *
+ * 用法：`node scripts/link-lan-check.mjs tofu <6位短码> --host=IP [--port=47123] [--secs=60] [--nosetup]`
+ * 普通票只有 120 秒；桌面的「设置 → 设备互联」得开着，配对弹窗挂在那里面。
+ */
+async function cmdTofu(p) {
+  const ok = (name, cond, extra = '') => log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? ' — ' + extra : ''}`);
+  const code = POS[1];
+  if (!/^\d{6}$/.test(String(code || ''))) throw new Error('用法：tofu <6位短码> --host=IP [--port=47123] [--secs=60]');
+  const host = flag('host', '');
+  if (!host) throw new Error('要 --host= 指定桌面地址');
+  const port = Number(flag('port', 47123));
+  const secs = Number(flag('secs', 60));
+
+  let uiOn = false;
+  if (!flag('nosetup', '')) {
+    // 本脚本的 p.js 直接把表达式丢给 Runtime.evaluate（不裹函数体），所以带 return 的片段必须自己包 IIFE
+    const tap = (re) => p.js(`(async()=>{
+      const re = new RegExp(${JSON.stringify(re.source)});
+      const name = (n) => (n.textContent || '').trim() || (n.getAttribute('title') || '').trim() || (n.getAttribute('aria-label') || '').trim();
+      const vis = [...document.querySelectorAll('button')].filter(n => n.offsetParent !== null);
+      const b = vis.find(n => re.test(name(n)));
+      if (!b) return 'NO-HIT[' + vis.map(name).slice(0, 14).join('|').slice(0, 200) + ']';
+      b.click(); return 'ok:' + name(b).slice(0, 20);})()`);
+    log('  点开菜单:', (await tap(/菜单|Menu|更多/)).val ?? (await tap(/菜单/)).err);
+    await sleep(700);
+    log('  点设置 :', (await tap(/^设置$|^Settings$/)).val);
+    await sleep(1200);
+    uiOn = String((await p.js(`/设备互联|Device link/i.test(document.body.innerText) ? '1' : '0'`)).val) === '1';
+  }
+  log(`手机「设置」页：${uiOn ? '已打开，文案一起验' : '没打开（--nosetup）—— 只验状态位'}`);
+
+  /* 每次都重新订一遍：早退会让上一次订错事件名的那份继续挂着，
+     于是"监听挂上了却一帧没有"（状态走 heid-link，对端推送走 heid-link-event）。
+     文案要在**下一帧**读：回调里同步取 innerText 拿到的是**上一份**状态渲染出来的界面
+     （2026-09-25 第一版就是被这一点骗成「中档没文案」的 FAIL）。 */
+  const install = await p.js(`(async()=>{
+    window.__tofu = [];
+    // 把数组收进闭包：页面上可能还挂着上一轮的监听，它们不该写进这一轮的结果
+    const arr = window.__tofu;
+    const id = window.__TAURI_INTERNALS__.transformCallback((e) => {
+      const s = (e && e.payload) || {};
+      const row = [Date.now(), !!s.connected, !!s.waitingConfirm, false, false, s.peerDevice || ''];
+      arr.push(row);
+      requestAnimationFrame(() => {
+        const t = document.body.innerText || '';
+        row[3] = /等待电脑上确认|Waiting for the PC/.test(t);
+        row[4] = /已连接|Connected/.test(t);
+      });
+      return undefined;
+    });
+    window.__tofuListener = await window.__TAURI_INTERNALS__.invoke('plugin:event|listen',
+      { event: 'heid-link', target: { kind: 'Any' }, handler: id });
+    return 'listener ' + window.__tofuListener;
+  })()`);
+  if (install.err) throw new Error('挂状态监听失败：' + install.err);
+  log(install.val);
+
+  await p.invoke('link_client_disconnect', {});
+  await sleep(600);
+  log(`普通票 ${code} → ${host}:${port}；请在 ${secs}s 内到桌面上点「允许」或「拒绝」`);
+  const t0 = Date.now();
+  const start = await p.invoke('link_client_pair_code', { host, port, code, device: flag('device', 'lan-check-tofu') });
+  if (start.err) { ok('发起配对', false, start.err); return; }
+
+  let done = '';
+  for (let i = 0; i < secs * 10; i += 1) {
+    await sleep(100);
+    const s = (await p.invoke('link_status')).ok || {};
+    if (s.connected) { done = 'connected'; break; }
+    if (s.lastError) { done = s.lastError; break; }
+  }
+  await sleep(400);
+  const raw = JSON.parse(String((await p.js('JSON.stringify(window.__tofu||[])')).val || '[]'));
+  // 只留这条判据要的那份形状（页面上可能还挂着早先探针的监听，它会往里塞别的东西）
+  const tl = raw.filter((r) => Array.isArray(r) && r.length === 6 && typeof r[1] === 'boolean');
+  // 时刻一律取相对值：模拟器的页面时钟与本机能差几十小时，绝对时刻跨机没有意义
+  const base = tl.length ? tl[0][0] : 0;
+  const rel = (row) => ((row[0] - base) / 1000).toFixed(2).padStart(7);
+  for (const row of tl) {
+    log(`  [+${rel(row)}s] connected=${String(row[1]).padEnd(5)} waitingConfirm=${String(row[2]).padEnd(5)} 界面「等待电脑上确认」=${row[3] ? '在' : '—'} 界面「已连接」=${row[4] ? '在' : '—'} peer=${row[5] || '(空)'}`);
+  }
+  const waitRow = tl.find((r) => r[2] && !r[1]);
+  const connRow = tl.find((r) => r[1]);
+  const flipMs = waitRow && connRow ? connRow[0] - waitRow[0] : -1;
+
+  ok('(b) 桌面开始服务之前不谎报已连接（waitingConfirm 在 connected 之前出现）',
+    !!waitRow && !!connRow && tl.indexOf(waitRow) < tl.indexOf(connRow),
+    waitRow && connRow ? `中档 → connected 相隔 ${flipMs}ms（这段时间里桌面在表态）` : `中档=${!!waitRow} 已连接=${!!connRow}`);
+  ok('(b) 界面上确实有「等待电脑上确认」那一档', uiOn ? !!waitRow && waitRow[3] : !!waitRow,
+    uiOn ? (waitRow ? (waitRow[3] ? '那一帧界面就是这句' : '那一帧界面不是这句') : '没抓到中档帧') : '（没开设置页，只验了状态位）');
+  ok('(c) 桌面设备名上了网：中档与已连接两帧都带得出电脑名',
+    !!connRow && !!connRow[5] && !!waitRow && !!waitRow[5],
+    `中档 peer=${(waitRow || [])[5] || '(空)'} / 已连接 peer=${(connRow || [])[5] || '(空)'}`);
+  if (done === 'connected') {
+    ok('(b) 点允许之后转成已连接，界面文案跟着换', !!connRow && connRow[4],
+      connRow ? `已连接那一帧的界面：${connRow[4] ? '有「已连接」' : '没有'}` : '');
+  } else if (done) {
+    ok('(b) 被拒时手机拿到桌面的原话、不是超时', /桌面端拒绝了这次配对/.test(done), done);
+  } else {
+    ok(`${secs}s 内桌面既没允许也没拒绝`, false, '弹窗在不在（桌面要开着 设置 → 设备互联）；票过期就点一次「刷新配对码」');
+  }
+}
+
+/* ------------------------------------------------------------------ 离线队列 */
+
+/**
+ * 读（或清）手机上那条 IndexedDB 离线队列 —— 阶段 5 的观测口。
+ *
+ * 只做**读**和**清空**两件事：往队列里塞东西就等于用代码模拟断连，
+ * 而这一版的判据恰恰是「真拔网线之后内容还在不在」。入队必须由界面上的那次保存产生。
+ */
+async function cmdOffline(p) {
+  const expr = `(async()=>{
+    const open = indexedDB.open('heid-offline', 1);
+    const db = await new Promise((res, rej) => { open.onsuccess = () => res(open.result); open.onerror = () => rej(open.error); });
+    if (!db.objectStoreNames.contains('writes')) return JSON.stringify([]);
+    const tx = db.transaction('writes', ${JSON.stringify(POS[1] === 'clear' ? 'readwrite' : 'readonly')});
+    const st = tx.objectStore('writes');
+    const all = await new Promise((res) => { const r = st.getAll(); r.onsuccess = () => res(r.result || []); });
+    const keys = await new Promise((res) => { const r = st.getAllKeys(); r.onsuccess = () => res(r.result || []); });
+    if (${JSON.stringify(POS[1] === 'clear')}) st.clear();
+    const out = all.map((e, i) => ({
+      key: String(keys[i]), deviceId: e.deviceId, rel: e.relPath, state: e.state,
+      chars: (e.text || '').length, eolCrlf: /\\r\\n/.test(e.text || ''),
+      base: (e.baseHash || '').slice(0, 8), queuedAt: e.queuedAt, attempts: e.attempts, err: e.lastError,
+    }));
+    await new Promise((res) => { tx.oncomplete = res; tx.onabort = res; });
+    return JSON.stringify(out);
+  })()`;
+  const r = await p.js(expr);
+  if (r.err) throw new Error('读离线队列失败：' + r.err);
+  const list = JSON.parse(String(r.val || '[]'));
+  const s = await p.invoke('link_status');
+  const st = s.ok || {};
+  log(`链路：role=${st.role} connected=${st.connected} peer=${st.peerDevice || '(无名)'} 错误=${st.lastError || '无'}`);
+  log(`离线队列 ${list.length} 条${POS[1] === 'clear' ? '（已清空）' : ''}`);
+  for (const e of list) {
+    log(`  · ${e.deviceId.slice(0, 8)}/${e.rel}  状态=${e.state} 字符=${e.chars} CRLF=${e.eolCrlf ? '是' : '否'} 基线=${e.base} 试过=${e.attempts} 上次=${e.err || '—'}`);
+  }
+  return list;
+}
+
 /* ------------------------------------------------------------------ main */
 
-const run = { status: cmdStatus, fsprobe: cmdFsProbe, protocol: cmdProtocol, pair: cmdPair, pairtest: cmdPairTest, reconnect: cmdReconnect }[cmd];
+const run = {
+  status: cmdStatus, fsprobe: cmdFsProbe, protocol: cmdProtocol, pair: cmdPair,
+  pairtest: cmdPairTest, reconnect: cmdReconnect, tofu: cmdTofu, offline: cmdOffline,
+}[cmd];
 if (!run) {
-  log('用法：node scripts/link-lan-check.mjs <status|fsprobe|protocol|pair|pairtest|reconnect> [参数]');
+  log('用法：node scripts/link-lan-check.mjs <status|fsprobe|protocol|pair|pairtest|reconnect|tofu|offline[ clear]> [参数]');
   process.exit(2);
 }
 const p = await openPage();

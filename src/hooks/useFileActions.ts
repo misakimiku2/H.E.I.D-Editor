@@ -18,13 +18,14 @@ import {
 import {
   classifyBySize, fileSize, formatBytes, LARGE_FILE_MAX_BYTES,
 } from '../lib/largeFile';
-import { REMOTE_MAX_FILE_BYTES } from '../lib/remote';
+import { isRemotePath, REMOTE_MAX_FILE_BYTES } from '../lib/remote';
 import { detectLanguageFromPath } from '../lib/codemirror';
 import { displayNameFromPath, IS_ANDROID_APP } from '../lib/platform';
 import { applyLineEnding, type LineEnding } from '../lib/lineEndings';
 import { encodingLabel } from '../lib/encoding';
 import { addRecentFile, listRecentFiles, type RecentFile } from '../lib/recentFiles';
 import { deleteDraft, draftKeyForTab, saveDraft, getDraft } from '../lib/drafts';
+import type { OfflineInput } from '../lib/offlineQueue';
 import { appAlert } from '../lib/appAlert';
 import type { MessageKey } from '../lib/i18n';
 import type { EditorState } from './useEditorState';
@@ -45,6 +46,16 @@ export interface FileActionsOptions {
   /* 远程保存撞上「桌面期间也改过」：桌面那一份交给 diff 时间线由用户逐条采纳。
      不自动三方合并——两边都是有效修改，程序替用户选哪边都可能毁掉工作 */
   onRemoteConflict: (path: string, conflict: RemoteConflict) => void;
+  /**
+   * 远程保存因为**连不上**而失败：这一份交给离线队列存进手机。
+   * 返回 true = 确实落进了手机本地（标签保持脏、等重连回放）；
+   * false = 存不进去（存储写满 / 这台设备没有本地存储），由它自己说清「请复制到别处」。
+   * 两种情况都不落盘、都不清脏标记 —— 内容与用户的改动继续由草稿兜着。
+   */
+  onRemoteOffline?: (input: OfflineInput) => Promise<boolean>;
+  /** 远程保存成功了：这一份如果还躺在离线队列里（断连期间攒过一次、刚才又当场存了一次），
+      桌面已经收下更新的那份，队列里那条就该跟着没 —— 不摘它会留下一个假的「待同步」 */
+  onRemoteSaved?: (path: string) => Promise<void>;
   /* 自动保存设置（App 层持有 settings 状态，只传相关字段） */
   autosaveEnabled: boolean;
   autosaveIntervalSec: number;
@@ -53,7 +64,7 @@ export interface FileActionsOptions {
 
 export function useFileActions({
   editor, askDiscardConfirm, pendingDiscardRef, exitingRef, updateKnownDiskContent, onRemoteConflict,
-  autosaveEnabled, autosaveIntervalSec, t,
+  onRemoteOffline, onRemoteSaved, autosaveEnabled, autosaveIntervalSec, t,
 }: FileActionsOptions) {
   const { tabsRef, setTabs, activeTab, setActiveTabId, setActiveTabIdRef, recordContentChange, updateTabContent, deleteTab } = editor;
   const [saving, setSaving] = useState(false);
@@ -301,6 +312,13 @@ export function useFileActions({
         if (tab.path) onRemoteConflict(tab.path, conflict);
         return false;
       }
+      const offline = result.remoteOffline;
+      if (offline) {
+        /* 断连不算「保存失败」，算「先存在手机里」：这一份进离线队列等重连回放。
+           标签**保持脏**、内容一个字都不动 —— 用户可能正在接着打，回写它就是吃掉按键。 */
+        if (onRemoteOffline) await onRemoteOffline(offline);
+        return false;
+      }
       if (result.ok) {
         const savedPath = result.savedPath ?? tab.path;
         const savedTitle = savedPath ? displayNameFromPath(savedPath) : tab.title;
@@ -325,6 +343,8 @@ export function useFileActions({
         if (savedPath) {
           updateKnownDiskContent(savedPath, tab.content);
           addRecent(savedPath, savedTitle);
+          /* 桌面确认收下了 → 离线队列里同一路径的那条（如果有）就此销账 */
+          if (isRemotePath(savedPath)) await onRemoteSaved?.(savedPath);
         }
       }
       return result.ok;
@@ -332,7 +352,7 @@ export function useFileActions({
       savingRef.current = false;
       setSaving(false);
     }
-  }, [addRecent, setTabs, updateKnownDiskContent]);
+  }, [addRecent, onRemoteConflict, onRemoteOffline, onRemoteSaved, setTabs, updateKnownDiskContent]);
 
   const handleSave = useCallback(async () => {
     if (!activeTab) return;

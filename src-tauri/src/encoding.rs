@@ -26,7 +26,8 @@ fn starts_with(b: &[u8], prefix: &[u8]) -> bool {
     b.len() >= prefix.len() && &b[..prefix.len()] == prefix
 }
 
-fn is_binary(bytes: &[u8]) -> bool {
+/// 二进制判定（头部采样含 NUL）。命令面里别处也要按同一判据说话，故对整个 crate 可见
+pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(8192)];
     head.contains(&0)
 }

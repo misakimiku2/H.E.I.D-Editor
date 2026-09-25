@@ -965,3 +965,33 @@ fn 标签白名单与推送走完整加密链路() {
     let seen = srv.join().unwrap();
     assert_eq!(seen, vec!["tabs:1", "read:2", "tabs:3", "read:4"], "服务端要按序收到这四笔");
 }
+
+#[test]
+fn 链路级失败以稳定码回给前端() {
+    /* 阶段 5 的离线队列只认这几个码：它们说的是「这次没送到 / 没回话」（暂时），
+       而 fsrv 那批（outside / badpath / toobig …）说的是「桌面拒绝了这个路径」（永久）。
+       混成一个「失败了」，要么把一份改错的文案压在队列里无限重试，
+       要么让「真关 WiFi 期间点保存」直接以失败丢掉内容。 */
+    /* ① 在飞的那一笔：断连要把它唤醒，并把"为什么断"原样带出去 —— 保存撞上的就是这一支 */
+    let conn = Conn::new();
+    let waiter = {
+        let c = Arc::clone(&conn);
+        std::thread::spawn(move || c.call("write", "{}".to_string()).unwrap_err())
+    };
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    conn.shutdown("对端已关闭连接");
+    let in_flight = waiter.join().unwrap();
+    assert!(
+        in_flight.starts_with("dropped: ") && in_flight.contains("对端已关闭连接"),
+        "在飞的请求要当场拿到 dropped + 原因，实际：{in_flight}"
+    );
+
+    /* ② 判死之后新来的请求也不许等满 30 秒超时 —— 那会让断网时的保存按钮卡半分钟，
+       而那正是用户判定「应用没反应」的形状 */
+    let late = conn.call("read", "{}".to_string()).unwrap_err();
+    assert!(late.starts_with("dropped: "), "死连接上的新请求要当场回 dropped，实际：{late}");
+
+    // 这三串是要过网给前端看的字面值：`remote.ts` 的 LINK_DOWN_CODES 按同样的字匹配。
+    // 改名必须两边一起改，所以这里先把字面钉住，而不是只比常量自己。
+    assert_eq!((CODE_NOLINK, CODE_DROPPED, CODE_TIMEOUT), ("nolink", "dropped", "timeout"));
+}

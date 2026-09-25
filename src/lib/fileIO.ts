@@ -12,6 +12,7 @@ import {
 import { decodeAs, detectEncoding } from './encoding';
 import { rt } from './i18nContext';
 import type { FileTab } from './tabModel';
+import type { OfflineInput } from './offlineQueue';
 import { appAlert } from './appAlert';
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -221,6 +222,12 @@ export interface SaveResult {
   remoteBaseHash?: string;
   /** 桌面在我们写入之前已经改过这个文件：一个字都没落盘，等用户裁决 */
   remoteConflict?: RemoteConflict;
+  /**
+   * 这一次没送到桌面（断连 / 超时），而内容该被当作「已离线保存」收进手机队列。
+   * 带的是本来要发出去的那份载荷（`text` 已按标签的 eol 还原），回放原样重发即可。
+   * 判据只有 [`isLinkDown`] 那一条：桌面对这个路径的永久拒绝不走这里，仍旧当场报错。
+   */
+  remoteOffline?: OfflineInput;
 }
 
 /** 远程写入撞上的「桌面那一份」——形状够前端把 diff 时间线喂起来 */
@@ -229,6 +236,12 @@ export interface RemoteConflict {
   serverHash: string;
   serverEncoding: string;
   serverBom: boolean;
+  /**
+   * 桌面上这一份**太大，正文没跟着回传**（超过 `REMOTE_MAX_FILE_BYTES`）。
+   * 与「桌面那份是空的」是两回事：空的会带一个空串回来，这条是字段整个缺席。
+   * 不能拿空串去喂时间线 —— 那等于把一份根本不存在的「桌面版本」摆到用户面前让他采纳。
+   */
+  serverTooLarge: boolean;
 }
 
 /* 桌面：Tauri 命令按编码写盘；其余场景 UTF-8 由调用方处理 */
@@ -251,11 +264,15 @@ export async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = f
      而另存为才该落本地）。基线不匹配时桌面一个字都不写，把冲突原样带回给用户裁决 */
   const remote = saveAs ? null : await remoteRefOf(tab.path ?? '');
   if (remote) {
-    const { remoteWrite, isRemoteError } = await import('./remote');
+    const { remoteWrite, isRemoteError, isLinkDown } = await import('./remote');
+    const payload: OfflineInput = {
+      deviceId: remote.deviceId, relPath: remote.rel, path: tab.path ?? '', title: tab.title,
+      text: content, encoding: tab.encoding, bom: tab.bom, baseHash: tab.remoteBaseHash ?? '',
+    };
     try {
       const r = await remoteWrite({
         relPath: remote.rel, text: content, encoding: tab.encoding, bom: tab.bom,
-        baseHash: tab.remoteBaseHash ?? '',
+        baseHash: payload.baseHash,
       });
       if (r.conflict) {
         return {
@@ -263,12 +280,16 @@ export async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = f
           remoteConflict: {
             serverText: r.serverText ?? '', serverHash: r.serverHash ?? '',
             serverEncoding: r.serverEncoding ?? 'utf-8', serverBom: r.serverBom ?? false,
+            serverTooLarge: r.serverText === undefined,
           },
         };
       }
       return { ok: true, savedPath: tab.path ?? null, remoteBaseHash: r.hash };
     } catch (e) {
       console.error('Remote save failed:', tab.path, e);
+      /* 断连不是「这次没存上」，而是「先存在手机里」—— 内容交给离线队列，这里不出提示，
+         由调用方说那一句（没有基线时不认：拿空基线排队，回放等于邀请桌面被覆盖）。 */
+      if (isLinkDown(e) && payload.baseHash) return { ok: false, savedPath: null, remoteOffline: payload };
       if (!silent) appAlert(isRemoteError(e) ? e.message : String(e));
       return { ok: false, savedPath: null };
     }

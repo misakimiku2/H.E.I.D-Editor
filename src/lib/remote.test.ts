@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   REMOTE_SCHEME, RemoteError, encodeRemoteSegment, isRemoteError, isRemotePath,
-  isOpenRel, makeRemotePath, openRelId, parseRemoteError, parseRemotePath, parseRemoteResponse,
+  isOpenRel, isLinkDown, makeRemotePath, openRelId, parseRemoteError, parseRemotePath, parseRemoteResponse,
+  REMOTE_MAX_FILE_BYTES,
   remoteList, remoteRead, remoteStat, remoteTabs, remoteWrite,
   type RemoteListResult, type RemoteReadResult, type RemoteStatResult, type RemoteWriteResult,
 } from './remote';
+import { formatBytes } from './largeFile';
 import { displayNameFromPath } from './platform';
 
 /* 本文件的跑在纯 node 环境（不是 Tauri），所以四条命令封装能验的只有
@@ -124,7 +126,7 @@ describe('parseRemoteError', () => {
     ['noroot', '桌面还没设置共享的文件夹'],
     ['outside', '该路径经符号链接指向了共享范围之外，已拒绝'],
     ['notfound', '共享根内没有这个文件'],
-    ['toobig', '这个文件 12 MB，超过远程打开上限 6 MB'],
+    ['toobig', '这个文件超过手机可远程打开的上限，桌面没有读取它'],
     ['badparams', '缺少内容基线（read 返回的 hash）'],
     ['absolute', '路径必须是共享根内的相对路径'],
     ['unknown', '桌面不支持的命令 delete'],
@@ -150,6 +152,31 @@ describe('parseRemoteError', () => {
     expect(isRemoteError(new RemoteError('io', 'x'))).toBe(true);
     expect(isRemoteError(new Error('io: x'))).toBe(false);
     expect(isRemoteError('io: x')).toBe(false);
+  });
+
+  /* 阶段 5 的分岔口：只有「这次没送到 / 没回话」才进离线队列。
+     名单与 Rust `link.rs` 的 CODE_NOLINK / CODE_DROPPED / CODE_TIMEOUT 逐字对应，
+     改一边必须改另一边 —— 认少了「拔网线编辑会丢」，认多了会把桌面明确拒绝的
+     一份改错的东西压在队列里每次重连重试一遍。 */
+  it('链路级的三种失败算「暂时」，桌面对路径的拒绝不算', () => {
+    for (const code of ['nolink', 'dropped', 'timeout']) {
+      expect(isLinkDown(new RemoteError(code, 'x'))).toBe(true);
+    }
+    // 前端自己那条（这台设备根本没有链路）也算暂时：它的行为与 nolink 一致
+    expect(isLinkDown(new RemoteError('unavailable', 'x'))).toBe(true);
+    for (const code of ['outside', 'notopen', 'noroot', 'badpath', 'toobig', 'badparams', 'io', 'unknown']) {
+      expect(isLinkDown(new RemoteError(code, 'x'))).toBe(false);
+    }
+    // 非 RemoteError（一句裸异常）不当断连：宁可报一次错，也不悄悄把内容压进队列
+    expect(isLinkDown(new Error('boom'))).toBe(false);
+    expect(isLinkDown('dropped: 链路已断开')).toBe(false);
+  });
+
+  it('Rust 那三个码原样过网时能认出（服务端串的形状变了要在这里先红）', () => {
+    const wire = parseRemoteError('dropped: 链路已断开：对端已关闭连接');
+    expect(wire.code).toBe('dropped');
+    expect(isLinkDown(wire)).toBe(true);
+    expect(parseRemoteError('nolink: 手机上还没有连着桌面，请先完成配对').code).toBe('nolink');
   });
 });
 
@@ -286,6 +313,16 @@ describe('白名单引用 @w/<id>/<名字>', () => {
     const e = await remoteTabs().then(() => null, (err: unknown) => err);
     expect(isRemoteError(e)).toBe(true);
     expect((e as RemoteError).code).toBe('unavailable');
+  });
+});
+
+describe('超限提示只有一个尺寸口径', () => {
+  it('实测尺寸与上限按 formatBytes 算出来不是同一个数', () => {
+    // 服务端那句原先自己整除（7,000,000 → 「6 MB」，与上限显示成同一个数）。
+    // 现在数字只在手机端这一处出现，所以钉这两个值：谁再引入第二套格式化就会红。
+    expect(formatBytes(7_000_000)).toBe('6.7 MB');
+    expect(formatBytes(REMOTE_MAX_FILE_BYTES)).toBe('6.0 MB');
+    expect(7_000_000).toBeGreaterThan(REMOTE_MAX_FILE_BYTES);
   });
 });
 

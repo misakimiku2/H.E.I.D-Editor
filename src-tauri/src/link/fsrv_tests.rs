@@ -161,6 +161,26 @@ fn 超过远程上限的文件不打开() {
     assert_eq!(s["hash"], "", "超限文件不该为算哈希读一遍全文件");
 }
 
+/// 尺寸只有一个口径：前端 `largeFile.formatBytes`。
+/// 服务端原先自己按 `bytes/1024/1024` 取整，于是 7,000,000 字节的文件被报成
+/// 「这个文件 6 MB，超过远程打开上限 6 MB」—— 实测值与上限显示成同一个数，
+/// 用户既看不出超了多少，也不知道是不是量错了（2026-09-25 跨机实测的 (d)）。
+/// 数字由 `stat` 那份 `size` 带出去、由手机端那句 `remote.errTooLarge` 说，这里一个字节数都不许出现。
+#[test]
+fn 超限文案不自己报尺寸() {
+    let t = Temp::new("fsrv-toobig-text");
+    let p = t.write("blob.dat", b"");
+    std::fs::File::options().write(true).open(&p).unwrap().set_len(7_000_000).unwrap();
+    let (c, msg) = call(&scope_of(&t.root()), "read", r#"{"relPath":"blob.dat"}"#)
+        .err()
+        .expect("超限必须拒");
+    assert_eq!(c, "toobig");
+    assert!(
+        !msg.chars().any(|ch| ch.is_ascii_digit()),
+        "尺寸数字只有前端那一个口径，服务端这句里不该出现任何数字：{msg}"
+    );
+}
+
 #[test]
 fn 读不存在的目标报notfound() {
     let t = Temp::new("fsrv-missing");
@@ -189,6 +209,23 @@ fn 桌面期间改过则返回冲突与服务端最新内容() {
     assert_eq!(r["serverText"], "# 桌面上改过", "冲突必须把桌面最新内容一并带回，否则前端进不了 diff 时间线");
     assert_eq!(r["serverHash"], sha256_hex("# 桌面上改过".as_bytes()));
     assert_eq!(t.read("readme.md"), "# 桌面上改过".as_bytes(), "判成冲突时一个字都不许落盘");
+}
+
+#[test]
+fn 冲突时超过远程上限就不带正文() {
+    /* 阶段 5 补的闸门：离线队列重连回放走的就是这条 write，而冲突回包与正文共用一帧通道
+       （单帧上限 8 MB）。桌面把一个文件改到 40 MB 之后再带上正文，等于让手机的一条
+       待回放把整条链路撑断 —— 后面所有条目一起失败，比报一次冲突严重得多。 */
+    let t = Temp::new("fsrv-conflict-big");
+    let big = vec![b'x'; (MAX_REMOTE_FILE_BYTES + 1024) as usize];
+    std::fs::write(t.root().join("readme.md"), &big).unwrap();
+    let stale = sha256_hex("手机上那份的基线".as_bytes());
+    let r = ok(&t.root(), "write", &write_params("readme.md", "# 手机上改的", &stale, "utf-8"));
+    assert_eq!(r["conflict"], true);
+    assert!(r.get("serverText").is_none(), "超限的桌面正文不许进这一帧：{r:?}");
+    assert_eq!(r["size"], big.len() as u64, "尺寸照实报，前端才说得出为什么给不了差异");
+    assert_eq!(r["serverHash"], sha256_hex(&big), "哈希仍然有效：判据没丢，只是给不出正文");
+    assert_eq!(t.read("readme.md"), big, "判成冲突时一个字都不许落盘");
 }
 
 #[test]

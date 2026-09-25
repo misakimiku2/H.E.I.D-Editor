@@ -6,6 +6,7 @@ import {
   ChevronDown, ChevronLeft, ChevronRight, FileText, Folder, FolderX, FolderOpen,
   Loader2, RefreshCw, Search, X,
   FilePlus, FolderPlus, FileImage, Scissors, Copy, ClipboardPaste, Pencil, Trash2, Link2, FolderSearch,
+  ArrowUp, GitCompare,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
@@ -34,6 +35,28 @@ export interface SidebarTabInfo {
   isDirty: boolean;
 }
 
+/**
+ * 树上的一行同步状态（设计稿 §9.2 五态里落到**单个文件**上的那三种）：
+ * 「已同步」= 没有标记，「离线」= 树顶横幅，都不在这张表里。
+ */
+export type TreeSyncMark = 'queued' | 'conflict' | 'updated';
+
+/** 树顶那条离线状态横幅的数据（阶段 5 的「离线」那一态，设计稿 §9.2） */
+export interface OfflineBarInfo {
+  /** 客户端且当前没连上 */
+  offline: boolean;
+  /** 等着回写的份数 */
+  pending: number;
+  /** 要人裁决的份数 */
+  conflicts: number;
+  /** 回放进行中：出进度与「取消」 */
+  progress: { done: number; total: number } | null;
+  onSync: () => void;
+  onCancel: () => void;
+  /** 断开时那颗按钮：手机自己去连桌面（入口在「设置 · 设备互联」） */
+  onReconnect: () => void;
+}
+
 interface FileTreeSidebarProps {
   /** 已打开的根目录（桌面=绝对路径，安卓=SAF tree URI） */
   rootPath: string;
@@ -57,6 +80,17 @@ interface FileTreeSidebarProps {
   onTabsRenamed: (oldPath: string, newPath: string, isDir: boolean) => void;
   /** 树内删除完成后同步标签页（干净标签关闭，脏标签摘除路径保留缓冲） */
   onFileDeleted: (path: string) => void;
+  /**
+   * 远程同步状态（阶段 5 的五态）：标签身份键 → 待同步 / 需要确认 / 桌面已更新。
+   * 「已同步」按设计就是**没有标记**，所以这张表里不出现它；本地树与桌面不传。
+   */
+  remoteMarkers?: Map<string, TreeSyncMark>;
+  /** 树顶横幅：断连与待同步的份数、回放进度。全空时整块不渲染 */
+  offlineBar?: OfflineBarInfo;
+  /** 「立即同步这一份」/「弃用这份改动」/「查看差异」：右键与长按共用 */
+  onSyncOne?: (path: string) => void;
+  onDropOne?: (path: string) => void;
+  onOpenDiff?: (path: string) => void;
 }
 
 const platformLister: DirLister | null = getDirLister(
@@ -211,10 +245,30 @@ function NameRow({
  * 桌面端附带文件管理：右键新建/重命名/删除/剪切复制粘贴/复制路径/资源管理器中显示
  * （走自定义 fs_* 命令；安卓 SAF 桥无对应能力，canManage=false 时仅导航）。
  */
+/**
+ * 同步状态的小标记（阶段 5 五态里除「已同步 = 无标记」与「离线 = 横幅」之外的三态）。
+ * 沿用脏点那套视觉语言（同一颗 1.5 圆点），区别只在颜色与那支上行箭头 ——
+ * 同一棵树里出现第二种形状，用户就要重新学一遍哪个是哪个。
+ */
+function SyncMark({ state, label, size }: {
+  state: TreeSyncMark;
+  label: string;
+  size: number;
+}) {
+  const dot = state === 'conflict' ? 'bg-red-500' : state === 'queued' ? 'bg-amber-500' : 'bg-sky-500';
+  return (
+    <span className="flex items-center gap-0.5 shrink-0" title={label} aria-label={label}>
+      {state === 'queued' && <ArrowUp size={Math.max(9, size - 4)} className="text-amber-500" />}
+      <span className={cn('w-1.5 h-1.5 rounded-full', dot)} />
+    </span>
+  );
+}
+
 export function FileTreeSidebar({
   rootPath, open, isDarkMode, activeTabId, tabs,
   onOpenFile, onOpenImage, onRootChange, onClose,
   canManage, askDangerConfirm, onTabsRenamed, onFileDeleted,
+  remoteMarkers, offlineBar, onSyncOne, onDropOne, onOpenDiff,
 }: FileTreeSidebarProps) {
   const t = useT();
   /* 触屏：长按树行/空白区弹右键同款菜单 */
@@ -494,6 +548,13 @@ export function FileTreeSidebar({
     return m;
   }, [tabs]);
 
+  /** 三种同步状态各一句提示文本（悬停与无障碍读屏用，中英随界面语言） */
+  const syncLabel = useCallback((s: TreeSyncMark) => (
+    s === 'conflict' ? t('offline.stateConflict')
+      : s === 'queued' ? t('offline.stateQueued')
+        : t('offline.stateUpdated')
+  ), [t]);
+
   /* 目录提供者按**根目录的形态**选，不按运行平台选：远程根（hide-remote://）在手机上
      也要走 link 通道，而平台那一份此刻指的是 SAF。根变化即换实现，树本身不用知道对面是谁 */
   const lister = useMemo(() => pickLister(rootPath ?? null, platformLister), [rootPath]);
@@ -673,6 +734,14 @@ export function FileTreeSidebar({
     } catch (e) { opFailed(e); }
   }, [askDangerConfirm, onFileDeleted, opFailed, refreshTree, t]);
 
+  /** 「弃用这份改动」：只摘掉手机上排着的那一条，桌面那个文件一个字都不碰。
+      与删除文件不是一回事，所以单独一句确认文案 */
+  const dropOffline = useCallback(async (path: string) => {
+    if (!onDropOne) return;
+    const ok = await askDangerConfirm(t('offline.discardConfirm'), t('offline.menuDiscard'));
+    if (ok) await onDropOne(path);
+  }, [askDangerConfirm, onDropOne, t]);
+
   const handlePaste = useCallback(async (targetDir: string) => {
     const c = clip;
     if (!c) return;
@@ -720,12 +789,31 @@ export function FileTreeSidebar({
       { icon: <Link2 size={13} />, label: t('tree.copyRelPath'), onSelect: () => void writeClipboardText(relativePathUnderRoot(node?.path ?? rootPath, rootPath)).catch(() => {}) },
       { icon: <FolderSearch size={13} />, label: t('tree.reveal'), disabled: noSafMove, onSelect: () => void fsReveal(node?.path ?? rootPath).catch(opFailed) },
     ];
+    /* 同步标记带来的几项（阶段 5）：与管理项共用同一份菜单，长按与右键看到的是同一串字。
+       「查看差异」只在已经撞出冲突 / 桌面确实更新过时出现 —— 待同步那一份没有对比对象。 */
+    const mark = node && !isDir ? remoteMarkers?.get(node.path) : undefined;
+    if (node && mark) {
+      items.push({
+        separatorBefore: true, icon: <ArrowUp size={13} />, label: t('offline.menuSyncThis'),
+        disabled: !onSyncOne, onSelect: () => onSyncOne?.(node.path),
+      });
+      if (mark !== 'queued') {
+        items.push({
+          icon: <GitCompare size={13} />, label: t('offline.menuViewDiff'),
+          disabled: !onOpenDiff, onSelect: () => onOpenDiff?.(node.path),
+        });
+      }
+      items.push({
+        icon: <Trash2 size={13} />, label: t('offline.menuDiscard'), danger: true,
+        disabled: !onDropOne, onSelect: () => void dropOffline(node.path),
+      });
+    }
     /* 目录/根才有「刷新」语义（对文件无意义） */
     if (!node || isDir) {
       items.push({ separatorBefore: true, icon: <RefreshCw size={13} />, label: t('tree.refresh'), onSelect: () => void refreshTree() });
     }
     setMenu({ x, y, items });
-  }, [canManage, clip, renaming, rootPath, startCreate, handleDelete, handlePaste, opFailed, refreshTree, t]);
+  }, [canManage, clip, dropOffline, onDropOne, onOpenDiff, onSyncOne, remoteMarkers, renaming, rootPath, startCreate, handleDelete, handlePaste, opFailed, refreshTree, t]);
 
   const openMenu = useCallback((e: React.MouseEvent, node: TreeNode | null) => {
     e.preventDefault();
@@ -782,6 +870,8 @@ export function FileTreeSidebar({
       );
     }
     const active = tabs.some(tb => tb.id === activeTabId && tb.path === node.path);
+    /* 目录不参与同步标记：队列里只有文件，树的目录行也没有「待同步」这回事 */
+    const nodeMark = !node.isDir ? remoteMarkers?.get(node.path) ?? null : null;
     /* 行样式与右键菜单项一致：左右留边距的圆角行，悬停同色调。
        行高必须用 metrics.cls（手机 48dp）——此前写死 h-7，选中底色比行距矮一截 */
     const rowClass = cn(
@@ -821,7 +911,14 @@ export function FileTreeSidebar({
         <span className="heid-name-clip truncate flex-1 min-w-0">
           <span className="heid-name-text inline-block whitespace-nowrap">{node.name}</span>
         </span>
-        {dirtyMap.get(node.path) && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />}
+        {/* 远程同步标记优先于脏点：脏点说的是「本机还没存」，而「待同步」说的是
+            「已经存进手机、就等写回桌面」—— 两颗一模一样的琥珀点并排只会让人猜哪个新。
+            「已同步」按设计就是没有标记，所以这里不出现。 */}
+        {nodeMark ? (
+          <SyncMark state={nodeMark} label={syncLabel(nodeMark)} size={metrics.icon} />
+        ) : dirtyMap.get(node.path) ? (
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+        ) : null}
       </button>
     );
   };
@@ -859,6 +956,12 @@ export function FileTreeSidebar({
     phone ? 'w-12 h-12 flex items-center justify-center' : IS_TOUCH_PRIMARY ? 'p-2.5' : 'p-1.5',
     'rounded-md transition-colors disabled:opacity-30 shrink-0',
     isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-500',
+  );
+  /* 离线横幅里的按钮：触屏档按 52② 的口径抬到 48dp，与树里其余触点同一档 */
+  const barBtn = cn(
+    'shrink-0 rounded-md border px-2 py-1 text-[10px] transition-colors pointer-coarse:text-xs',
+    'pointer-coarse:min-h-[48px] pointer-coarse:min-w-[72px] pointer-coarse:px-3',
+    isDarkMode ? 'border-zinc-600 text-zinc-300 hover:bg-zinc-700' : 'border-zinc-300 text-zinc-600 hover:bg-zinc-100',
   );
 
   const renderHitRow = (hit: FileHit) => {
@@ -1062,6 +1165,58 @@ export function FileTreeSidebar({
             );
           })()}
         </div>
+        {/* 离线横幅（设计稿 §9.2 的「离线」那一态）：只在远程树、且队列里有东西时出现。
+            两行各说各的：「需要你确认」是**等人动手**，「待同步」是**等链路**，
+            合成一句就会让人分不清现在到底欠谁。回放进行中只留进度那一条。 */}
+        {offlineBar && (offlineBar.progress || offlineBar.pending > 0 || offlineBar.conflicts > 0) && (
+          <div
+            role="status"
+            className={cn(
+              'shrink-0 border-b px-2 py-1.5 flex flex-col gap-1 text-[10px] leading-snug pointer-coarse:text-xs',
+              isDarkMode ? 'border-zinc-700 bg-zinc-800/50' : 'border-zinc-200 bg-zinc-50',
+            )}
+          >
+            {offlineBar.progress ? (
+              <div className="flex items-center gap-1.5">
+                <Loader2 size={12} className="shrink-0 animate-spin" />
+                <span className="flex-1 min-w-0 truncate">
+                  {t('offline.bannerSyncing', { done: offlineBar.progress.done, total: offlineBar.progress.total })}
+                </span>
+                <button type="button" onClick={offlineBar.onCancel} className={barBtn}>
+                  {t('common.cancel')}
+                </button>
+              </div>
+            ) : (
+              <>
+                {offlineBar.conflicts > 0 && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" />
+                    <span className="flex-1 min-w-0 truncate">{t('offline.bannerConfirm', { n: offlineBar.conflicts })}</span>
+                  </div>
+                )}
+                {offlineBar.pending > 0 && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                    <span className="flex-1 min-w-0 truncate">
+                      {offlineBar.offline
+                        ? t('offline.banner', { n: offlineBar.pending })
+                        : t('offline.countTip', { pending: offlineBar.pending, conflicts: offlineBar.conflicts })}
+                    </span>
+                    {offlineBar.offline ? (
+                      <button type="button" onClick={offlineBar.onReconnect} className={barBtn}>
+                        {t('offline.gotoConnect')}
+                      </button>
+                    ) : (
+                      <button type="button" onClick={offlineBar.onSync} className={barBtn}>
+                        {t('offline.syncNow')}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
         {/* 搜索态：输入区 + 结果列表（替代树体） */}
         {searching && (
           <div className={cn('shrink-0 border-b px-2 py-1.5 flex flex-col gap-1', isDarkMode ? 'border-zinc-700' : 'border-zinc-200')}>

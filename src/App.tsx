@@ -37,6 +37,7 @@ import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDo
 import { clampDiffEntries } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { useRemoteFileChanges } from './hooks/useRemoteFileChanges';
+import { useOfflineSync } from './hooks/useOfflineSync';
 import { isRemotePath } from './lib/remote';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
 import { autoReconnectFromPrefs, autoStartFromPrefs } from './lib/link';
@@ -55,7 +56,7 @@ import { I18nProvider, rt, setRuntimeLang } from './lib/i18nContext';
 import { deleteDraft, draftKeyForTab } from './lib/drafts';
 import { SettingsDialog } from './components/SettingsDialog';
 import { UrlImportModal } from './components/UrlImportModal';
-import { FileTreeSidebar } from './components/FileTreeSidebar';
+import { FileTreeSidebar, type TreeSyncMark } from './components/FileTreeSidebar';
 import { getDirLister, isSvgPath, loadTreeRoot, saveTreeRoot } from './lib/fileTree';
 import { resolveCodeTheme } from './lib/editorThemes';
 import type { UrlImportResult } from './lib/urlImport';
@@ -199,6 +200,9 @@ export default function App() {
      （before = 我们读到的那份基线，after = 桌面当前那份），不另造一个冲突弹窗——
      这套 UI 用户在桌面上已经认识了 */
   const handleRemoteConflict = useCallback((path: string, c: RemoteConflict) => {
+    /* 桌面那一份太大、正文没取回来：这时时间线里会是一条「桌面版本 = 空」的假差异，
+       所以宁可只说一句，也不摆一份不存在的正文让人去采纳 */
+    if (c.serverTooLarge) { appAlert(t('offline.diffTooLarge')); return; }
     const after = normalizeToLf(c.serverText);
     const tab = editor.tabsRef.current.find(t => t.path === path);
     diff.appendExternalEntry(path, tab ? normalizeToLf(tab.originalContent) : after, after, Date.now());
@@ -242,6 +246,55 @@ export default function App() {
     },
   });
 
+  /* ---- 离线写队列（阶段 5）：断连时保存不丢，重连后按排队顺序回写桌面 ----
+     队列的状态只存在 useOfflineSync 里一份；树上的标记、横幅的计数都从它读。
+     回放撞出的冲突走 handleRemoteConflict 那**同一个**入口 —— 手机上看到的还是同一条
+     diff 时间线、同一套采纳/忽略，不因为「这次是自动回放撞上的」另造一种提示。 */
+  const offline = useOfflineSync({
+    onSynced: (path, textLf, baseHash) => {
+      editor.setTabs(prev => prev.map(tb => (tb.path === path ? {
+        ...tb,
+        remoteBaseHash: baseHash,
+        originalContent: tb.originalContent === textLf ? tb.originalContent : textLf,
+        /* 磁盘此刻就是这一份：换行符目标已落盘，脏只由「还有没有更新的改动」决定。
+           用户可能在回写的同时又打了几行，那几行继续算脏、继续被草稿保护。 */
+        originalEol: tb.eol,
+        isDirty: tb.content !== textLf,
+      } : tb)));
+      updateKnownDiskContent(path, textLf);
+    },
+    onConflict: (path, c) => {
+      // 基线换成桌面当前那份：用户采纳完再存，不会又撞上同一次冲突
+      editor.setTabs(prev => prev.map(tb => (tb.path === path ? { ...tb, remoteBaseHash: c.serverHash } : tb)));
+      handleRemoteConflict(path, c);
+    },
+    hasTab: path => editor.tabsRef.current.some(tb => tb.path === path),
+    t,
+  });
+
+  /* 树上的第五态（桌面已更新）来自既有时间线里那些还没采纳完的条目 —— 判据现成，不另记一份。
+     只认远程路径：本地文件的外部改动历来靠脏点与时间线本身说话，这里不新给它加颜色。 */
+  const treeMarkers = useMemo(() => {
+    const m = new Map<string, TreeSyncMark>(offline.markers);
+    for (const p of Object.keys(diff.diffTimelines)) {
+      if (!m.has(p) && isRemotePath(p)) m.set(p, 'updated');
+    }
+    return m;
+  }, [offline.markers, diff.diffTimelines]);
+
+  /** 长按菜单与横幅上的「查看差异」：把那个标签切到前台再开时间线（没开着就没有差异可看） */
+  const showDiffForPath = useCallback((path: string) => {
+    if (!(diff.diffTimelines[path]?.length)) {
+      /* 冲突是在标签没开着那一刻撞上的（比如重启后还没打开）：时间线里没有这一份，
+         开一个空弹窗只会让人以为坏了。说的是下一步能做什么，不是「没有差异」 */
+      appAlert(t('offline.noDiffYet'));
+      return;
+    }
+    const tb = editor.tabsRef.current.find(x => x.path === path);
+    if (tb) editor.setActiveTabId(tb.id);
+    setDiffModalOpen(true);
+  }, [diff.diffTimelines, editor.setActiveTabId, editor.tabsRef, t]);
+
   const file = useFileActions({
     editor,
     askDiscardConfirm,
@@ -249,6 +302,8 @@ export default function App() {
     exitingRef,
     updateKnownDiskContent,
     onRemoteConflict: handleRemoteConflict,
+    onRemoteOffline: offline.enqueueOffline,
+    onRemoteSaved: offline.dropForPath,
     autosaveEnabled: settings.autosaveEnabled,
     autosaveIntervalSec: settings.autosaveIntervalSec,
     t,
@@ -2247,6 +2302,23 @@ export default function App() {
             askDangerConfirm={askTreeConfirm}
             onTabsRenamed={handleTreeTabsRenamed}
             onFileDeleted={handleTreeFileDeleted}
+            /* 同步这一整块只在远程根上出现：手机上换回本地 SAF 目录时，
+               那些计数说的是另一台设备的事，摆在本地树上只会让人以为这些文件也归它管 */
+            remoteMarkers={isRemotePath(treeRootPath) ? treeMarkers : undefined}
+            offlineBar={isRemotePath(treeRootPath) ? {
+              offline: offline.offline,
+              pending: offline.pending,
+              conflicts: offline.conflicts,
+              progress: offline.progress,
+              onSync: () => offline.syncNow(),
+              onCancel: offline.cancel,
+              /* 断开时手机上没有「自动重连」这一下可点：连谁、用什么票都由「设置 · 设备互联」
+                 那一页决定（免扫重连记着设备，但发起仍在手机侧），所以这里把人送到那页去 */
+              onReconnect: () => setSettingsOpen(true),
+            } : undefined}
+            onSyncOne={p => offline.syncNow(p)}
+            onDropOne={p => void offline.dropForPath(p)}
+            onOpenDiff={showDiffForPath}
           />
         )}
         <div className="flex-1 flex flex-col overflow-hidden">

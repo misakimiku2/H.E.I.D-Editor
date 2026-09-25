@@ -206,11 +206,11 @@ fn read(scope: &Scope, rel: &str, force: Option<&str>) -> Handled {
     let path = resolve(scope, rel)?;
     let bytes = std::fs::read(&path).map_err(|e| err("io", format!("读取失败：{e}")))?;
     if (bytes.len() as u64) > MAX_REMOTE_FILE_BYTES {
-        return Err(err("toobig", format!(
-            "这个文件 {} MB，超过远程打开上限 {} MB",
-            bytes.len() / (1024 * 1024),
-            MAX_REMOTE_FILE_BYTES / (1024 * 1024)
-        )));
+        /* 这里**不报尺寸**：整除出来的 MB 会把"7,000,000 字节的文件"和"6 MB 的上限"
+           显示成同一个数（2026-09-25 实测的 (d)：「这个文件 6 MB，超过上限 6 MB」）。
+           尺寸只有一个口径 —— 前端 `largeFile.formatBytes`，
+           打开路径上的那份预检（`useFileActions` 的 remote.errTooLarge）才是带数字的那句。 */
+        return Err(err("toobig", "这个文件超过手机可远程打开的上限，桌面没有读取它"));
     }
     let decoded = match force {
         Some(label) => {
@@ -238,15 +238,20 @@ fn write(scope: &Scope, p: PathParams) -> Handled {
     let current = std::fs::read(&path).map_err(|e| err("io", format!("读取失败：{e}")))?;
     let cur_hash = sha256_hex(&current);
     if cur_hash != p.base_hash {
-        // 桌面在这期间改过：把服务端最新内容一并回传，前端进 diff 时间线由用户逐条采纳
-        let d = encoding::detect_and_decode(&current);
+        // 桌面在这期间改过：把服务端最新内容一并回传，前端进 diff 时间线由用户逐条采纳。
+        // 但**超过远程上限的那一份不带正文**（阶段 5 补的）：冲突回包要走同一帧通道，
+        // 而单帧上限 8 MB —— 桌面把一个 6 MB 的文件改到 40 MB 之后，带上正文就等于
+        // 「手机的一条待回放把整条链路撑断」，剩下所有条目一起失败。
+        // 没有正文不影响裁决：手机知道冲突存在，尺寸与哈希也照报。
+        let fits = current.len() as u64 <= MAX_REMOTE_FILE_BYTES;
+        let d = fits.then(|| encoding::detect_and_decode(&current));
         return serde_json::to_string(&WriteResult {
             conflict: true,
             server_hash: cur_hash.clone(),
-            server_text: Some(d.text),
-            server_encoding: Some(d.encoding),
-            server_bom: d.bom,
-            server_binary: d.binary,
+            server_text: d.as_ref().map(|x| x.text.clone()),
+            server_encoding: d.as_ref().map(|x| x.encoding.clone()),
+            server_bom: d.map(|x| x.bom).unwrap_or(false),
+            server_binary: encoding::is_binary(&current),
             hash: cur_hash,
             size: current.len() as u64,
             mtime_ms: file_mtime(&path).unwrap_or(0),
