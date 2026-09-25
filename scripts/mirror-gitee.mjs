@@ -13,6 +13,11 @@
  *   3. 同名附件**不覆盖**：同一 release 上重复上传同名文件会挂两份，而直链永远返回第一次那份。
  *      所以固定 tag 的 latest.json 只能「删掉整个 release → 按同一 tag 重建 → 重新上传」，
  *      这也正是本脚本对 `mirror-latest` 做的事。
+ *   4. `attach_files` 要**收完整个包才回话**：8 MB 安装包从境外 runner 传过去实测要 5 分钟以上，
+ *      而 Node 的 fetch（undici）默认 `headersTimeout` 正好 300 s，于是报成
+ *      `fetch failed / Headers Timeout Error`，看着像 Gitee 挂了，其实它还在收。
+ *      所以上传这一路走 `node:https`（没有那条隐式上限），其余小请求仍用 fetch。
+ *      —— v1.5.0 发布时 CI 上连挂两次都是这一条，第二次重跑同样卡在 5 分钟整。
  *
  * 用法（由 .github/workflows/release.yml 的 mirror-gitee 任务调用）：
  *   GITEE_TOKEN=... node scripts/mirror-gitee.mjs \
@@ -27,6 +32,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import { request } from 'node:https';
 
 const API = 'https://gitee.com/api/v5';
 /** 承载 latest.json 的固定 tag：Gitee 没有 GitHub 的 `releases/latest/download/...` 那种「永远最新」路径 */
@@ -101,18 +107,56 @@ async function listReleases() {
   return JSON.parse(await call('列出 release', `repos/${repo}/releases?${q()}`));
 }
 
+/**
+ * 上传附件：走 node:https 而不是 fetch。
+ * Gitee 的 `attach_files` 要收完整个包才回话，8 MB 安装包从境外 runner 传过去实测 5 分钟以上，
+ * 而 undici（Node 的 fetch）默认 300 s 就把响应头判超时了 —— 那条上限对这种"慢但在传"的
+ * 大文件上传没有意义，只会把一次成功的发布报成失败。core 的 https.request 只受这里显式
+ * 设的 socket 超时约束（20 分钟），到点会主动断开并说清是超时而不是 Gitee 拒绝。
+ */
+function postMultipart(pathWithQuery, fieldName, filePath, fileName, timeoutMs = 20 * 60_000) {
+  return new Promise((resolve, reject) => {
+    const boundary = `----heid${Date.now().toString(36)}`;
+    const head = Buffer.from(
+      `--${boundary}\r\n`
+      + `Content-Disposition: form-data; name="${fieldName}"; filename="${fileName}"\r\n`
+      + 'Content-Type: application/octet-stream\r\n\r\n',
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = Buffer.concat([head, readFileSync(filePath), tail]);
+    const req = request(
+      {
+        hostname: 'gitee.com',
+        path: `/api/v5/${pathWithQuery}`,
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': String(body.length),
+        },
+      },
+      (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { text += c; });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, text }));
+      },
+    );
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`上传 ${fileName}：${Math.round(timeoutMs / 60000)} 分钟内没有响应`));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
 async function uploadFile(releaseId, filePath, nameOverride) {
   const name = nameOverride ?? basename(filePath);
-  const blob = new Blob([readFileSync(filePath)], {
-    type: 'application/octet-stream',
-  });
-  const form = new FormData();
-  form.set('file', blob, name);
-  const text = await call(
-    `上传 ${name}`,
-    `repos/${repo}/releases/${releaseId}/attach_files?${q()}`,
-    { method: 'POST', body: form },
+  const { status, text } = await postMultipart(
+    `repos/${repo}/releases/${releaseId}/attach_files?${q()}`, 'file', filePath, name,
   );
+  if (status < 200 || status >= 300) {
+    throw new Error(`上传 ${name} 失败：HTTP ${status} ${safe(text).slice(0, 300)}`);
+  }
   const asset = JSON.parse(text);
   if (!asset.browser_download_url) throw new Error(`上传 ${name}：响应里没有直链字段`);
   if (asset.name !== name) throw new Error(`上传 ${name}：Gitee 存成了 ${asset.name}，直链名对不上`);
