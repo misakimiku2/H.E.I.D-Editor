@@ -104,6 +104,19 @@ fn 列举条目超上限时如实标注() {
     assert_eq!(r["truncated"], true, "截断了必须说，否则手机会以为目录就只有这些");
 }
 
+/// 手机上的树根是 `hide-remote://<设备>`，按尾段取名就是一串 keyId。那一行要显示人话，
+/// 名字只能由桌面给 —— 随 `list` 给而不单开一条命令：树要显示根节点，本来就得先列一次根。
+#[test]
+fn 列目录时把共享根那层文件夹名一起给出去() {
+    let t = Temp::new("fsrv-rootname");
+    std::fs::create_dir_all(t.root().join("sub")).unwrap();
+    let want = t.root().file_name().unwrap().to_str().unwrap().to_string();
+    let r = ok(&t.root(), "list", r#"{"relDir":""}"#);
+    assert_eq!(r["rootName"], want.as_str());
+    let s = ok(&t.root(), "list", r#"{"relDir":"sub"}"#);
+    assert_eq!(s["rootName"], want.as_str(), "给的是共享根那一层，不是本次列的那层");
+}
+
 /* ------------------------------------------------------------------ stat / read */
 
 #[test]

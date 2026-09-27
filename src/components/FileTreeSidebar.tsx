@@ -564,11 +564,18 @@ export function FileTreeSidebar({
     if (!lister) return;
     try {
       const entries = await lister.list(node.path);
-      setTree(prev => (prev ? withChildren(prev, node.path, entries) : prev));
+      /* 远程根的尾段是 keyId，那层文件夹叫什么要等这一次 list 由桌面带回来 ——
+         所以根节点的名字在列成功之后按同一份权威补一次（本地树 rootName 不实现，行为不变） */
+      const rn = node.path === rootPath ? lister.rootName?.(node.path) ?? '' : '';
+      setTree(prev => {
+        if (!prev) return prev;
+        const next = withChildren(prev, node.path, entries);
+        return rn && next.path === node.path ? { ...next, name: rn } : next;
+      });
     } catch (e: any) {
       setTree(prev => (prev ? withError(prev, node.path, e?.message ?? String(e)) : prev));
     }
-  }, [lister]);
+  }, [lister, rootPath]);
 
   const treeRef = useRef<TreeNode | null>(null);
   treeRef.current = tree;

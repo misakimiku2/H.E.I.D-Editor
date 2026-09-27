@@ -61,14 +61,14 @@ afterEach(() => {
   delete (globalThis as any).HeidBridge;
 });
 
-function render() {
+function render(rootPath = ROOT_PATH) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
       <FileTreeSidebar
-        rootPath={ROOT_PATH}
+        rootPath={rootPath}
         open
         isDarkMode={false}
         activeTabId='t1'
@@ -150,6 +150,39 @@ describe('远程根下的文件树', () => {
     await settle();
     const header = el.querySelector<HTMLElement>(`[title="${ROOT_PATH}"]`)!;
     expect(header.textContent).toContain('notes');
+  });
+
+  /* 交接换过来的根是**整台电脑的共享根**（`hide-remote://<设备>`，rel 为空），
+     按尾段取名就露出 keyId 那串十六进制 —— 2026-09-27 他点名要改掉的就是那一行。
+     名字由桌面随 `list` 一起给（rootName），列成功之后补到根节点上。 */
+  it('根是整台电脑的共享根时，那一行显示文件夹名而不是那串 keyId', async () => {
+    const bare = makeRemotePath(DEV, '');
+    remoteList.mockResolvedValue({
+      entries: [{ name: 'README.txt', isDir: false, size: 4, mtimeMs: 1 }],
+      rootName: 'link-test',
+      truncated: false,
+    });
+    const el = render(bare);
+    await settle();
+    const spots = [...el.querySelectorAll<HTMLElement>(`[title="${bare}"]`)];
+    expect(spots.length, '树头与根节点各一处').toBeGreaterThan(0);
+    for (const n of spots) {
+      expect(n.textContent).toContain('link-test');
+      expect(n.textContent, '不该再给人看身份键').not.toContain(DEV);
+    }
+  });
+
+  it('桌面没给 rootName（旧版桌面）时那一行退回设备名，仍然不是十六进制', async () => {
+    const DEV2 = 'ff00ff00ff00ff00';
+    localStorage.setItem('heid-link-prefs', JSON.stringify({ peerName: 'MISAKIMIKU', host: '192.168.31.87', keyId: DEV2 }));
+    const bare = makeRemotePath(DEV2, '');
+    remoteList.mockResolvedValue({ entries: [], truncated: false });
+    const el = render(bare);
+    await settle();
+    for (const n of [...el.querySelectorAll<HTMLElement>(`[title="${bare}"]`)]) {
+      expect(n.textContent).toContain('MISAKIMIKU');
+      expect(n.textContent).not.toContain(DEV2);
+    }
   });
 
   it('列不出内容时把原因落在节点上而不是空白树', async () => {

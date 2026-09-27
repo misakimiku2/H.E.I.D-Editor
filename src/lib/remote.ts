@@ -41,6 +41,9 @@ export interface RemoteEntry {
 
 export interface RemoteListResult {
   entries: RemoteEntry[];
+  /** 共享根那层文件夹的人话名字（`link-test`）。手机上的树根只有身份键，
+      根节点那一行不靠它就只能显示那串十六进制。老桌面没这个字段时是 undefined */
+  rootName?: string;
   /** 撞了桌面 3000 条上限：如实带出去，别让人以为目录就只有这些 */
   truncated: boolean;
 }

@@ -64,6 +64,11 @@ pub struct Entry {
 struct ListResult {
     entries: Vec<Entry>,
     truncated: bool,
+    /// 共享根那层文件夹叫什么（`link-test` 这种）。手机上的树根只有
+    /// `hide-remote://<设备>` 这个身份键，按尾段取名会露出 keyId 那串十六进制，
+    /// 所以"电脑上那个文件夹的人话名字"得由桌面随列表一起给过来 —— 随 `list` 给
+    /// 而不是单开一条命令：树要显示根节点，本来就得先列一次根。
+    root_name: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -197,7 +202,15 @@ fn list(scope: &Scope, rel_dir: &str) -> Handled {
     }
     // 与桌面文件树同一排序口径：目录在前、名字不区分大小写
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| cmp_name(&a.name, &b.name)));
-    serde_json::to_string(&ListResult { entries, truncated })
+    // 根的名字取共享根那一层，不是本次列的那层 —— 手机要填的是它树里那个根节点
+    let root_name = scope
+        .root
+        .as_deref()
+        .and_then(|r| r.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    serde_json::to_string(&ListResult { entries, truncated, root_name })
         .map_err(|e| err("io", format!("结果序列化失败：{e}")))
 }
 

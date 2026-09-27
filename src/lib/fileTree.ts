@@ -211,8 +211,11 @@ export interface DirLister {
   chooseRoot(): Promise<string | null>;
   /** 列出目录子项；失败抛错（信息展示在节点上） */
   list(dirPath: string): Promise<DirEntry[]>;
-  /** 根目录显示名（tree URI 取尾段并去掉 storage 前缀） */
+  /** 根目录显示名（tree URI 取尾段并去掉 storage 前缀）：树头那一行用 */
   displayName(rootPath: string): string;
+  /** 根节点**那一行**该显示的名字，只在尾段取不出人话时实现（远程根的尾段是 keyId
+      那串十六进制）。不实现就用 `makeRoot` 从路径尾段取的那个名字，本地树行为不变。 */
+  rootName?(rootPath: string): string;
   /** 递归监视根目录变更，事件去抖后回调；返回停止监视函数。
       平台不支持（安卓 SAF）时不实现，侧栏退化为仅手动刷新 */
   watch?(rootPath: string, onChange: () => void): Promise<() => void>;

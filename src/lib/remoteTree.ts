@@ -17,6 +17,11 @@ function joinRel(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name;
 }
 
+/** 桌面那次 `list` 顺手带回来的共享根名字，按设备记一份（重新配对就换了一个 keyId）。
+    只在这里缓存、不写进 prefs：换根时桌面会推 `rootChanged`，手机重列一次根，
+    这一份跟着刷新即可 —— 存到 prefs 里就多一个会过期的地方。 */
+const rootNames = new Map<string, string>();
+
 export const remoteDirLister: DirLister = {
   async chooseRoot() {
     /* 手机不"选"目录：共享范围就是桌面文件树当前的那个根（设计稿 §2.3）。
@@ -29,6 +34,8 @@ export const remoteDirLister: DirLister = {
     const ref = parseRemotePath(dirPath);
     if (!ref) throw new Error('远程路径不合法');
     const r = await remoteList(ref.rel);
+    // 只有列根那一次桌面才给得出"那层文件夹叫什么"，顺手记下来给根节点用
+    if (!ref.rel && r.rootName) rootNames.set(ref.deviceId, r.rootName);
     return r.entries.map(e => ({
       name: e.name,
       isDir: e.isDir,
@@ -41,7 +48,16 @@ export const remoteDirLister: DirLister = {
     /* 树头显示「设备名 · 根目录名」：只写目录名会让人分不清这棵树在谁那里 */
     const tail = ref.rel.split('/').filter(Boolean).pop() ?? '';
     const peer = loadPrefs()?.peerName || ref.deviceId.slice(0, 8);
-    return tail ? `${peer} · ${tail}` : peer;
+    const atRoot = tail || rootNames.get(ref.deviceId) || '';
+    return atRoot ? `${peer} · ${atRoot}` : peer;
+  },
+  /* 根节点**那一行**：裸远程根的尾段是 keyId（`c21de657af9121b0`），那不是一个名字。
+     列过一次根就有桌面给的真名字，在那之前退一步显示设备名，总之不给人看十六进制。 */
+  rootName(rootPath) {
+    const ref = parseRemotePath(rootPath);
+    if (!ref) return rootPath;
+    const tail = ref.rel.split('/').filter(Boolean).pop() ?? '';
+    return tail || rootNames.get(ref.deviceId) || loadPrefs()?.peerName || '';
   },
   /* 没有 watch：实时更新走阶段 4 的推送通道， SAF 那侧的先例是不实现即退化为手动刷新 */
 };
