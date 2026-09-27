@@ -20,7 +20,7 @@ import { restoreSessionTabs } from '../lib/sessionRestore';
 import { isTauri } from '../lib/fileIO';
 import { createDocumentWindow } from '../lib/windows';
 import { IS_ANDROID_APP } from '../lib/platform';
-import { INITIAL_WELCOME_ID, RELEASE_NOTES_TAB_ID, type FileTab } from '../lib/tabModel';
+import { INITIAL_WELCOME_ID, LINK_LOG_TAB_ID, RELEASE_NOTES_TAB_ID, type FileTab } from '../lib/tabModel';
 
 export interface SessionPersistenceOptions {
   /** 本窗口 label（main / win-N）：决定快照键与多窗口拉起职责 */
@@ -122,6 +122,9 @@ export function useSessionPersistence({
     saveSessionForLabel(safeLocalStorage(), windowLabel, {
       tabs: tabsRef.current.flatMap((t): SessionState['tabs'] => {
         if (t.id === RELEASE_NOTES_TAB_ID) return [];
+        /* 互联日志那张同理：内容来自进程内那份环缓冲，重启后是空的，
+           存进快照只会恢复出一张写着旧时刻的死标签；激活的也是它时同样不当"上次在哪" */
+        if (t.id === LINK_LOG_TAB_ID) return [];
         /* 未被编辑过的初始 welcome 占位页不进快照:纯占位窗口不应在重启后复活 */
         if (t.id === INITIAL_WELCOME_ID && !t.isDirty) return [];
         if (t.path) return [{ kind: 'file' as const, path: t.path, mdView: t.mdView }];
@@ -130,7 +133,7 @@ export function useSessionPersistence({
         return [{ kind: 'virtual' as const, title: t.title, draft: !t.readOnly || undefined, mdView: t.mdView }];
       }),
       activePath: active?.path ?? null,
-      activeVirtualTitle: active && !active.path ? active.title : null,
+      activeVirtualTitle: active && !active.path && !active.linkLog ? active.title : null,
     });
   }, [activeTabIdRef, tabsRef, windowLabel]);
 

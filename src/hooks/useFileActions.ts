@@ -19,6 +19,8 @@ import {
   classifyBySize, fileSize, formatBytes, LARGE_FILE_MAX_BYTES,
 } from '../lib/largeFile';
 import { isRemotePath, REMOTE_MAX_FILE_BYTES } from '../lib/remote';
+import { logFileHeader, renderLogText } from '../lib/linkLog';
+import { deviceName } from '../lib/link';
 import { detectLanguageFromPath } from '../lib/codemirror';
 import { displayNameFromPath, IS_ANDROID_APP } from '../lib/platform';
 import { applyLineEnding, type LineEnding } from '../lib/lineEndings';
@@ -309,6 +311,21 @@ export function useFileActions({
   /* ---- 保存 ---- */
 
   const persistTab = useCallback(async (tab: FileTab, saveAs: boolean, opts?: { silent?: boolean }): Promise<boolean> => {
+    /* 互联日志那张是只读的，但保存 / 另存为 / Ctrl+S 落在它身上意思只有一个：
+       把这份日志拿走。走同一套系统对话框，落盘的是**这一刻的快照**（带一行导出头），
+       标签本身一个字不改 —— 它还在跟着环长。 */
+    if (tab.linkLog) {
+      if (savingRef.current) return false;
+      savingRef.current = true;
+      setSaving(true);
+      try {
+        const r = await saveFileToDisk(tab, renderLogText(t, logFileHeader(t, deviceName())), true, opts?.silent ?? false);
+        return !!r.ok;
+      } finally {
+        savingRef.current = false;
+        setSaving(false);
+      }
+    }
     if (tab.readOnly || savingRef.current) return false;
     savingRef.current = true;
     setSaving(true);
@@ -361,7 +378,7 @@ export function useFileActions({
       savingRef.current = false;
       setSaving(false);
     }
-  }, [addRecent, onRemoteConflict, onRemoteOffline, onRemoteSaved, setTabs, updateKnownDiskContent]);
+  }, [addRecent, onRemoteConflict, onRemoteOffline, onRemoteSaved, setTabs, t, updateKnownDiskContent]);
 
   const handleSave = useCallback(async () => {
     if (!activeTab) return;

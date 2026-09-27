@@ -277,7 +277,7 @@ export function TabBar({
                 return (
                   <div
                     data-tab-id={tab.id}
-                    draggable={!IS_TOUCH_PRIMARY}
+                    draggable={!IS_TOUCH_PRIMARY && !tab.linkLog}
                     {...bindMenu({
                       onClick: () => {
                         if (suppressClickRef.current) { suppressClickRef.current = false; return; }

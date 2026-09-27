@@ -64,6 +64,8 @@ export interface FileTab extends CsvTabState {
   jsonView?: JsonViewMode;
   /** svg 标签页的可视化编辑模式（缺省 false = 纯预览工作台） */
   svgEdit?: boolean;
+  /** 互联日志标签：内容由日志环实时喂进来，只读、不落盘、不进会话快照、不能拖成新窗口 */
+  linkLog?: boolean;
   /** 待跳转位置（跨文件搜索结果点击打开）：编辑器挂载后执行一次并清除。
       seq 区分同一标签的连续请求，避免相同位置的二连跳被 React 视为无变化 */
   jumpRequest?: { line: number; col: number; seq: number };
@@ -153,6 +155,36 @@ export function makeReleaseNotesTab(title: string, content: string): FileTab {
     bom: false,
     eol: 'lf',
     originalEol: 'lf',
+  };
+}
+
+/**
+ * 互联日志标签（固定 id）：把 `linkLog.ts` 那份环缓冲当一份纯文本摊开。
+ * 只读 —— 它是"发生了就是发生了"的现场，改一个字就不再是证据；内容随互联动静实时追加，
+ * 环到 200 条自己丢掉最旧的，所以这份文本永远只有最近那一段。
+ * 与更新文档同一类瞬态标签：不进会话快照（重启后那份是空的，重建不出内容），
+ * 也不能拖成新窗口（另一个窗口没有这份环，拖过去就是一份死副本）。
+ */
+export const LINK_LOG_TAB_ID = 'tab-link-log';
+
+export function makeLinkLogTab(title: string, content: string): FileTab {
+  return {
+    id: LINK_LOG_TAB_ID,
+    title,
+    path: null,
+    handle: null,
+    content,
+    /* 基线跟着内容走：日志标签永远不该是「脏」的，它没有"未保存的修改"这个概念 */
+    originalContent: content,
+    language: 'plaintext',
+    isDirty: false,
+    readOnly: true,
+    mdView: 'edit',
+    encoding: 'utf-8',
+    bom: false,
+    eol: 'lf',
+    originalEol: 'lf',
+    linkLog: true,
   };
 }
 

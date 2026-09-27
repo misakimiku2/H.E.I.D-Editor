@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Copy, Files, FolderTree, Loader2, QrCode, ShieldAlert, Usb } from 'lucide-react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { ChevronRight, Copy, Files, FolderTree, Loader2, QrCode, ScrollText, ShieldAlert, Usb } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
@@ -7,9 +7,10 @@ import { isTauri } from '../lib/fileIO';
 import {
   DEFAULT_LINK_PORT, QR_POLL_MS, connectTo, deviceName, disconnectClient,
   fetchStatus, isUsablePort, loadPrefs, pairCode, pairInfo, pairQr, pairUri, pairingsList, reconnect,
-  markLinkUserClosed, revokePairing, savePrefs, setTestPair, startServer, stopServer, subscribeLinkStatus,
+  markLinkUserClosed, revokePairing, savePrefs, startServer, stopServer, subscribeLinkStatus,
   type LinkStatus, type PairInfo, type QrInfo,
 } from '../lib/link';
+import { linkLogSnapshot, subscribeLinkLog } from '../lib/linkLog';
 import { makeRemotePath } from '../lib/remote';
 import { isLinkEnabled, linkStateText } from '../lib/linkStatusText';
 import type { BeginHandoff } from '../hooks/useLinkHandoff';
@@ -45,6 +46,8 @@ interface DeviceLinkSectionProps {
    * 这里只负责把它掀开。（连上之后自动落地不再走它 —— 那是 `onHandoff` 的交接。）
    */
   onShowRemoteTabs?: () => void;
+  /** 点「互联日志」那一行：日志屏由 App 挂着唯一一份，这里只管把它掀开 */
+  onShowLog?: () => void;
   /**
    * 「这次连上了要交接」的起点：桌面上正看着的那一份摊到前台、其余桌面标签排进标签条、
    * 桌面那棵文件夹树换掉手机这棵。返回收回它的函数。
@@ -54,11 +57,14 @@ interface DeviceLinkSectionProps {
 }
 
 /**
- * 设置 →「设备互联」。桌面是服务端（开关 + 端口 + 配对二维码 + 已配对设备），
+ * 「设备互联」那一整块。桌面是服务端（开关 + 端口 + 配对二维码 + 已配对设备），
  * 手机是客户端（免扫重连 / 改用配对码 / 离线队列）—— 拓扑定死，两端各只出现自己那一半。
  *
- * 手机的「扫一扫」不在这格里：它在顶栏那颗入口上，点下去直接开相机
- * （见 `DeviceLinkPanel.tsx` 的 `ScanLinkEntry`）。这一格留的是不需要相机的等价入口。
+ * 它摆在哪：手机端是「设备互联」那一屏（`DeviceLinkPage`），桌面/平板是菜单栏按钮点开的浮层
+ * （`DeviceLinkPanel`）。2026-09-28 从设置里剥离出来，两端都不再藏在设置最后一格。
+ *
+ * 手机的「扫一扫」不在这块里：它在顶栏那颗入口上，点下去直接开相机
+ * （见 `DeviceLinkPanel.tsx` 的 `ScanLinkEntry`）。这一块留的是不需要相机的等价入口。
  */
 /**
  * 离线队列那一行：待同步 / 需确认 / 正在写回。
@@ -119,9 +125,12 @@ export function OfflineQueueRow({ dark, info }: { dark: boolean; info: LinkOffli
 }
 
 export function DeviceLinkSection({
-  dark, rowCls, labelCls, offline, onBrowseRemote, onShowRemoteTabs, onHandoff,
+  dark, rowCls, labelCls, offline, onBrowseRemote, onShowRemoteTabs, onShowLog, onHandoff,
 }: DeviceLinkSectionProps) {
   const t = useT();
+  /* 条数取自日志环那一份订阅：入口摆的数与点进去看见的数必须同源 */
+  const logLines = useSyncExternalStore(subscribeLinkLog, linkLogSnapshot);
+  const logCount = logLines.reduce((n, l) => n + l.n, 0);
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -209,23 +218,6 @@ export function DeviceLinkSection({
     setPort(v);
     const n = Number(v);
     if (isUsablePort(n)) savePrefs({ port: n });
-  };
-
-  /**
-   * 测试配对模式：开的时候顺手换一次码 —— 那张哨兵票的短码是固定的，
-   * 面板上摆着的就是手机要用的码，不用再点一次刷新。
-   */
-  const onTestPairToggle = async (on: boolean) => {
-    setBusy(true);
-    setLocalError('');
-    try {
-      setStatus(await setTestPair(on));
-      if (on) setQr(await pairQr().catch(() => null));
-    } catch (e) {
-      setLocalError(String((e as { message?: string })?.message ?? e));
-    } finally {
-      setBusy(false);
-    }
   };
 
   const onShowQr = () => {
@@ -515,51 +507,6 @@ export function DeviceLinkSection({
               </span>
             </div>
           )}
-          {/* 测试配对模式（v1.5 开工单第 2 条）：跨机实测时电脑旁没人点 TOFU，而票只有 120 秒。
-              只在共享开着这一格里出现——不监听端口时它没有意义，也就不会看不见了 yet 还开着。
-              开关本身不跨重启（Rust 那边不落盘），所以最坏的形态是"这次运行忘了关"。 */}
-          {enabled && (
-            <div className={rowCls}>
-              <span className={cn(labelCls, 'flex items-center gap-1.5')}>
-                {t('link.testPairLabel')}
-                <span className={cn(
-                  'rounded px-1 py-px text-[9px] leading-none',
-                  status?.testPair
-                    ? 'bg-amber-500/20 text-amber-600'
-                    : dark ? 'bg-zinc-700 text-zinc-400' : 'bg-zinc-200 text-zinc-500',
-                )}>
-                  {t('link.testPairBadge')}
-                </span>
-              </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={!!status?.testPair}
-                onClick={() => onTestPairToggle(!status?.testPair)}
-                disabled={busy}
-                className={cn(
-                  'relative block w-9 h-5 rounded-full transition-all shrink-0 disabled:opacity-50',
-                  status?.testPair ? 'bg-amber-500' : 'bg-zinc-400/50',
-                )}
-              >
-                <span
-                  className={cn(
-                    'absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all',
-                    status?.testPair ? 'left-[18px]' : 'left-0.5',
-                  )}
-                />
-              </button>
-            </div>
-          )}
-          {status?.testPair && (
-            <p className="mx-5 my-1 flex gap-1.5 rounded-lg bg-amber-500/10 p-2 text-[10px] leading-relaxed text-amber-600 pointer-coarse:text-xs">
-              <ShieldAlert size={13} className="mt-0.5 shrink-0" />
-              <span>
-                {t('link.testPairWarn')}
-                {qr?.code ? <span className="block mt-1 font-mono">{t('link.testPairOn', { code: qr.code })}</span> : null}
-              </span>
-            </p>
-          )}
           {/* 根外白名单（阶段 3 §6.3）不在这里占一行（2026-09-25 他说多余）：
               它说的是同一件事的第二遍，份数留在状态栏那条标记的悬停说明里可查。 */}
           {/* bind 成功但没人来连：这是「端口开着、包进不来」的半死状态，比直接报错难查，
@@ -591,15 +538,7 @@ export function DeviceLinkSection({
               <div className="text-[10px] opacity-70 pointer-coarse:text-xs mb-1">{t('link.pairedDevices')}</div>
               {devices.map((d) => (
                 <div key={d.keyId} className="flex items-center justify-between py-0.5 text-xs pointer-coarse:text-sm">
-                  <span className="truncate">
-                    {d.name || d.keyId}
-                    {/* 自动允许过的那几台要能在事后看出来是谁 —— 跳过确认不等于跳过记账 */}
-                    {d.viaTest && (
-                      <span className="ml-1.5 rounded bg-amber-500/20 px-1 py-px text-[9px] leading-none text-amber-600">
-                        {t('link.viaTestTag')}
-                      </span>
-                    )}
-                  </span>
+                  <span className="truncate">{d.name || d.keyId}</span>
                   <button type="button" onClick={() => onRevoke(d.keyId)} className="opacity-60 hover:opacity-100 underline decoration-dotted">
                     {t('link.revoke')}
                   </button>
@@ -623,6 +562,24 @@ export function DeviceLinkSection({
         <p className="px-5 pb-1 text-[10px] leading-relaxed text-red-500 pointer-coarse:text-xs">
           {t('link.lastError', { msg: errorText })}
         </p>
+      )}
+      {/* 互联日志：这一行两端都在（桌面浮层与手机那一屏用的是同一块内容），
+          点开的屏由 App 挂着唯一一份，与「电脑上正打开的文件」同一套挂法 */}
+      {onShowLog && (
+        <button
+          type="button"
+          onClick={onShowLog}
+          className={cn(
+            'mx-2.5 my-0.5 flex items-center gap-1.5 rounded-lg text-xs font-medium transition-colors pointer-coarse:text-sm',
+            IS_TOUCH_PRIMARY ? 'min-h-[48px] px-3 py-2' : 'px-2.5 py-1',
+            dark ? 'hover:bg-zinc-700/30' : 'hover:bg-zinc-100/70',
+          )}
+        >
+          <ScrollText size={12} className="opacity-70" />
+          <span className="min-w-0 flex-1 text-left">{t('link.logTitle')}</span>
+          {logCount > 0 && <span className="shrink-0 opacity-60">{t('link.logCount', { n: logCount })}</span>}
+          <ChevronRight size={14} className="shrink-0 opacity-40" />
+        </button>
       )}
       <p
         className={cn(

@@ -192,7 +192,6 @@ pub fn run() {
             link::link_client_disconnect,
             link::link_pair_qr,
             link::link_pair_info,
-            link::link_test_pair_set,
             link::link_pairings_list,
             link::link_set_root,
             link::link_report_tabs,

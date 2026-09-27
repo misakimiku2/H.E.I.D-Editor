@@ -27,6 +27,8 @@ export interface OverlayState {
   scanOpen: boolean;
   /** 「电脑上正打开的文件」那一整屏（盖在设置之上，扫码连上后的落地页也是它） */
   remoteTabsOpen: boolean;
+  /** 手机端「设备互联」那一整屏（2026-09-28 从设置里剥离出来） */
+  deviceLinkOpen: boolean;
   shortcutsOpen: boolean;
   tabMenuOpen: boolean;
 }
@@ -37,6 +39,7 @@ export interface OverlayActions {
   closeSettings: () => void;
   closeScan: () => void;
   closeRemoteTabs: () => void;
+  closeDeviceLink: () => void;
   closeShortcuts: () => void;
   closeTabMenu: () => void;
   closeTabSheet: () => void;
@@ -228,7 +231,9 @@ export function usePlatformIntegration({
       /* 远程标签那一屏是全屏层（z-150，压在设置与相机之上），所以它第一个被返回键收掉 */
       if (o.remoteTabsOpen) { a.closeRemoteTabs(); return; }
       if (o.findOpen) { a.closeFind(); return; }
+      /* 相机也是 z-150：从「设备互联」那一屏里按扫一扫时，返回先收相机、留住那一屏 */
       if (o.scanOpen) { a.closeScan(); return; }
+      if (o.deviceLinkOpen) { a.closeDeviceLink(); return; }
       if (o.settingsOpen) { a.closeSettings(); return; }
       if (o.shortcutsOpen) { a.closeShortcuts(); return; }
       if (o.tabMenuOpen) { a.closeTabMenu(); return; }

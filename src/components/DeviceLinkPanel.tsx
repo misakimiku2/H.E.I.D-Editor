@@ -4,10 +4,11 @@
  *
  * 两端形状不同，是他 2026-09-25 第二次点名后定的：
  *  - **桌面 / 平板**：菜单栏「菜单」按钮右侧一颗常驻按钮，点开是贴着按钮的浮层，
- *    浮层里就是那一整块（共享开关 / 配对二维码 / 已配对设备 / 离线队列）。
+ *    浮层里就是那一整块（共享开关 / 配对二维码 / 已配对设备 / 离线队列 / 互联日志）。
  *  - **手机**：顶栏那颗直接就是**「扫一扫」** —— 点下去开相机配对，不再先弹一层抽屉。
- *    其余入口（改用配对码、看桌面上正打开的文件、断开、离线队列）留在「设置 → 设备互联」里。
- *    连着电脑时它换成连接状态按钮，见下面 `ScanLinkEntry` 的注释。
+ *    其余入口（改用配对码、看桌面上正打开的文件、断开、离线队列、日志）在「设备互联」那一屏里
+ *    （`DeviceLinkPage`，2026-09-28 他从设置里把它剥离出来了），连着时顶栏那颗换成状态按钮，
+ *    点下去就是那一屏，见下面 `ScanLinkEntry` 的注释。
  *
  * 状态一律取 `useLinkStatus` 那一份订阅，与状态栏的 `LinkShareChip` 同源：
  * 入口与标记各算各的「连上了没有」是这条入口最容易写歪的地方。
@@ -36,6 +37,8 @@ export interface DeviceLinkPanelProps {
   onBrowseRemote?: (rootPath: string) => void;
   /** 掀开 App 那份唯一的「电脑上正打开的文件」 */
   onShowRemoteTabs?: () => void;
+  /** 掀开 App 那份唯一的「互联日志」 */
+  onShowLog?: () => void;
   /** 手机那四个「我主动要连」的动作共用的交接触发器（桌面那一侧用不到，但仍要传进来） */
   onHandoff: BeginHandoff;
 }
@@ -150,8 +153,8 @@ export function DeviceLinkMenuButton(props: DeviceLinkPanelProps) {
             </button>
           </div>
           <div className="heid-scroll heid-scroll-none min-h-0 overflow-y-auto pb-1">
-            {/* 掀开「电脑上正打开的文件」或进远程树的那一刻，本浮层就该收掉：
-                它俩都是整屏的去处，浮层留在上面只是挡编辑器（平板壳实测到的一次残留） */}
+            {/* 掀开「电脑上正打开的文件」、进远程树、或打开日志屏的那一刻，本浮层就该收掉：
+                它们都是整屏的去处，浮层留在上面只是挡编辑器（平板壳实测到的一次残留） */}
             <DeviceLinkSection
               dark={props.dark}
               rowCls={panelRowCls(props.dark)}
@@ -160,6 +163,7 @@ export function DeviceLinkMenuButton(props: DeviceLinkPanelProps) {
               onHandoff={props.onHandoff}
               onBrowseRemote={(p) => { setOpen(false); props.onBrowseRemote?.(p); }}
               onShowRemoteTabs={() => { setOpen(false); props.onShowRemoteTabs?.(); }}
+              onShowLog={() => { setOpen(false); props.onShowLog?.(); }}
             />
           </div>
         </div>
@@ -178,10 +182,10 @@ export function DeviceLinkMenuButton(props: DeviceLinkPanelProps) {
  *    一句话报告完还要用户自己去找东西在哪，是白多一步。
  *  - **没连着、但正在自己接回来**（亮屏之后退避重连在跑，或那一次拨号还在路上）：转圈，
  *    点下去与连着时同一格。这时候摆一颗扫码是把"等一等"说成"你来动手"（2026-09-27 他点名）。
- *  - **已经连着**：换成连接状态按钮，点下去是「设置 · 设备互联」那一格（断开、
- *    浏览那台电脑的文件都在里面）。**扫码入口就此收起**：手机端同时只服务一台电脑，
+ *  - **已经连着**：换成连接状态按钮，点下去是「设备互联」那一屏（断开、
+ *    浏览那台电脑的文件、互联日志都在里面）。**扫码入口就此收起**：手机端同时只服务一台电脑，
  *    连着的时候再摆一颗扫码，扫了也只会把当前这条顶掉，那是误操作而不是功能。
- *    要换一台，先在设置里断开，那颗「扫一扫」自己就回来了。
+ *    要换一台，先在那一屏里断开，那颗「扫一扫」自己就回来了。
  *
  * 三副样子用的是同一颗按钮位、同一份状态点（`useLinkEntryBadge`），所以切换时
  * 顶栏不会抖一下 —— 变的只有图标与它点下去去处。

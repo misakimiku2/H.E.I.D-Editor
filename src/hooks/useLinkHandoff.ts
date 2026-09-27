@@ -28,6 +28,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useT } from '../lib/i18nContext';
 import { markLinkUserClosed, subscribeLinkStatus, type LinkStatus } from '../lib/link';
 import { isLinkDown, makeRemotePath, remoteScope, remoteTabs, type RemoteTabView } from '../lib/remote';
+import { logLink } from '../lib/linkLog';
 
 /** 一次最多接过来这么多份：桌面上开着 40 个标签时，40 次远程读会把这趟交接拖成十几秒 */
 export const HANDOFF_MAX_TABS = 12;
@@ -119,20 +120,22 @@ export function useLinkHandoff(o: HandoffOptions): BeginHandoff {
            自动接回来。为它弹一屏模态，用户读到的是"我配对失败了"，实际发生的是一次自愈。
            所以把意图原样留回去，下一次 connected 再跑一遍；真的一直回不来，由上面那只表说话。 */
         if (isLinkDown(e)) {
+          // 这趟不算失败，但要留一句"等下一次连上再跑" —— 否则那几秒在日志里看着像什么都没发生
+          logLink('warn', 'link.log.handoffWait', { reason: reasonOf(e) });
           if (report) {
             pending.current = true;
             arm();
           }
           return;
         }
+        logLink('error', 'link.log.handoffFail', { reason: reasonOf(e) });
         if (report) opt.current.onFailed(reasonOf(e));
         tabs = null;
       }
       // 树与标签是两件事：问不到共享范围只是不换树，那几份标签该开还是要开
       const hasRoot = await scopeP.then((v) => v.hasRoot).catch(() => false);
       if (hasRoot) opt.current.adoptRoot(makeRemotePath(deviceId, ''));
-      if (!tabs) return;
-      const all = tabs
+      if (!tabs) return;      const all = tabs
         .filter((x) => !!x.rel && !x.reason)
         .map((x) => {
           const path = makeRemotePath(deviceId, x.rel);
@@ -143,6 +146,13 @@ export function useLinkHandoff(o: HandoffOptions): BeginHandoff {
       const seen = all.find((x) => x.active && x.had);
       if (seen) opt.current.reveal(seen.path);
       const items = all.filter((x) => !x.had).slice(0, HANDOFF_MAX_TABS);
+      // 交接的现场：接过来几份、换没换树、电脑上那份是不是手机里已经开着的。
+      // 排不下而留下没接的那几份也单独说一句 —— 不然"为什么只过来 12 个"又要人猜。
+      logLink('info', 'link.log.handoff', { n: items.length });
+      if (hasRoot) logLink('info', 'link.log.handoffRoot');
+      if (seen) logLink('info', 'link.log.handoffSeen');
+      const skipped = all.filter((x) => !x.had).length - items.length;
+      if (skipped > 0) logLink('warn', 'link.log.handoffMore', { n: skipped });
       if (!items.length) {
         if (report && !seen) opt.current.onNothing();
         return;

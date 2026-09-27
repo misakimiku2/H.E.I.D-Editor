@@ -11,6 +11,7 @@
  * 请求本身不带 deviceId：连接是单活的，路由由 Rust 侧决定，这个 id 只承担身份。
  */
 import { isTauri } from './fileIO';
+import { logLink } from './linkLog';
 
 export const REMOTE_SCHEME = 'hide-remote://';
 
@@ -260,16 +261,30 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 /** 浏览器与纯前端环境里根本没有这条链路。如实抛错而不是返回空值 ——
     返回空列表会让人误判成「桌面上没这个文件」 */
 function unavailable(): RemoteError {
-  return new RemoteError('unavailable', '这台设备没有连着桌面，请先在「设置 · 设备互联」里完成配对');
+  return new RemoteError('unavailable', '这台设备没有连着桌面，请先在「设备互联」里完成配对');
 }
 
-/** 一条命令的往返：Err 串在这里统一归成带稳定码的 RemoteError */
+/** 这几类是"探一下"性质的重复动作（翻目录、看属性、取标签），日志里并成一行带次数；
+    read / write 每一次都单独留一行 —— 那两类才是「这个文件到底有没有过去」的凭据 */
+const PROBE_METHODS: RemoteMethod[] = ['list', 'stat', 'tabs', 'scope'];
+
+/**
+ * 一条命令的往返：Err 串在这里统一归成带稳定码的 RemoteError。
+ * 往返同时进互联日志 —— 手机上「点开那层没出来」「保存转半天」这类问题，说的就是这一层的
+ * 耗时与稳定码，而这两样在界面上哪里都不显示。路径不进日志（那份是能整篇复制走的），
+ * 要定位是哪个文件由报错那句话自己说。
+ */
 async function request<T>(method: RemoteMethod, params: Record<string, unknown>): Promise<T> {
+  const t0 = Date.now();
   try {
     const raw = await call<string>('link_request', { method, params: JSON.stringify(params) });
+    logLink('info', 'link.log.request', { method, ms: Date.now() - t0, bytes: raw.length },
+      PROBE_METHODS.includes(method) ? `req:${method}` : '');
     return parseRemoteResponse<T>(method, raw);
   } catch (e) {
-    throw e instanceof RemoteError ? e : parseRemoteError(e);
+    const re = e instanceof RemoteError ? e : parseRemoteError(e);
+    logLink('error', 'link.log.requestFail', { method, code: re.code, ms: Date.now() - t0 });
+    throw re;
   }
 }
 

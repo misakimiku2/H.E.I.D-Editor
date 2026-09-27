@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   FileText, Folder, FolderOpen,
   Info, SaveAll, Plus, MoreVertical,
-  Keyboard, Link2, GitCompare,
+  Keyboard, Link2, GitCompare, MonitorSmartphone,
   Eye, Pencil, Code, Table, Image as ImageIcon, Settings,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
@@ -45,6 +45,11 @@ interface TopAppBarProps {
    * 顶栏只负责排布与 48dp 档，状态怎么判归 `DeviceLinkPanel` 那一份，免得两处各写一套。
    */
   linkSlot?: React.ReactNode;
+  /**
+   * 「设备互联」那一屏的入口（顶栏那颗按钮没连着时是扫一扫，所以整屏另给一行）。
+   * 不给就不出现在「更多」菜单里 —— 非原生环境下那一屏没有内容可摆。
+   */
+  onDeviceLink?: () => void;
 }
 
 /**
@@ -60,7 +65,7 @@ export function TopAppBar({
   onSettings, onShortcuts, onAbout,
   treeOpen, hasTreeRoot, onToggleTree,
   canToggleView, view, onToggleView,
-  csvView, onToggleCsvView, linkSlot,
+  csvView, onToggleCsvView, linkSlot, onDeviceLink,
 }: TopAppBarProps) {
   const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -229,6 +234,9 @@ export function TopAppBar({
               </>
             )}
             <div className={cn('h-px mx-3 my-1', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
+            {onDeviceLink && (
+              menuItem(<MonitorSmartphone size={16} className="shrink-0" />, t('settings.section.deviceLink'), onDeviceLink)
+            )}
             {menuItem(<Settings size={16} className="shrink-0" />, t('menu.settings'), onSettings)}
             {menuItem(<Keyboard size={16} className="shrink-0" />, t('menu.shortcuts'), onShortcuts)}
             {menuItem(<Info size={16} className="shrink-0" />, t('menu.about'), onAbout)}

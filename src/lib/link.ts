@@ -11,6 +11,7 @@
 
 import { IS_ANDROID_APP } from './platform';
 import { isTauri } from './fileIO';
+import { logLink, logStatusChange } from './linkLog';
 
 /** 设计稿 §12.1 第 3 条：默认端口取不常用值，设置里可改，占用时明确报错 */
 export const DEFAULT_LINK_PORT = 47123;
@@ -18,6 +19,8 @@ export const DEFAULT_LINK_PORT = 47123;
 export const LINK_EVENT = 'heid-link';
 /** 与 Rust `link::EVENT_REMOTE` 同名：对端主动推的事件（阶段 3 起有 `tabs`） */
 export const LINK_REMOTE_EVENT = 'heid-link-event';
+/** 与 Rust `link::EVENT_LOG` 同名：连接现场（谁被拒了、这条连接活了多久、握手用了多少毫秒） */
+export const LINK_LOG_EVENT = 'heid-link-log';
 /** 与 Rust `PROTOCOL_VERSION` 同步；不一致说明两端版本错开，要提示升级 */
 export const LINK_PROTOCOL = 1;
 
@@ -49,8 +52,6 @@ export interface PairInfo {
   keyId: string;
   name: string;
   pairedAt: number;
-  /** 这台是开着测试配对模式自动放进来的一台 —— 列表里要标出来，才知道该撤哪几行 */
-  viaTest: boolean;
 }
 
 export interface LinkStatus {
@@ -71,12 +72,6 @@ export interface LinkStatus {
   firewallHint: boolean;
   /** 共享根之外、因「桌面上正开着」而暴露给手机的文件数（阶段 3 的白名单） */
   openShared: number;
-  /**
-   * 测试配对模式开着：不过期、任何设备都能连、来了自动允许。
-   * 这是一扇开着的门，所以它和 `rootDisplay` / `openShared` 同一条规矩 —— 必须常驻可见。
-   * 故意不进 `LinkPrefs`：重启之后应当是关的。
-   */
-  testPair: boolean;
 }
 
 export const EMPTY_STATUS: LinkStatus = {
@@ -93,7 +88,6 @@ export const EMPTY_STATUS: LinkStatus = {
   peerKeyId: '',
   firewallHint: false,
   openShared: 0,
-  testPair: false,
 };
 
 /** Rust 侧 `Refused.code` 的稳定取值；UI 按它出双语标签，原始 reason 作次要信息 */
@@ -129,7 +123,6 @@ export function normalizeStatus(raw: unknown): LinkStatus {
     peerKeyId: typeof o.peerKeyId === 'string' ? o.peerKeyId : '',
     firewallHint: o.firewallHint === true,
     openShared: typeof o.openShared === 'number' ? o.openShared : 0,
-    testPair: o.testPair === true,
   };
 }
 
@@ -225,9 +218,19 @@ export function isKeyId(s: string): boolean {
   return /^[0-9a-fA-F]{16}$/.test(s);
 }
 
+/**
+ * 每一条链路命令都过这里，所以「命令没过」只在这一处记一次。
+ * 成功不在这里记：那由状态快照的跃迁说（`logStatusChange`），两处各报一遍就会出现
+ * 同一件事的两行、时间还差几毫秒。
+ */
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<T>(cmd, args);
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    logLink('error', 'link.log.command', { cmd, msg: String((e as { message?: string })?.message ?? e) });
+    throw e;
+  }
 }
 
 /** 本端角色：手机只能当客户端，桌面只能当服务端 —— 拓扑是定死的（设计稿 §2.1） */
@@ -260,26 +263,19 @@ export async function fetchStatus(): Promise<LinkStatus> {
 
 export async function startServer(port: number): Promise<LinkStatus> {
   if (!isTauri) return { ...EMPTY_STATUS };
+  logLink('info', 'link.log.askStart', { port });
   return normalizeStatus(await call<LinkStatus>('link_server_start', { port }));
 }
 
 export async function stopServer(): Promise<LinkStatus> {
   if (!isTauri) return { ...EMPTY_STATUS };
+  logLink('info', 'link.log.askStop');
   return normalizeStatus(await call<LinkStatus>('link_server_stop'));
 }
 
 export async function fetchTicket(): Promise<string> {
   if (!isTauri) return '';
   return call<string>('link_ticket');
-}
-
-/**
- * 开 / 关「测试配对模式」（开发用，见 Rust `link_test_pair_set`）。
- * 开着时那台电脑接受任何设备的配对并自动允许，所以界面上必须常驻显示 —— 返回的状态就是那份。
- */
-export async function setTestPair(on: boolean): Promise<LinkStatus> {
-  if (!isTauri) return { ...EMPTY_STATUS };
-  return normalizeStatus(await call<LinkStatus>('link_test_pair_set', { on }));
 }
 
 /** 桌面把**本窗口**文件树当前的根报给链路层当共享范围（设计稿 §2.3：不让用户再选第二遍）。
@@ -358,6 +354,8 @@ export async function connectTo(
   device: string,
 ): Promise<LinkStatus> {
   if (!isTauri) return { ...EMPTY_STATUS };
+  // 票值不进日志（这一份是能整篇复制走的），只留往哪台发
+  logLink('info', 'link.log.askConnect', { target: `${host}:${port}` });
   return normalizeStatus(
     await call<LinkStatus>('link_client_connect', { host, port, ticket, device }),
   );
@@ -365,6 +363,7 @@ export async function connectTo(
 
 export async function disconnectClient(): Promise<LinkStatus> {
   if (!isTauri) return { ...EMPTY_STATUS };
+  logLink('info', 'link.log.askDisconnect');
   return normalizeStatus(await call<LinkStatus>('link_client_disconnect'));
 }
 
@@ -378,7 +377,6 @@ function normPairings(raw: unknown): PairInfo[] {
       keyId: typeof o.keyId === 'string' ? o.keyId : '',
       name: typeof o.name === 'string' ? o.name : '',
       pairedAt: typeof o.pairedAt === 'number' ? o.pairedAt : 0,
-      viaTest: o.viaTest === true,
     };
   });
 }
@@ -412,6 +410,11 @@ export async function revokePairing(keyId: string): Promise<boolean> {
 /** 手机：吃一段 `hide-link://pair?...`（扫码/粘贴得到）走配对。 */
 export async function pairUri(uri: string, device: string): Promise<LinkStatus> {
   if (!isTauri) return { ...EMPTY_STATUS };
+  // 那一串里带着票值，日志只取地址与端口
+  const q = new URLSearchParams(uri.slice(uri.indexOf('?') + 1));
+  const host = q.get('host') ?? '';
+  const port = q.get('port') ?? '';
+  logLink('info', 'link.log.askPair', { target: host ? `${host}:${port}` : '—' });
   return normalizeStatus(await call<LinkStatus>('link_client_pair', { uri, device }));
 }
 
@@ -423,17 +426,24 @@ export async function pairCode(
   device: string,
 ): Promise<LinkStatus> {
   if (!isTauri) return { ...EMPTY_STATUS };
+  logLink('info', 'link.log.askPairCode', { target: `${host}:${port}` });
   return normalizeStatus(await call<LinkStatus>('link_client_pair_code', { host, port, code, device }));
 }
 
-/** 手机：用记住的 host + keyId 免扫重连。 */
+/**
+ * 手机：用记住的 host + keyId 免扫重连。
+ * `auto` 分清是谁按下的：亮屏后那串退避重连会连着发好几次，界面上要看得出这是后台在接回，
+ * 不是他点了一下却没反应。keyId 不是秘密（它就是 LS 的哈希标识），但也不进日志——用不着。
+ */
 export async function reconnect(
   host: string,
   port: number,
   keyId: string,
   device: string,
+  auto = false,
 ): Promise<LinkStatus> {
   if (!isTauri) return { ...EMPTY_STATUS };
+  logLink('info', auto ? 'link.log.redialAuto' : 'link.log.askReconnect', { target: `${host}:${port}` });
   return normalizeStatus(await call<LinkStatus>('link_client_reconnect', { host, port, keyId, device }));
 }
 
@@ -480,6 +490,64 @@ export function subscribeLinkStatus(cb: (s: LinkStatus) => void): () => void {
   return () => {
     cancelled = true;
     unlisten?.();
+  };
+}
+
+/**
+ * 订阅 Rust 侧发来的连接现场（谁被拒了、为什么、这条连接活了多久），原样转进日志环。
+ * 载荷里的 `key` 就是前端的文案键 —— Rust 那边只报键名与参数，不报成品句子，
+ * 所以桌面与手机对同一件事的说法一致，换语言也不用重连。
+ */
+function subscribeLinkConnLog(): () => void {
+  if (!isTauri) return () => {};
+  let unlisten: (() => void) | null = null;
+  let cancelled = false;
+  void (async () => {
+    const { listen } = await import('@tauri-apps/api/event');
+    const fn = await listen<{ level?: string; key?: string; params?: Record<string, string | number> }>(
+      LINK_LOG_EVENT,
+      (e) => {
+        const p = e.payload ?? {};
+        if (typeof p.key !== 'string' || !p.key) return;
+        const level = p.level === 'warn' || p.level === 'error' ? p.level : 'info';
+        logLink(level, p.key, typeof p.params === 'object' && p.params ? p.params : undefined);
+      },
+    );
+    if (cancelled) fn();
+    else unlisten = fn;
+  })().catch(() => {
+    /* 收不到连接现场只是少一份历史，不影响链路本身 */
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}
+
+/**
+ * 把互联的动静记进日志环（见 `linkLog.ts`）：状态跃迁、对端推送、Rust 那侧的连接现场，
+ * 命令侧那些在各自函数里记。App 挂载时调一次，返回注销函数。
+ *
+ * 装上的那一刻先问一次现状：不然第一行日志要等到下一次状态推送才出现，
+ * 而「我打开界面时它到底连没连上」正是这份日志最该回答的第一句。
+ *
+ * 为什么幂等：开发模式下的双挂载会先清理再重挂，两条订阅各记一份就会出现成对的重复行。
+ */
+let loggingInstalled = false;
+export function installLinkLogging(): () => void {
+  if (!isTauri || loggingInstalled) return () => {};
+  loggingInstalled = true;
+  const offStatus = subscribeLinkStatus(logStatusChange);
+  const offEvents = subscribeRemoteEvents((type) => {
+    logLink('info', 'link.log.push', { type }, `push:${type}`);
+  });
+  const offConn = subscribeLinkConnLog();
+  void fetchStatus().then(logStatusChange).catch(() => {});
+  return () => {
+    loggingInstalled = false;
+    offStatus();
+    offEvents();
+    offConn();
   };
 }
 
@@ -554,7 +622,7 @@ export function startLinkKeepAlive(): () => void {
       if (dead || userClosedLink || !p.host || !p.keyId) { setRedial(false); return; }
       fails += 1;
       setRedial(fails < LINK_REDIAL_SPINS);
-      void reconnect(p.host, p.port, p.keyId, deviceName()).catch(() => null);
+      void reconnect(p.host, p.port, p.keyId, deviceName(), true).catch(() => null);
       arm();
     }, wait);
   };

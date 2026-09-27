@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
@@ -40,7 +40,7 @@ import { useRemoteFileChanges } from './hooks/useRemoteFileChanges';
 import { useOfflineSync } from './hooks/useOfflineSync';
 import { isRemotePath } from './lib/remote';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
-import { autoReconnectFromPrefs, autoStartFromPrefs, rememberPeer, startLinkKeepAlive, subscribeLinkStatus } from './lib/link';
+import { autoReconnectFromPrefs, autoStartFromPrefs, rememberPeer, startLinkKeepAlive, subscribeLinkStatus, installLinkLogging } from './lib/link';
 import { LANGUAGE_LABELS, detectLanguageFromPath } from './lib/codemirror';
 import {
   EOL_LABELS, applyLineEnding, normalizeToLf, type LineEnding,
@@ -57,6 +57,7 @@ import { deleteDraft, draftKeyForTab } from './lib/drafts';
 import { SettingsDialog } from './components/SettingsDialog';
 import { DeviceLinkMenuButton, ScanLinkEntry } from './components/DeviceLinkPanel';
 import { RemoteTabsSheet } from './components/RemoteTabsSheet';
+import { DeviceLinkPage } from './components/DeviceLinkPage';
 import type { LinkOfflineInfo } from './components/DeviceLinkSection';
 import { UrlImportModal } from './components/UrlImportModal';
 import { FileTreeSidebar, type TreeSyncMark } from './components/FileTreeSidebar';
@@ -85,10 +86,11 @@ import { StatusStrip } from './components/mobile/StatusStrip';
 import { TabSheet } from './components/mobile/TabSheet';
 import { androidCreateDoc, androidWriteUri, formatFileSize, isTauri, writeLocalPath, type RemoteConflict } from './lib/fileIO';
 import {
-  INITIAL_WELCOME_ID, makeReleaseNotesTab, makeUntitledTab, makeWelcomeTab,
+  INITIAL_WELCOME_ID, LINK_LOG_TAB_ID, makeLinkLogTab, makeReleaseNotesTab, makeUntitledTab, makeWelcomeTab,
   RELEASE_NOTES_TAB_ID,
   type FileTab, type MdViewMode,
 } from './lib/tabModel';
+import { renderLogText, subscribeLinkLog } from './lib/linkLog';
 import { LARGE_HISTORY_CHARS } from './lib/tabHistory';
 import { useTheme } from './hooks/useTheme';
 import { useEditorState } from './hooks/useEditorState';
@@ -736,12 +738,25 @@ export default function App() {
   const [remoteTabsOpen, setRemoteTabsOpen] = useState(false);
   const showRemoteTabs = useCallback(() => setRemoteTabsOpen(true), []);
   const closeRemoteTabs = useCallback(() => setRemoteTabsOpen(false), []);
-  /* 顶栏那颗「已连接」按钮点进来的是设置里「设备互联」那一格，不是设置的顶上 */
-  const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
-  const openLinkStatus = useCallback(() => {
-    setSettingsSection('deviceLink');
-    setSettingsOpen(true);
-  }, []);
+  /* 手机端「设备互联」那一屏与「互联日志」那一屏：各只挂一份，
+     手机的整屏入口、桌面浮层里那几颗钮开的都是一份。
+     「已连接」那副样子的顶栏按钮点进来的是前者（以前是设置里那一格，2026-09-28 剥离成整屏） */
+  const [deviceLinkOpen, setDeviceLinkOpen] = useState(false);
+  const showDeviceLink = useCallback(() => setDeviceLinkOpen(true), []);
+  const closeDeviceLink = useCallback(() => setDeviceLinkOpen(false), []);
+  /* 「互联日志」不是一层浮层，是一张只读文本标签页（与更新文档同一类瞬态标签）：
+     这是个文本编辑器，日志就该按文本的样子看 —— 能搜、能折行、能滚回去看那条失败，
+     内容随环实时追加，200 条封顶由环自己管，要拿走就走「另存为」 */
+  const openLinkLog = useCallback(() => {
+    editor.setTabs(prev => (
+      prev.some(tb => tb.id === LINK_LOG_TAB_ID)
+        ? prev
+        : [...prev, makeLinkLogTab(t('link.logTabTitle'), renderLogText(t))]
+    ));
+    editor.setActiveTabId(LINK_LOG_TAB_ID);
+    /* 手机那一屏收掉：日志在编辑器里，盖着它等于让人先关一层才看见 */
+    setDeviceLinkOpen(false);
+  }, [editor.setTabs, editor.setActiveTabId, t]);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [urlImportOpen, setUrlImportOpen] = useState(false);
   const [diffModalOpen, setDiffModalOpen] = useState(false);
@@ -927,7 +942,8 @@ export default function App() {
 
   /* ---- 平台适配（拖拽 / 外部交来的文件 / 链接守卫 / 关闭拦截 / 安卓返回键与安全区 / 浏览器兜底）---- */
   const overlayState = {
-    tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, scanOpen, remoteTabsOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
+    tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, scanOpen,
+    remoteTabsOpen, deviceLinkOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
@@ -944,6 +960,7 @@ export default function App() {
       closeSettings: () => setSettingsOpen(false),
       closeScan: () => setScanOpen(false),
       closeRemoteTabs,
+      closeDeviceLink,
       closeShortcuts: () => setShortcutsOpen(false),
       closeTabMenu: () => setTabMenu(null),
       closeTabSheet: () => setTabSheetOpen(false),
@@ -965,6 +982,48 @@ export default function App() {
 
   /* 手机上链路掉了（息屏被系统掐、Wi-Fi 抖）自己按退避接回来，见 `startLinkKeepAlive` */
   useEffect(() => startLinkKeepAlive(), []);
+
+  /* 互联日志环：状态跃迁、对端推送、命令没过的那几次都记进来，
+     「设备互联」里那行「互联日志」点开的就是这一份（`linkLog.ts`） */
+  useEffect(() => installLinkLogging(), []);
+
+  /* ---- 互联日志那张标签页：环里多一行就把它摊进内容 ----
+     基线（originalContent）跟着一起换：这张标签永远不脏 —— 它没有「未保存的修改」这个概念，
+     关掉不用问、自动保存不碰它、草稿也不给它留一份。
+     依赖只取「有没有这张标签」这一个布尔：内容自己会改，把它放进依赖就成了自激循环。 */
+  const logText = editor.tabs.find(tb => tb.id === LINK_LOG_TAB_ID)?.content ?? null;
+  const logTabOpen = logText !== null;
+  useEffect(() => {
+    if (!logTabOpen) return;
+    const write = () => {
+      const text = renderLogText(t);
+      editor.setTabs(prev => prev.map(tb => (
+        tb.id === LINK_LOG_TAB_ID && tb.content !== text
+          ? { ...tb, content: text, originalContent: text, isDirty: false }
+          : tb
+      )));
+    };
+    write();
+    return subscribeLinkLog(write);
+  }, [logTabOpen, editor.setTabs, t]);
+
+  /* 贴住最新：只有本来就在底部附近才跟着往下滚。往上翻着找那条失败的人，
+     不该被刚来的一条拽回底部 —— 日志这东西，翻回去的时候正是最需要它不动的时候。 */
+  const logScroller = useRef<HTMLElement | null>(null);
+  const logPinned = useRef(true);
+  const bindLogScroller = useCallback((el: HTMLElement | null) => {
+    if (logScroller.current === el) return;
+    logScroller.current = el;
+    if (!el) return;
+    el.addEventListener('scroll', () => {
+      logPinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    }, { passive: true });
+  }, []);
+  useLayoutEffect(() => {
+    const el = logScroller.current;
+    if (!el || !logPinned.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [logText]);
 
   /* 手机上「记住了哪台电脑」只能跟着**状态推送**记：`link_client_pair` 这类命令在握手完成前
      就返回了，那一刻的快照里 `peerKeyId` 还是空的，在返回值上记就等于永远慢一次配对 ——
@@ -1592,7 +1651,7 @@ export default function App() {
           editor.updateTabContent(activeTab.id, v, meta);
         }}
         onSave={file.handleSave}
-        onScroller={(el) => { attachEditorScroller(el); attachJsonEditorScroller(el); }}
+        onScroller={(el) => { attachEditorScroller(el); attachJsonEditorScroller(el); bindLogScroller(activeTab.linkLog ? el : null); }}
         onCursor={setCursorInfo}
         find={findState.open ? findState : undefined}
         onFindClose={closeFind}
@@ -1717,9 +1776,12 @@ export default function App() {
               open={scanOpen}
               onOpenChange={setScanOpen}
               onHandoff={beginHandoff}
-              onStatus={openLinkStatus}
+              onStatus={showDeviceLink}
             />
           ) : undefined}
+          /* 「设备互联」整屏的第二个入口：没连着的时候顶栏那颗是扫一扫（点下去直接开相机，
+             不多一层），这一屏就从更多菜单进；连着时顶栏那颗自己就变成了入口 */
+          onDeviceLink={linkOffline ? showDeviceLink : undefined}
           onInsertTable={() => { if (isMarkdown) previewRef.current?.insertTable(); }}
           onInsertImage={() => { if (isMarkdown) previewRef.current?.openImageModal(); }}
           onSettings={() => setSettingsOpen(true)}
@@ -1815,6 +1877,7 @@ export default function App() {
             onHandoff={beginHandoff}
             onBrowseRemote={openRemoteTree}
             onShowRemoteTabs={showRemoteTabs}
+            onShowLog={openLinkLog}
           />
         )}
 
@@ -2567,7 +2630,14 @@ export default function App() {
               height: `calc(${IS_TOUCH_PRIMARY ? '3rem' : '1.5rem'} + var(--heid-safe-bottom, 0px))`,
               paddingBottom: 'var(--heid-safe-bottom, 0px)',
             }}>
-              <span className="truncate" title={activeTab.path || t('status.unsavedPath')}>{activeTab.path || t('status.unsavedPath')}</span>
+              {/* 日志那张没有路径，但它不是"有一份没存下来"：那是只读的现场，内容跟着连接自己长。
+                  所以这一格说的是它**是什么**（蓝色的「实时」），而不是它缺什么 */}
+              <span
+                className={cn('truncate', activeTab.linkLog && (isDarkMode ? 'text-[#A3B3FF]' : 'text-blue-600'))}
+                title={activeTab.linkLog ? t('link.logLiveTip') : (activeTab.path || t('status.unsavedPath'))}
+              >
+                {activeTab.linkLog ? t('link.logLive') : (activeTab.path || t('status.unsavedPath'))}
+              </span>
               <span className="shrink-0 opacity-50">|</span>
               <span className="shrink-0">{LANGUAGE_LABELS[activeTab.language] || activeTab.language}</span>
               {isLargePreview && (
@@ -2758,7 +2828,7 @@ export default function App() {
         )}
 
         {/* 手机端「电脑上正打开的文件」：唯一一份挂在 App，扫码连上后自动落到这一屏，
-            设置里那颗钮开的也是它。组件自己 portal 到 body（见其文件头） */}
+            「设备互联」那一屏里那颗钮开的也是它。组件自己 portal 到 body（见其文件头） */}
         {remoteTabsOpen && (
           <RemoteTabsSheet
             dark={isDarkMode}
@@ -2768,21 +2838,30 @@ export default function App() {
           />
         )}
 
-        {/* 设置：手机端整页，平板/桌面居中弹窗 */}
+        {/* 手机端「设备互联」整屏：顶栏那颗连着时的状态钮与「更多」菜单里那一行都开它。
+            桌面/平板不开这一屏 —— 那边的一级入口是菜单栏按钮的浮层。
+            里面的「互联日志」那一行进的是编辑器标签页（`openLinkLog`），不另开一层 */}
+        {deviceLinkOpen && (
+          <DeviceLinkPage
+            dark={isDarkMode}
+            onClose={closeDeviceLink}
+            offline={linkOffline}
+            onBrowseRemote={openRemoteTree}
+            onShowRemoteTabs={showRemoteTabs}
+            onShowLog={openLinkLog}
+            onHandoff={beginHandoff}
+            onScan={linkOffline ? () => setScanOpen(true) : undefined}
+          />
+        )}
+
+        {/* 设置：手机端整页，平板/桌面居中弹窗。「设备互联」不在这里了（2026-09-28 剥离成整屏） */}
         {settingsOpen && (
           <SettingsDialog
             isDarkMode={isDarkMode}
             settings={settings}
             onChange={setSettings}
-            /* 收起时把「落到哪一格」一起清掉：下次从齿轮点进来该回到设置顶上，
-               留着它会让下一次打开也滚到设备互联那一格 */
-            onClose={() => { setSettingsOpen(false); setSettingsSection(undefined); }}
+            onClose={() => setSettingsOpen(false)}
             asPage={isPhone}
-            offline={linkOffline}
-            onHandoff={beginHandoff}
-            focusSection={settingsSection}
-            onBrowseRemote={openRemoteTree}
-            onShowRemoteTabs={showRemoteTabs}
           />
         )}
 
@@ -3003,7 +3082,9 @@ export default function App() {
               icon: <AppWindow size={13} />,
               label: t('tabs.moveToNewWindow'),
               action: () => { if (tabMenu?.tabId) void startTransfer(tabMenu.tabId, makeDragId()); },
-              disabled: !tabMenu.tabId || editor.tabs.length <= 1,
+              /* 日志那张不给拖出去：另一个窗口没有这份环，拖过去只是一份不再长的死副本 */
+              disabled: !tabMenu.tabId || editor.tabs.length <= 1
+                || editor.tabs.some(x => x.id === tabMenu.tabId && x.linkLog),
             }] : []),
             { icon: <X size={13} />, label: t('tabs.closeOthers'), action: () => void file.closeOtherTabs(tabMenu.tabId!), disabled: !tabMenu.tabId || editor.tabs.length <= 1 },
             { icon: <Trash2 size={13} />, label: t('tabs.closeAll'), action: () => void file.closeAllTabs(), disabled: editor.tabs.length === 0 },

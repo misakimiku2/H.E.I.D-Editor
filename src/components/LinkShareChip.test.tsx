@@ -70,15 +70,6 @@ describe('LinkShareChip', () => {
       .toContain('link.openSharedFiles3');
   });
 
-  it('测试配对开着时换成警示文案', async () => {
-    status = base({ role: 'server', listening: true, rootDisplay: 'D:\\a', testPair: true });
-    const el = await mount();
-    const chip = el.querySelector('[data-testid="heid-link-chip"]');
-    expect(chip?.textContent).toContain('link.chipTest');
-    expect(chip?.textContent).not.toContain('link.chipSharing');
-    expect(chip?.getAttribute('title')).toContain('link.chipTestTip');
-  });
-
   it('连着设备时把设备名带出来，并在状态推送到达时更新', async () => {
     status = base({ role: 'server', listening: true, rootDisplay: 'D:\\a' });
     const el = await mount();

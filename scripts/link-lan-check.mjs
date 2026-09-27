@@ -10,8 +10,7 @@
  *   node scripts/link-lan-check.mjs status                  链路现状 + 共享根 + 桌面标签
  *   node scripts/link-lan-check.mjs fsprobe [n] [gap]       第 n 次探测：写一次、等多久收到 fs 帧
  *   node scripts/link-lan-check.mjs protocol                阶段 2/3 逐条（读写/冲突/逃逸/超限/标签）
- *   node scripts/link-lan-check.mjs pair 123456             用 6 位短码配对（桌面要点 TOFU）
- *   node scripts/link-lan-check.mjs pairtest                用固定测试短码配对（桌面开着测试模式，无需点允许）
+ *   node scripts/link-lan-check.mjs pair 123456             用 6 位短码配对（配对窗口开着就行）
  *   node scripts/link-lan-check.mjs reconnect <keyId> --host=IP   免扫重连
  *
  * 公共参数：`--file=nested/probe.txt` 探测用的文件（**必须已存在**，命令面没有建文件的能力）、
@@ -303,47 +302,6 @@ async function cmdReconnect(p) {
   log('  15 s 内没连上');
 }
 
-/* ------------------------------------------------------------------ pairtest */
-
-/**
- * 测试专用配对的手机侧一路：用**固定的测试短码**配对，全程没有人点 TOFU。
- * 连上了就说明「自动允许」这条在真 TCP 上成立（`via_test` 记账那半在 link-verify 的 J 段核，
- * 那是桌面侧的列表，手机看不到）。
- *
- * 短码由 `pair::TEST_TICKET` 经 `pair::short_code` 导出。这里重算一遍是为了脚本能自己跑，
- * 但**别把它当权威**：J 段会拿桌面上显示的那个码对一次，两处不一致就说明派生规则漂了。
- */
-const TEST_TICKET = '5eedc0de5eedc0de5eedc0de5eedc0de';
-const CODE_PREFIX = Buffer.from('heid-link-shortcode-v1');
-const shortCode = (secret) => {
-  const d = createHash('sha256').update(Buffer.concat([CODE_PREFIX, Buffer.from(secret)])).digest();
-  return String(d.readUInt32BE(0) % 1_000_000).padStart(6, '0');
-};
-
-async function cmdPairTest(p) {
-  const st = await p.invoke('link_status');
-  const [h, por] = String(st.ok?.peerAddr || '').split(':');
-  const host = flag('host', h);
-  if (!host) throw new Error('status 里没有对端地址，用 --host= 指定');
-  const port = Number(flag('port', por || st.ok?.port || 47123));
-  const code = shortCode(TEST_TICKET);
-  log(`测试短码 ${code} → ${host}:${port}（这条路上没有人点「允许」）`);
-  await p.invoke('link_client_disconnect', {});
-  await sleep(800);
-  const r = await p.invoke('link_client_pair_code', { host, port, code, device: flag('device', 'lan-check-test') });
-  log(r.err ? '发起失败 ' + r.err : '已发起');
-  for (let i = 0; i < 20; i += 1) {
-    await sleep(1000);
-    const s = await p.invoke('link_status');
-    if (s.ok?.connected) {
-      log(`  [${i + 1}s] PASS 自动允许生效：connected=true keyId=${s.ok.peerKeyId} peer=${s.ok.peerDevice || '(名字空)'}`);
-      return;
-    }
-    if (i % 5 === 4) log(`  [${i + 1}s] connected=${s.ok?.connected} err=${s.ok?.lastError}`);
-  }
-  log(`  FAIL 12 位…20 s 内没连上：${JSON.stringify((await p.invoke('link_status')).ok?.lastError)} —— 桌面那侧的测试配对开关是开的吗？`);
-}
-
 /* ------------------------------------------------------------------ pairtiming */
 
 /**
@@ -362,7 +320,7 @@ async function cmdPairTest(p) {
  * 判据按"顺序"而不是"绝对时刻"下：模拟器的页面时钟与本机会差几十小时，跨机比时刻没意义。
  *
  * 用法：`node scripts/link-lan-check.mjs pairtiming <6位短码> --host=IP [--port=47123] [--secs=60] [--nosetup]`
- * 短码只有约 20 bit，桌面开着「测试配对模式」时用的是那张固定哨兵票（见 pairtest）。
+ * 短码只有约 20 bit，所以那条口在桌面上挂着失败限速（`link::GATE_LIMIT`）。
  */
 async function cmdPairTiming(p) {
   const ok = (name, cond, extra = '') => log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? ' — ' + extra : ''}`);
@@ -499,10 +457,10 @@ async function cmdOffline(p) {
 
 const run = {
   status: cmdStatus, fsprobe: cmdFsProbe, protocol: cmdProtocol, pair: cmdPair,
-  pairtest: cmdPairTest, reconnect: cmdReconnect, pairtiming: cmdPairTiming, offline: cmdOffline,
+  reconnect: cmdReconnect, pairtiming: cmdPairTiming, offline: cmdOffline,
 }[cmd];
 if (!run) {
-  log('用法：node scripts/link-lan-check.mjs <status|fsprobe|protocol|pair|pairtest|reconnect|pairtiming|offline[ clear]> [参数]');
+  log('用法：node scripts/link-lan-check.mjs <status|fsprobe|protocol|pair|reconnect|pairtiming|offline[ clear]> [参数]');
   process.exit(2);
 }
 const p = await openPage();

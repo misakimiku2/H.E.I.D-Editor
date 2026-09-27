@@ -20,10 +20,6 @@ describe('linkBadge：桌面（服务端）', () => {
     expect(linkBadge(s({ role: 'server', listening: true, connected: true, peerDevice: 'Pixel' }))).toBe('connected');
   });
 
-  it('测试配对开着时优先报警示档，即使已经连上一台', () => {
-    expect(linkBadge(s({ role: 'server', listening: true, connected: true, testPair: true }))).toBe('pending');
-  });
-
   it('桌面不看离线队列：那是手机侧的事', () => {
     expect(linkBadge(s({ role: 'server', listening: true }), { pending: 4, conflicts: 2 })).toBe('idle');
   });

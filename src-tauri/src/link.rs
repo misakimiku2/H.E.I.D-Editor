@@ -73,6 +73,13 @@ pub const EVENT: &str = "heid-link";
 /// 单单一件事件而不是每种推送各开一个事件名：推送的"有哪些类型"是协议面的事，
 /// 前端按 `typ` 分派一次即可，加一类事件不用改两端的事件名约定。
 pub const EVENT_REMOTE: &str = "heid-link-event";
+/// 两端订阅的**连接现场**事件名（载荷 [`LogEvent`]，进前端的互联日志环）。
+///
+/// 为什么单开一个事件而不是塞进 `heid-link` 状态快照：状态说的是「现在是什么样」，
+/// 一行一个槽位，新的会把旧的冲掉；而一次被拒、一次顶替、一条连接活了 41 秒之后怎么结束的
+/// —— 这些是**一次性发生过的事**，要按时间排着留在历史里才说得通。
+/// 也不需要新增命令：事件走 `core:default` 就能收（见 capabilities）。
+pub const EVENT_LOG: &str = "heid-link-log";
 
 /* ------------------------------------------------------------------ 消息 */
 
@@ -693,10 +700,6 @@ pub struct LinkStatus {
     pub firewall_hint: bool,    /// 共享根之外、因「桌面上正开着」而暴露给手机的**文件**数（阶段 3 的白名单）。
     /// 与 `root_display` 同一条理由：多交出去一分，就得让用户看得见一分。
     pub open_shared: usize,
-    /// 「测试配对模式」开着（v1.5 开工单第 2 条）：不过期、任何设备都能连、来了就自动允许。
-    /// 这是一扇开着的门，所以它必须像总开关那样**在界面上常驻可见**，而不是只活在设置页里；
-    /// 且**不跨重启记忆**（`LinkState::test_pair` 是普通 bool，不写进 link.json）。
-    pub test_pair: bool,
 }
 
 /// `protocol` 必须是本地常量而不是 0：前端拿它自证"我这一端说的是哪版协议"。
@@ -716,7 +719,6 @@ impl Default for LinkStatus {
             peer_key_id: String::new(),
             firewall_hint: false,
             open_shared: 0,
-            test_pair: false,
         }
     }
 }
@@ -728,8 +730,6 @@ pub struct PairInfo {
     pub key_id: String,
     pub name: String,
     pub paired_at: i64,
-    /// 这台是开着测试配对模式时自动放进来的一台 —— 界面上要标出来，用户才知道该撤哪几行。
-    pub via_test: bool,
 }
 
 #[derive(Default)]
@@ -765,10 +765,6 @@ pub struct LinkState {
     /// 握手进行到一半把地板抽掉，两端就各自拿不同的票派生了 —— 表现是「帧解密失败 / 对端已关闭连接」
     /// 这种看不出是谁的问题的串（2026-09-27 他点「刷新配对码」后重配撞上，自动续码把它放大了）。
     pairing_busy: AtomicBool,
-    /// 测试配对模式的开关（见 [`pair::PairingTicket::test`]）。用原子位而不是塞进 `LinkStatus`：
-    /// 读它的是连接线程（每个配对请求一次），写它的是设置里那个开关，两边都不该为了一个 bool 排队。
-    /// **故意不落盘** —— 这扇门不该在没人看着的时候自己开着。
-    test_pair: AtomicBool,
 }
 
 /// 桌面当前在服务的那一条连接。
@@ -1046,6 +1042,23 @@ fn publish(app: &AppHandle, f: impl FnOnce(&mut LinkStatus)) {
 
 fn snapshot(app: &AppHandle) -> LinkStatus {
     app.state::<LinkState>().snapshot()
+}
+
+/// 推给前端互联日志环的一条现场。`key` 是前端的 i18n 文案键，`params` 填进去的是
+/// 地址 / 设备名 / 毫秒 / 稳定码这些**读的人要拿去对质**的东西 —— 票值、短码、LS 一律不进这里。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LogEvent {
+    /// `info` / `warn` / `error`，界面按它上色
+    pub level: &'static str,
+    pub key: String,
+    pub params: serde_json::Value,
+}
+
+/// 发一条连接现场。与 `publish` 一样是"发完就算"：日志不是任何一条路径的前提，
+/// 收不到的那次就当没发生过，绝不能在这里返回错误。
+fn conn_log(app: &AppHandle, level: &'static str, key: &str, params: serde_json::Value) {
+    let _ = app.emit(EVENT_LOG, LogEvent { level, key: key.to_string(), params });
 }
 
 fn mark_error(app: &AppHandle, msg: impl Into<String>) {
@@ -1561,7 +1574,6 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
         .map_err(|e| format!("监听套接字设置失败：{e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let ticket = new_ticket();
-    let armed = app.state::<LinkState>().test_pair.load(Ordering::SeqCst);
     {
         let state = app.state::<LinkState>();
         if let Some(old) = replace_stop(&state, Some(Arc::clone(&stop))) {
@@ -1570,15 +1582,9 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
         // 开一次共享就发一张全新的一次性配对票（2 分钟 / 用后即废），旧的当场作废 ——
         // 这里是重开一扇窗（`new`）而不是往旧窗里续（`rotate`）：关了开关再开，
         // 屏幕上那张旧码就该彻底失效，它已经离开用户视线一段时间了。
-        // 唯独测试配对模式开着时不换：那扇门是靠那张固定的哨兵票开的，
-        // 这里顺手发一张随机票就会把它关成「刚开的时候连得上、重开共享之后再也连不上」。
-        *state.pairing.lock().unwrap_or_else(|p| p.into_inner()) = if armed {
-            pair::PairingWindow::new(pair::PairingTicket::test())
-        } else {
-            pair::PairingWindow::new(pair::PairingTicket::new(ticket.clone()))
-        };
+        *state.pairing.lock().unwrap_or_else(|p| p.into_inner()) =
+            pair::PairingWindow::new(pair::PairingTicket::new(ticket.clone()));
     }
-    let shown = if armed { pair::TEST_TICKET.to_string() } else { ticket };
     publish(&app, move |s| {
         s.role = Role::Server;
         s.listening = true;
@@ -1587,7 +1593,7 @@ fn spawn_server(app: AppHandle, port: u16) -> Result<(), String> {
         s.peer_device.clear();
         s.peer_addr.clear();
         s.last_error.clear();
-        s.ticket = shown;
+        s.ticket = ticket;
     });
 
     let app_thread = app.clone();
@@ -1650,11 +1656,13 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
     let mut framer = Framer::default();
     let state = app.state::<LinkState>();
     let peer_ip = addr.ip();
+    let started = Instant::now();
     // 从这一刻起不许换配对码，直到这条握手有结果（见 [`PairingBusy`]）
     let _busy = PairingBusy::new(&state);
 
     // 在门外就不必握手了：拒一帧就走，连"哪张票"都不参与判断
     if state.gate_closed(peer_ip) {
+        conn_log(&app, "warn", "link.log.gate", serde_json::json!({ "addr": addr.to_string() }));
         refuse_and_close(&mut stream, "slowdown", "这台设备配对失败的次数太多，请等一分钟再试；还不行就在桌面上换一个配对码");
         return;
     }
@@ -1696,7 +1704,11 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
         Ok(hs) => hs,
         Err(f) => {
             // 握手没走通：把原因归成稳定码回一帧 Refused（票不匹配 / 版本 / 未配对）
-            refuse_and_close(&mut stream, refuse_code(&f.reason), &f.reason);
+            let code = refuse_code(&f.reason);
+            conn_log(&app, "error", "link.log.refused", serde_json::json!({
+                "addr": addr.to_string(), "code": code, "reason": f.reason,
+            }));
+            refuse_and_close(&mut stream, code, &f.reason);
             /* 只有对端报上过自己是谁，这次失败才配占用面板「上次失败」那一行。
                一条拨开就断的空连接没有 hello、没有票、没有任何可归因的信息，
                让它写进来就会把"我们自己拒掉的票"冲成"对端已关闭连接"（(a)）。
@@ -1746,17 +1758,6 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
     let key_id = pair::key_id(&hs.ls);
     if hs.mode == Mode::Pair {
         let (tag, _) = hit.into_inner();
-        // 走没走测试通道看命中的那张票，而不是只看模式开关：开着模式再点「换一个码」，
-        // 换上来的是一张普通票，那次配的账就不该打成 via_test。
-        let via_test = state.test_pair.load(Ordering::SeqCst)
-            && state
-                .pairing
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .is_test_tag(&tag);
-        if via_test {
-            eprintln!("[heid-link] 测试配对模式放进了 {}（keyId {key_id}）", hs.peer_device);
-        }
         // 消费票（用后即废）+ 存 LS + 落盘
         {
             let mut g = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
@@ -1770,7 +1771,6 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
                 name: hs.peer_device.clone(),
                 paired_at: now_millis(),
                 peer_fp: String::new(),
-                via_test,
             });
         }
         persist(&state); // 出了 store 锁再落盘：persist 内部会重新锁 store，不可重入
@@ -1783,11 +1783,19 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
         s.peer_key_id = key_id.clone();
         s.last_error.clear();
     });
+    // 从握手完成这一刻起才算"连着"，所以下面那条「断了」要说的是这一段
+    let up_at = Instant::now();
+    conn_log(&app, "info", "link.log.up", serde_json::json!({
+        "device": hs.peer_device, "addr": addr.to_string(), "keyId": key_id,
+        "mode": if hs.mode == Mode::Pair { "pair" } else { "reconnect" },
+        "ms": started.elapsed().as_millis() as u64,
+    }));
     // 认证成功（票/LS 已验证、Pong 已收到）才占位：把上一条顶下去，自己成为当前这条。
     // 放在这里而不是握手之前，是为了让"能不能踢人"这件事由凭证说了算，不是谁先来谁占着。
     let mine = Arc::new(Live { stop: Arc::new(AtomicBool::new(false)), push: Arc::<Push>::default() });
     if let Some(prev) = state.claim_live(&mine) {
         eprintln!("[heid-link] {addr} 连上来，顶掉了之前那条");
+        conn_log(&app, "warn", "link.log.replaced", serde_json::json!({ "addr": addr.to_string() }));
         prev.stop.store(true, Ordering::SeqCst);
     }
     // 挂上推送队列：从这一刻起，窗口上报标签 / 换焦点 / 关窗才有人能通知到对端。
@@ -1796,6 +1804,9 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
     // 从这一刻起才有"谁在看这棵树"这回事：监听随连接而建，随断开而释放
     sync_fs_watch(&app);
     run_pump(stream, session, &app, &stop, Role::Server, Some(&mine));
+    conn_log(&app, "info", "link.log.down", serde_json::json!({
+        "addr": addr.to_string(), "secs": up_at.elapsed().as_secs(),
+    }));
     // 被后来者顶掉的那条线程走到这里时，全局状态已经归新那条了 —— 一律不碰
     if state.release_live(&mine) {
         *state.push.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -1829,9 +1840,14 @@ fn connect_and_pump(
     app: AppHandle,
     stop: Arc<AtomicBool>,
 ) {
+    let target = format!("{host}:{port}");
+    let dialed = Instant::now();
     let mut stream = match dial(&host, port) {
         Ok(s) => s,
         Err(e) => {
+            conn_log(&app, "error", "link.log.dialFail", serde_json::json!({
+                "target": target, "reason": e, "ms": dialed.elapsed().as_millis() as u64,
+            }));
             note_error(&app, None, &stop, e);
             return;
         }
@@ -1859,6 +1875,9 @@ fn connect_and_pump(
     ) {
         Ok(v) => v,
         Err(e) => {
+            conn_log(&app, "error", "link.log.dialFail", serde_json::json!({
+                "target": target, "reason": e, "ms": dialed.elapsed().as_millis() as u64,
+            }));
             /* 「帧解密失败 / 对端已关闭连接」这两句在这条路上几乎只有一个意思：手机拿的码
                已经不是电脑当前那张了。原话留着（真断网也要看得见），但先把能照着做的那句说出来。 */
             note_error(&app, None, &stop, format!("没连上：请在电脑上扫屏幕上现在那张码（{e}）"));
@@ -1876,9 +1895,6 @@ fn connect_and_pump(
                 name: hs.device.clone(),
                 paired_at: now_millis(),
                 peer_fp: fp,
-                // `via_test` 是桌面那侧的记账（哪台设备是走测试通道进来的）；
-                // 手机只有一台桌面，无所谓从哪条路配上的。
-                via_test: false,
             });
         }
         persist(&state); // 出锁再落盘（persist 会重新锁 store）
@@ -1897,6 +1913,12 @@ fn connect_and_pump(
         let state = app.state::<LinkState>();
         *state.conn.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&conn));
     }
+    let up_at = Instant::now();
+    conn_log(&app, "info", "link.log.up", serde_json::json!({
+        "device": hs.device.clone(), "addr": target.clone(), "keyId": peer_key_id.clone(),
+        "mode": if matches!(intent, ClientIntent::Pair { .. }) { "pair" } else { "reconnect" },
+        "ms": dialed.elapsed().as_millis() as u64,
+    }));
     publish(&app, move |s| {
         /* 这里**不**置 `connected`：加密通道是通了，但桌面还没进维持泵（它进泵的第一件事
            就是往这边发一帧 Ping）。在那之前报"已连接"，界面就谎报了一次 —— 每条远程命令都会
@@ -1910,6 +1932,9 @@ fn connect_and_pump(
         s.last_error.clear();
     });
     run_pump(stream, hs.session, &app, &stop, Role::Client, None);
+    conn_log(&app, "info", "link.log.down", serde_json::json!({
+        "addr": target, "secs": up_at.elapsed().as_secs(),
+    }));
     conn.shutdown("连接已结束");
     {
         let state = app.state::<LinkState>();
@@ -2148,7 +2173,7 @@ pub fn link_client_reconnect(
 /* ------------------------------------------------------------ 桌面配对命令 */
 
 /// 把窗里「当前那张」摊成前端要的二维码信息。不换码、不加锁之外的副作用。
-/// 没开窗（没共享 / 刚关掉测试模式）时给 None，由调用方决定是报错还是先换一张。
+/// 没开窗（没共享）时给 None，由调用方决定是报错还是先换一张。
 fn qr_from_current(state: &LinkState, port: u16) -> Option<QrInfo> {
     let (ticket, code) = {
         let g = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
@@ -2162,13 +2187,12 @@ fn qr_from_current(state: &LinkState, port: u16) -> Option<QrInfo> {
     Some(QrInfo { code, uri: payload.to_uri(), host, port, fp, name })
 }
 
-/// 换一张新码进窗（哨兵票模式下换到的还是那张固定的）。返回新票值。
+/// 换一张新码进窗。返回新票值。
 fn rotate_pairing(app: &AppHandle, state: &LinkState) -> String {
-    let test = state.test_pair.load(Ordering::SeqCst);
-    let ticket = if test { pair::TEST_TICKET.to_string() } else { new_ticket() };
+    let ticket = new_ticket();
     {
         let mut g = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
-        g.rotate(if test { pair::PairingTicket::test() } else { pair::PairingTicket::new(ticket.clone()) });
+        g.rotate(pair::PairingTicket::new(ticket.clone()));
     }
     publish(app, |st| st.ticket = ticket.clone());
     ticket
@@ -2184,7 +2208,6 @@ fn rotate_pairing(app: &AppHandle, state: &LinkState) -> String {
 /// 不换不是失败——把屏幕上现在这张原样给它就行，显示的那张仍然是能扫的那张。
 ///
 /// 不清 `last_error`：面板上那行「上次失败」是历史，不该被一次换码抹掉。
-/// 唯独开着测试配对模式时不换：那张哨兵票的价值就在于固定。
 #[tauri::command]
 pub fn link_pair_qr(app: AppHandle) -> Result<QrInfo, String> {
     let state = app.state::<LinkState>();
@@ -2219,38 +2242,6 @@ pub fn link_pair_info(app: AppHandle) -> Result<QrInfo, String> {
     qr_from_current(&state, s.port).ok_or_else(|| "请先打开「共享这台电脑」".to_string())
 }
 
-/// 桌面：开 / 关「测试配对模式」（v1.5 开工单第 2 条：跨机实测时不想每次回电脑前操作）。
-///
-/// 开着时挂的是一张固定的哨兵票 —— 不过期、局域网内任何设备都能配。
-/// 协议面上它只是一张普通票，所以**手机侧一行都没改**，扫码 / 粘贴 / 短码三条入口照常能用。
-///
-/// 三条边界（设计时是照这三条定的，别再放宽）：
-/// - **不跨重启**：`LinkState::test_pair` 不落盘，下次启动是关的（这扇门不该在没人看着时自己开着）；
-/// - **开启态常驻可见**：`LinkStatus.test_pair` 进状态快照，界面在状态栏常驻显示（见前端）；
-/// - **不跳过记账**：这样配进来的那次照样落配对记录、照样显示「谁连着」，并在记录上打 `via_test`，
-///   「已配对设备」里看得到是走这扇门进来的，也照样能撤销。
-#[tauri::command]
-pub fn link_test_pair_set(app: AppHandle, on: bool) -> LinkStatus {
-    let state = app.state::<LinkState>();
-    state.test_pair.store(on, Ordering::SeqCst);
-    {
-        let mut g = state.pairing.lock().unwrap_or_else(|p| p.into_inner());
-        if on {
-            *g = pair::PairingWindow::new(pair::PairingTicket::test());
-        } else {
-            // 关掉即把整扇窗摘掉：留着旧票的话，「设置里已经关了但还能连」比不开还糟
-            g.clear();
-        }
-    }
-    publish(&app, |st| {
-        st.test_pair = on;
-        if on {
-            st.ticket = pair::TEST_TICKET.to_string();
-        }
-    });
-    state.snapshot()
-}
-
 /// 已配对设备列表（桌面多台 / 手机一台，同一结构）。
 #[tauri::command]
 pub fn link_pairings_list(app: AppHandle) -> Vec<PairInfo> {
@@ -2259,7 +2250,7 @@ pub fn link_pairings_list(app: AppHandle) -> Vec<PairInfo> {
     let mut v: Vec<PairInfo> = g
         .devices
         .iter()
-        .map(|d| PairInfo { key_id: d.key_id.clone(), name: d.name.clone(), paired_at: d.paired_at, via_test: d.via_test })
+        .map(|d| PairInfo { key_id: d.key_id.clone(), name: d.name.clone(), paired_at: d.paired_at })
         .collect();
     v.sort_by(|a, b| b.paired_at.cmp(&a.paired_at));
     v
