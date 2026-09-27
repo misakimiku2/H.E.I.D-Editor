@@ -16,22 +16,23 @@ import { isTauri } from './fileIO';
 export const DEFAULT_LINK_PORT = 47123;
 /** 与 Rust `link::EVENT` 同名 */
 export const LINK_EVENT = 'heid-link';
-/** 与 Rust `link::EVENT_PAIR` 同名：桌面收到一个持票设备、等用户确认时推这个 */
-export const LINK_PAIR_EVENT = 'heid-link-pair';
 /** 与 Rust `link::EVENT_REMOTE` 同名：对端主动推的事件（阶段 3 起有 `tabs`） */
 export const LINK_REMOTE_EVENT = 'heid-link-event';
 /** 与 Rust `PROTOCOL_VERSION` 同步；不一致说明两端版本错开，要提示升级 */
 export const LINK_PROTOCOL = 1;
 
+/**
+ * 桌面开着共享时，面板问一句「屏幕上该摆哪张码」的间隔。
+ *
+ * **换不换不由这里判**（那是服务端 `link_pair_info` 的事：一张票挂够 `pair::REFRESH_AFTER`
+ * 才换）。这里只是按时去问，所以开两个面板也不会出现两个定时器互相抢着换码 ——
+ * 那正是「屏幕上摆的这张已经不是当前那张」的来源（2026-09-27 实测）。
+ */
+export const QR_POLL_MS = 15_000;
+
 const PREFS_KEY = 'heid-link-prefs';
 
 export type LinkRole = 'off' | 'server' | 'client';
-
-/** 一条待确认的配对请求（TOFU 弹窗的载荷）。 */
-export interface LinkPairReq {
-  device: string;
-  keyId: string;
-}
 
 /** `link_pair_qr` 的返回：二维码 URI + 6 位短码 + 本机地址（供手填兜底显示）。 */
 export interface QrInfo {
@@ -76,12 +77,6 @@ export interface LinkStatus {
    * 故意不进 `LinkPrefs`：重启之后应当是关的。
    */
   testPair: boolean;
-  /**
-   * 手机侧中档：握手已通过、对端还没发过任何帧。
-   * 桌面要等用户点「允许」（TOFU）才开始服务，在那之前 `connected` 是 false ——
-   * 提前报已连接就是谎报（每条远程命令都会等满 30 s 才失败）。界面这一档叫「等待电脑上确认」。
-   */
-  waitingConfirm: boolean;
 }
 
 export const EMPTY_STATUS: LinkStatus = {
@@ -99,13 +94,13 @@ export const EMPTY_STATUS: LinkStatus = {
   firewallHint: false,
   openShared: 0,
   testPair: false,
-  waitingConfirm: false,
 };
 
 /** Rust 侧 `Refused.code` 的稳定取值；UI 按它出双语标签，原始 reason 作次要信息 */
-export type LinkRefuseCode = 'busy' | 'version' | 'ticket' | 'timeout' | 'protocol' | 'handshake';
+export type LinkRefuseCode =
+  | 'busy' | 'version' | 'ticket' | 'timeout' | 'protocol' | 'handshake' | 'slowdown';
 const REFUSE_CODES: LinkRefuseCode[] = [
-  'busy', 'version', 'ticket', 'timeout', 'protocol', 'handshake',
+  'busy', 'version', 'ticket', 'timeout', 'protocol', 'handshake', 'slowdown',
 ];
 
 export function isRefuseCode(s: string): s is LinkRefuseCode {
@@ -135,7 +130,6 @@ export function normalizeStatus(raw: unknown): LinkStatus {
     firewallHint: o.firewallHint === true,
     openShared: typeof o.openShared === 'number' ? o.openShared : 0,
     testPair: o.testPair === true,
-    waitingConfirm: o.waitingConfirm === true,
   };
 }
 
@@ -204,7 +198,9 @@ export function savePrefs(patch: Partial<LinkPrefs>): LinkPrefs {
  * 所以扫码这条没有输入框可填的路也记得住该连哪儿。
  */
 export function rememberPeer(st: LinkStatus): void {
-  if (!st.peerKeyId) return;
+  // 两个都得有才记：只有 keyId 没有地址 = 一条已经断开的链路留下的半成品，
+  // 记下去下次免扫重连会直接撞「地址不能为空」（Rust `mark_error` 同时清这两个字段）
+  if (!st.peerKeyId || !st.peerAddr) return;
   const m = /^(.*):(\d{1,5})$/.exec(st.peerAddr || '');
   savePrefs({
     keyId: st.peerKeyId,
@@ -306,6 +302,8 @@ export interface TabReport {
   readOnly: boolean;
   line: number;
   col: number;
+  /** 桌面上正看着这一张。手机端连上时先把这一份摊开给用户，其余排进标签条 */
+  active: boolean;
 }
 
 /**
@@ -342,6 +340,7 @@ export function tabReports(
       readOnly: t.readOnly,
       line: on?.line ?? 0,
       col: on?.col ?? 0,
+      active: t.id === activeId,
     };
   });
 }
@@ -371,15 +370,6 @@ export async function disconnectClient(): Promise<LinkStatus> {
 
 /* ------------------------------------------------------------ 阶段 1：配对与重连 */
 
-/** 归一化配对请求（TOFU）。缺字段按空处理，不让弹窗白屏。 */
-export function normalizePairReq(raw: unknown): LinkPairReq {
-  const o = (raw ?? {}) as Partial<Record<keyof LinkPairReq, unknown>>;
-  return {
-    device: typeof o.device === 'string' ? o.device : '',
-    keyId: typeof o.keyId === 'string' && isKeyId(o.keyId) ? o.keyId : '',
-  };
-}
-
 function normPairings(raw: unknown): PairInfo[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((e) => {
@@ -393,20 +383,20 @@ function normPairings(raw: unknown): PairInfo[] {
   });
 }
 
-/** 桌面：开一次配对窗、拿回二维码信息（票每次刷新）。非共享状态会报错，调用方兜住。 */
+/**
+ * 桌面：主动换一张配对码（「换一个码」那颗按钮）。非共享状态会报错，调用方兜住。
+ * 换下去的那张不是当场失效 —— Rust 侧的配对窗还留着它，所以手机上正对着的码
+ * 被换掉那一瞬间，拨过去仍然配得上。正有设备在握手时服务端不会换，只把当前那张原样给回来。
+ */
 export async function pairQr(): Promise<QrInfo | null> {
   if (!isTauri) return null;
   return call<QrInfo>('link_pair_qr');
 }
 
-export async function approvePair(): Promise<void> {
-  if (!isTauri) return;
-  await call('link_pair_approve');
-}
-
-export async function denyPair(): Promise<void> {
-  if (!isTauri) return;
-  await call('link_pair_deny');
+/** 桌面：问一句「屏幕上该摆哪张码」。该换时服务端自己换，这里不需要知道。 */
+export async function pairInfo(): Promise<QrInfo | null> {
+  if (!isTauri) return null;
+  return call<QrInfo>('link_pair_info');
 }
 
 export async function pairingsList(): Promise<PairInfo[]> {
@@ -445,23 +435,6 @@ export async function reconnect(
 ): Promise<LinkStatus> {
   if (!isTauri) return { ...EMPTY_STATUS };
   return normalizeStatus(await call<LinkStatus>('link_client_reconnect', { host, port, keyId, device }));
-}
-
-/** 订阅配对请求（桌面 TOFU）。返回退订函数。 */
-export function subscribePairRequests(cb: (r: LinkPairReq) => void): () => void {
-  if (!isTauri) return () => {};
-  let unlisten: (() => void) | null = null;
-  let cancelled = false;
-  void (async () => {
-    const { listen } = await import('@tauri-apps/api/event');
-    const fn = await listen<unknown>(LINK_PAIR_EVENT, (e) => cb(normalizePairReq(e.payload)));
-    if (cancelled) fn();
-    else unlisten = fn;
-  })().catch(() => {});
-  return () => {
-    cancelled = true;
-    unlisten?.();
-  };
 }
 
 /**
@@ -508,6 +481,95 @@ export function subscribeLinkStatus(cb: (s: LinkStatus) => void): () => void {
     cancelled = true;
     unlisten?.();
   };
+}
+
+/** 用户这一趟是不是**主动断开**过：那是他的决定，自动接回来不该把它覆盖掉。 */
+let userClosedLink = false;
+export function markLinkUserClosed(on: boolean): void {
+  userClosedLink = on;
+}
+
+/**
+ * 掉线之后接回来的节奏：头几次很快（Wi-Fi 抖一下、桌面刚收到 RST 就该立刻接得上），
+ * 之后退到一分钟一轮，别在电脑真关机了的时候空转。连上即归零。
+ *
+ * 为什么第一次只要 2 秒：桌面发现上一条死了有两个途径 —— 收到 RST（息屏就是这种，秒级）
+ * 或心跳超时（15 s × 2）。前者根本不需要等，后者由后面几档兜住。
+ */
+const LINK_RETRY_MS = [2_000, 5_000, 10_000, 30_000, 60_000];
+
+/**
+ * 顶栏那颗图标转圈转到哪儿为止：整套退避节奏跑完（2+5+10+30+60 ≈ 一分四十七秒）就不转了，
+ * 回到「扫一扫」。**图标变回去不等于放弃重连** —— 后台仍按最后一档 60 秒一直试下去，
+ * 只是不再让界面摆着一个"马上就有结果"的转圈骗人（他 2026-09-27 定的这一档）。
+ */
+export const LINK_REDIAL_SPINS = LINK_RETRY_MS.length;
+
+let redialSnap: { spinning: boolean } = { spinning: false };
+const redialSubs = new Set<() => void>();
+
+/** `useSyncExternalStore` 的取快照：只在真变了时换那个对象，否则每次渲染都新对象它会反复重读 */
+export function linkRedialSnapshot(): { spinning: boolean } {
+  return redialSnap;
+}
+
+export function subscribeLinkRedial(cb: () => void): () => void {
+  redialSubs.add(cb);
+  return () => { redialSubs.delete(cb); };
+}
+
+function setRedial(spinning: boolean): void {
+  if (redialSnap.spinning === spinning) return;
+  redialSnap = { spinning };
+  for (const cb of redialSubs) cb();
+}
+
+/**
+ * 手机上"链路掉了就自己接回来"。
+ *
+ * 为什么需要：安卓息屏会挂起 Wi-Fi 栈，手机这条 TCP 客户端连接被系统直接销毁（2026-09-27 实测：
+ * 按电源键息屏，桌面十几秒后收到 RST）。这条链路**不做后台常驻**（项目「轻量」那道门槛），
+ * 亮屏时也等不到可靠的 `visibilitychange`（WebView 里实测不触发），所以触发点用"掉线"本身：
+ * 状态推送说没连着，就按上面的节奏重试；连上了立刻停表。
+ *
+ * 为什么要退避而不是立刻重拨：桌面那边可能还没发现上一条连接已经死了（心跳 15 s × 2 次），
+ * 那段时间它谁都不接（同时只服务一台，回 `busy`）。
+ *
+ * 返回注销函数（给 App 的 effect 用）。
+ */
+export function startLinkKeepAlive(): () => void {
+  if (!isTauri || !IS_ANDROID_APP) return () => {};
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let fails = 0;
+  let dead = false;
+  const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  const arm = () => {
+    // 用户点过「断开」就别再排这一枪：排了会先亮一下"正在接回"的转圈，说的却是他刚做的反方向决定
+    if (dead || timer || userClosedLink) return;
+    const wait = LINK_RETRY_MS[Math.min(fails, LINK_RETRY_MS.length - 1)];
+    setRedial(fails < LINK_REDIAL_SPINS);
+    timer = setTimeout(() => {
+      timer = null;
+      const p = loadPrefs();
+      if (dead || userClosedLink || !p.host || !p.keyId) { setRedial(false); return; }
+      fails += 1;
+      setRedial(fails < LINK_REDIAL_SPINS);
+      void reconnect(p.host, p.port, p.keyId, deviceName()).catch(() => null);
+      arm();
+    }, wait);
+  };
+  const off = subscribeLinkStatus((s) => {
+    if (s.connected) { fails = 0; stop(); setRedial(false); return; }
+    /* 有地址却没连着 = 那一次拨号还在路上（Rust 在拨号那一刻写 `peer_addr`，失败或断开才清）。
+       这时候再补一枪就是自己跟自己抢：两条连接几乎同时到桌面，桌面侧旧那条的读循环会撞上
+       新那条的密文，报出来的是一句指向加密的「帧解密失败」（2026-09-27 他手机上"扫完反而连不上"
+       就是这么来的——自动重连与他手动扫撞进了同一秒）。等这一次有结果再说。 */
+    if (s.peerAddr) { stop(); return; }
+    // role 停在 client = 配过对、现在没连着；桌面端（server）与"没配过对"都不该自己拨号
+    if (s.role === 'client') arm();
+    else { stop(); setRedial(false); }
+  });
+  return () => { dead = true; off(); stop(); setRedial(false); };
 }
 
 /**

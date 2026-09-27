@@ -368,3 +368,44 @@ fn 标签列表如实标出能不能打开() {
     assert_eq!(v[4]["reason"], "missing");
     assert_eq!(v[4]["rel"], "");
 }
+
+/// 桌面上「正看着哪一张」是手机端连上那一刻的落地依据，它得随 `tabs` 一起出去。
+/// 判据是**恰有一张**：两张都真就等于手机不知道该先摊开哪一份。
+#[test]
+fn 标签列表里正看着的那一张只有一张() {
+    let t = Temp::new("fsrv-tabs-active");
+    let inside = t.base.join("shared/readme.md");
+    std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
+    std::fs::write(&inside, "x").unwrap();
+    let mut b = Board::default();
+    b.set_root("main", Some(t.root()));
+    let mut on = tab(inside.to_str(), "readme.md", false);
+    on.active = true;
+    b.set_tabs("main", vec![tab(None, "未命名", true), on, tab(Some("Z:\\没了.md"), "没了.md", false)]);
+    let v: Value = serde_json::from_str(&call(&b.scope(), "tabs", "{}").expect("tabs 不该失败")).unwrap();
+    let flagged: Vec<usize> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x["active"] == true)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(flagged, vec![1], "只有桌面上那一张带 active：{flagged:?}");
+    assert_eq!(v[0]["active"], false, "没标的行要显式给 false，别整个字段不见了");
+}
+
+/// 手机连上时问一声「桌面上那棵树在不在」，好决定是把文件夹树换成电脑的还是保留自己那棵。
+/// 只要一个布尔：不去试列一次根目录撞 `noroot` 反推，那条路要把整层目录搬过一遍局域网，
+/// 而共享根可能就是 `node_modules`。
+#[test]
+fn 问一声桌面上有没有共享根() {
+    let t = Temp::new("fsrv-scope");
+    let yes: Value =
+        serde_json::from_str(&call(&scope_of(&t.root()), "scope", "{}").expect("有根时该成功")).unwrap();
+    assert_eq!(yes["hasRoot"], true);
+    // 桌面没开文件树：白名单可能有一串标签，但树那一侧没有起点
+    let no: Value = serde_json::from_str(&call(&Board::default().scope(), "scope", "{}").expect("没根也不是错误"))
+        .unwrap();
+    assert_eq!(no["hasRoot"], false);
+}

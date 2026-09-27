@@ -1,5 +1,6 @@
 import { pickLister } from '../lib/remoteTree';
 import { isRemotePath, parseRemotePath } from '../lib/remote';
+import { subscribeLinkStatus } from '../lib/link';
 import { dirTouched, mountPointTouched, subscribeFileChanges } from '../lib/remoteChanges';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -12,7 +13,7 @@ import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import {
   getDirLister, makeRoot, toggleDir, withChildren, withError, withRefreshedChildren,
-  loadedDirPaths,
+  loadedDirPaths, treeHasError,
   joinPath, parentPathOf, findNode, isValidEntryName, uniqueEntryName, relativePathUnderRoot,
   isImagePath, isSvgPath,
   loadTreeSidebarWidth, saveTreeSidebarWidth, clampTreeSidebarWidth, treeSidebarBounds,
@@ -633,6 +634,21 @@ export function FileTreeSidebar({
       onRootChanged: () => setTree(null),
     });
   }, [open, rootPath, refreshTree]);
+
+  /* 冷启动时树先于链路去列那台电脑的根（根是上次记下来的远程根），于是树上留下一句
+     「手机上还没有连着桌面」—— 那说的是两秒钟前，不是现在。链路接回来时把这一屏重列一次，
+     否则用户看到的是一棵坏掉的树，而他得自己想到去点刷新。
+     只在树确实带着错误时动手：不然一次普通的掉线重连会把他展开的那些层全收起来。 */
+  useEffect(() => {
+    if (!open || !isRemotePath(rootPath)) return;
+    let up = false;
+    return subscribeLinkStatus((s) => {
+      const now = s.connected === true;
+      const was = up;
+      up = now;
+      if (now && !was && treeHasError(treeRef.current)) setTree(null);
+    });
+  }, [open, rootPath]);
 
   const handleRefresh = useCallback(() => {
     void refreshTree();

@@ -79,6 +79,14 @@ pub struct PathParams {
     pub bom: bool,
 }
 
+/// `scope` 的返回：桌面上那棵树此刻在不在。手机端连上时按它决定
+/// 「把手机的文件夹树换成电脑的」还是「保留手机自己那棵」。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeResult {
+    has_root: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatResult {
@@ -148,6 +156,11 @@ pub fn handle(scope: &Scope, method: &str, params: &str) -> Handled {
         // 桌面正打开着哪些标签：无参，内容已由看板算好（能不能打开、为什么不能都在里面）
         "tabs" => serde_json::to_string(&scope.tabs)
             .map_err(|e| err("io", format!("标签列表序列化失败：{e}"))),
+        // 桌面上那棵树在不在：无参，只回一个布尔。手机端连上时问一次，
+        // 好知道该把文件夹树换成电脑的还是保留手机自己那棵 ——
+        // 不去试 `list ""` 撞 `noroot` 反推，是因为那条路要把整层目录搬过来一遍。
+        "scope" => serde_json::to_string(&ScopeResult { has_root: scope.root.is_some() })
+            .map_err(|e| err("io", format!("共享范围序列化失败：{e}"))),
         other => Err(err("unknown", format!("桌面不支持的命令 {other}"))),
     }
 }

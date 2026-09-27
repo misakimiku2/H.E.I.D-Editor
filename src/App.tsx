@@ -40,7 +40,7 @@ import { useRemoteFileChanges } from './hooks/useRemoteFileChanges';
 import { useOfflineSync } from './hooks/useOfflineSync';
 import { isRemotePath } from './lib/remote';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY, displayNameFromPath, dirNameOf } from './lib/platform';
-import { autoReconnectFromPrefs, autoStartFromPrefs } from './lib/link';
+import { autoReconnectFromPrefs, autoStartFromPrefs, rememberPeer, startLinkKeepAlive, subscribeLinkStatus } from './lib/link';
 import { LANGUAGE_LABELS, detectLanguageFromPath } from './lib/codemirror';
 import {
   EOL_LABELS, applyLineEnding, normalizeToLf, type LineEnding,
@@ -56,6 +56,7 @@ import { I18nProvider, rt, setRuntimeLang } from './lib/i18nContext';
 import { deleteDraft, draftKeyForTab } from './lib/drafts';
 import { SettingsDialog } from './components/SettingsDialog';
 import { DeviceLinkMenuButton, ScanLinkEntry } from './components/DeviceLinkPanel';
+import { RemoteTabsSheet } from './components/RemoteTabsSheet';
 import type { LinkOfflineInfo } from './components/DeviceLinkSection';
 import { UrlImportModal } from './components/UrlImportModal';
 import { FileTreeSidebar, type TreeSyncMark } from './components/FileTreeSidebar';
@@ -65,6 +66,7 @@ import type { UrlImportResult } from './lib/urlImport';
 import { ShortcutHelpDialog } from './components/ShortcutHelpDialog';
 import { useMediaQuery } from './hooks/useMediaQuery';
 import { useLastPointer } from './hooks/useLastPointer';
+import { useLinkHandoff } from './hooks/useLinkHandoff';
 import { TabBar } from './components/TabBar';
 import { useWindowBootstrap } from './hooks/useWindowBootstrap';
 import { applyMove } from './lib/tabDragCore';
@@ -729,6 +731,17 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /* 手机顶栏那颗「扫一扫」点开的相机层（桌面/平板那颗按钮自己管自己的浮层） */
   const [scanOpen, setScanOpen] = useState(false);
+  /* 「电脑上正打开的文件」那一屏：全 App 只挂一份，扫码连上后的落地页与设置里那颗钮都开它。
+     开合的两个回调就摆在这，`usePlatformIntegration` 的返回键链要按名字引它们 */
+  const [remoteTabsOpen, setRemoteTabsOpen] = useState(false);
+  const showRemoteTabs = useCallback(() => setRemoteTabsOpen(true), []);
+  const closeRemoteTabs = useCallback(() => setRemoteTabsOpen(false), []);
+  /* 顶栏那颗「已连接」按钮点进来的是设置里「设备互联」那一格，不是设置的顶上 */
+  const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
+  const openLinkStatus = useCallback(() => {
+    setSettingsSection('deviceLink');
+    setSettingsOpen(true);
+  }, []);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [urlImportOpen, setUrlImportOpen] = useState(false);
   const [diffModalOpen, setDiffModalOpen] = useState(false);
@@ -914,7 +927,7 @@ export default function App() {
 
   /* ---- 平台适配（拖拽 / 外部交来的文件 / 链接守卫 / 关闭拦截 / 安卓返回键与安全区 / 浏览器兜底）---- */
   const overlayState = {
-    tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, scanOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
+    tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, scanOpen, remoteTabsOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
@@ -930,6 +943,7 @@ export default function App() {
       closeFind,
       closeSettings: () => setSettingsOpen(false),
       closeScan: () => setScanOpen(false),
+      closeRemoteTabs,
       closeShortcuts: () => setShortcutsOpen(false),
       closeTabMenu: () => setTabMenu(null),
       closeTabSheet: () => setTabSheetOpen(false),
@@ -948,6 +962,41 @@ export default function App() {
     void autoStartFromPrefs();
     void autoReconnectFromPrefs();
   }, [hydrated, isMain]);
+
+  /* 手机上链路掉了（息屏被系统掐、Wi-Fi 抖）自己按退避接回来，见 `startLinkKeepAlive` */
+  useEffect(() => startLinkKeepAlive(), []);
+
+  /* 手机上「记住了哪台电脑」只能跟着**状态推送**记：`link_client_pair` 这类命令在握手完成前
+     就返回了，那一刻的快照里 `peerKeyId` 还是空的，在返回值上记就等于永远慢一次配对 ——
+     下次启动的免扫重连会拿一个桌面已经不认的 keyId 去撞（报「未配对」），而这条注定失败的旧
+     连接又会和用户紧接着扫的这一次撞在一起（2026-09-27 他手机上「对端已关闭连接」就是这么来的）。
+     订阅放这一处，扫码 / 粘贴 / 短码 / 免扫重连四条路都覆盖到。 */
+  useEffect(() => {
+    if (!IS_ANDROID_APP || !isTauri) return;
+    return subscribeLinkStatus((s) => rememberPeer(s));
+  }, []);
+
+  /* ---- 连上那台电脑之后的「交接」（2026-09-27 他点名的三条）----
+     桌面上正看着的那一份摊到手机前台、其余桌面标签排进标签条、桌面那棵文件夹树换掉手机这棵。
+     四个「我主动要连」的入口（扫一扫 / 粘贴配对码 / 短码 / 免扫重连）都只立一个意图，
+     做成哪几件事由那条状态订阅判 —— 握手还在 Rust 的连接线程里跑，命令返回那一刻没结果。
+     掉线自动接回来**不走**这里：那是系统在后台补链路，不该顺手重读磁盘盖掉用户没保存的改动。 */
+  const beginHandoff = useLinkHandoff({
+    enabled: IS_ANDROID_APP && isTauri,
+    hasTab: (p) => editor.tabs.some((t) => t.path === p),
+    /* 交接带进来的那些不进「最近打开」：身份键里的 keyId 每重新配对一次就换，
+       一排点了打不开的死条目留在手机上不划算（见 openPathIntoTab 的 recent 参数） */
+    openRemote: async (p, activate) => { await file.openPathIntoTab(p, undefined, { activate, recent: false }); },
+    /* 电脑上正看着那一份手机里已经开着（冷启动刚从会话快照恢复回来就是这形状）：
+       只把它切到前台。重读磁盘会慢一次，而手机上那份要是正改着，就被盖没了 */
+    reveal: (p) => { const t = editor.tabs.find((x) => x.path === p); if (t) editor.setActiveTabId(t.id); },
+    /* 只换根，抽屉开合不动：扫完码第一眼要看见的是那一份文档，不是树 */
+    adoptRoot: (root) => setTreeRootPath(root),
+    /* 一份都接不过来（桌面没开标签，或开的都还脏着）→ 落回那一屏，
+       它本来就是为「这一份为什么接管不了」写的 */
+    onNothing: showRemoteTabs,
+    onFailed: (msg) => appAlert(msg),
+  });
 
   /* ---- 分屏同步滚动 ---- */
   const { attachEditorScroller, attachPreviewScroller } = useSplitScroll();
@@ -1657,13 +1706,18 @@ export default function App() {
           onSaveAs={file.handleSaveAs}
           onImportUrl={isTauri ? () => setUrlImportOpen(true) : undefined}
           onOpenDiff={() => setDiffModalOpen(true)}
-          /* 手机顶栏的互联入口：直接就是「扫一扫」，点开是相机，不再多一层抽屉 */
+          /* 手机顶栏的互联入口：没连着时是「扫一扫」（点下去直接开相机），
+             连着时换成状态按钮（点下去是设置里那一格：断开 / 浏览那台电脑的文件）。
+             扫成功的去向不再是「电脑上正打开的文件」那一屏，而是交接：
+             桌面上正看着的那一份直接摊开，其余桌面标签排进标签条（见 beginHandoff） */
           linkSlot={linkOffline ? (
             <ScanLinkEntry
               dark={isDarkMode}
               offline={linkOffline}
               open={scanOpen}
               onOpenChange={setScanOpen}
+              onHandoff={beginHandoff}
+              onStatus={openLinkStatus}
             />
           ) : undefined}
           onInsertTable={() => { if (isMarkdown) previewRef.current?.insertTable(); }}
@@ -1750,13 +1804,17 @@ export default function App() {
         </button>
 
         {/* 设备互联一级入口（v1.5）：内容仍是设置里那一整块，点开是贴着按钮的浮层。
-            状态与状态栏那条「手机可访问」标记读同一份 link_status */}
+            状态与状态栏那条「手机可访问」标记读同一份 link_status。
+            安卓平板宽度下走的也是这颗（`IS_ANDROID_APP` 才是客户端那半栏的判据，
+            不是窗口宽度）—— 所以「电脑上正打开的文件」的回调必须一起传，
+            2026-09-26 在 1280 模拟器壳上就是这么抓到漏接的 */}
         {isTauri && (
           <DeviceLinkMenuButton
             dark={isDarkMode}
             offline={linkOffline}
+            onHandoff={beginHandoff}
             onBrowseRemote={openRemoteTree}
-            onOpenRemoteFile={openRemoteFile}
+            onShowRemoteTabs={showRemoteTabs}
           />
         )}
 
@@ -2699,17 +2757,32 @@ export default function App() {
           />
         )}
 
+        {/* 手机端「电脑上正打开的文件」：唯一一份挂在 App，扫码连上后自动落到这一屏，
+            设置里那颗钮开的也是它。组件自己 portal 到 body（见其文件头） */}
+        {remoteTabsOpen && (
+          <RemoteTabsSheet
+            dark={isDarkMode}
+            onClose={closeRemoteTabs}
+            onOpen={openRemoteFile}
+            onBrowse={openRemoteTree}
+          />
+        )}
+
         {/* 设置：手机端整页，平板/桌面居中弹窗 */}
         {settingsOpen && (
           <SettingsDialog
             isDarkMode={isDarkMode}
             settings={settings}
             onChange={setSettings}
-            onClose={() => setSettingsOpen(false)}
+            /* 收起时把「落到哪一格」一起清掉：下次从齿轮点进来该回到设置顶上，
+               留着它会让下一次打开也滚到设备互联那一格 */
+            onClose={() => { setSettingsOpen(false); setSettingsSection(undefined); }}
             asPage={isPhone}
             offline={linkOffline}
+            onHandoff={beginHandoff}
+            focusSection={settingsSection}
             onBrowseRemote={openRemoteTree}
-            onOpenRemoteFile={openRemoteFile}
+            onShowRemoteTabs={showRemoteTabs}
           />
         )}
 

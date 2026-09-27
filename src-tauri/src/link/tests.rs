@@ -995,3 +995,72 @@ fn 链路级失败以稳定码回给前端() {
     // 改名必须两边一起改，所以这里先把字面钉住，而不是只比常量自己。
     assert_eq!((CODE_NOLINK, CODE_DROPPED, CODE_TIMEOUT), ("nolink", "dropped", "timeout"));
 }
+
+/* -------------------------------------------- 配对失败限速（撤掉 TOFU 之后的那道墙） */
+
+/// 撤掉桌面确认之后，短码那趟（约 20 bit）在局域网里是可以试的：这条限速是唯一的墙。
+/// 阈值两侧的语义都必须对 —— 卡在阈值里面真手机会被误拒，卡在外面等于没有墙。
+#[test]
+fn 同一个来源失败到阈值才关进冷却_成功即清零() {
+    let ip: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+    let state = LinkState::default();
+    assert!(!state.gate_closed(ip));
+    for _ in 0..GATE_LIMIT - 1 {
+        state.gate_fail(ip);
+    }
+    state.gate_fail(ip);
+    assert!(state.gate_closed(ip), "攒到 {GATE_LIMIT} 次就该拒在门外，不必再走一遍握手");
+
+    // 认出来了：账要清掉，否则下次真手机被上一次抖动连坐
+    let other: std::net::IpAddr = "192.168.1.21".parse().unwrap();
+    state.gate_fail(other);
+    state.gate_clear(other);
+    assert!(!state.gate_closed(other));
+    assert!(state.gate_closed(ip), "一个来源的账不该影响另一个来源");
+}
+
+/* ---------------------------------- 谁还有资格写全局状态（顶掉旧连接之后剩下的那条尾巴） */
+
+fn live() -> Arc<Live> {
+    Arc::new(Live { stop: Arc::new(AtomicBool::new(false)), push: Arc::<Push>::default() })
+}
+
+/// 一条连接被后来者顶掉之后，它的泵还会转最后一圈，而那一圈里它多半会读到自己 socket 的死讯。
+/// 那些失败说的是**上一条**连接：写进全局快照就是把刚建好的新那条抹成"没连着"，
+/// 并在面板上留下一句指向加密的「帧解密失败」（2026-09-27 他手机上"扫完反而连不上"的形状）。
+#[test]
+fn 被顶掉的那条连接不能再写全局状态() {
+    let state = LinkState::default();
+    let dialing = AtomicBool::new(false);
+    // 客户端没有 live 槽，看自己那枚停止位：正在拨的那一次才算数
+    assert!(state.may_write_status(None, &dialing), "这一次尝试就是当前的");
+    dialing.store(true, Ordering::SeqCst);
+    assert!(!state.may_write_status(None, &dialing), "被换下来之后，它说的失败属于上一次尝试");
+
+    // 服务端按 live 槽判
+    let dialing = AtomicBool::new(false);
+    let a = live();
+    assert!(state.claim_live(&a).is_none(), "第一条没有可顶的上一条");
+    assert!(state.may_write_status(Some(&a), &dialing));
+    let b = live();
+    let prev = state.claim_live(&b).expect("新一条该把旧的顶下去");
+    assert!(Arc::ptr_eq(&prev, &a));
+    assert!(!state.may_write_status(Some(&a), &dialing), "被顶掉的那条再说什么都晚了");
+    assert!(state.may_write_status(Some(&b), &dialing), "当前这条照常能写");
+    // 收尾走的是同一条判据：旧线程不许清新一条的全局状态
+    assert!(!state.release_live(&a));
+    assert!(state.release_live(&b));
+}
+
+/// 「帧解密失败」这句原话只说明两边算出的密钥不一样，谁都不知道自己做错了什么。
+/// 桌面上这一趟它几乎只有一个成因，所以要换成照着能做的那句；其余原因一个字不改地留着
+/// （真被截断时线索不能丢）。
+#[test]
+fn 握手失败要说得让人知道下一步做什么() {
+    let hinted = handshake_hint("帧解密失败：配对票不匹配，或链路已被截断");
+    assert!(hinted.starts_with("没连上："), "{hinted}");
+    assert!(hinted.contains("重扫屏幕上现在这张码"), "{hinted}");
+    assert!(hinted.contains("帧解密失败"), "原话要留在括号里：{hinted}");
+    // 别的失败本来就说的是人话，别在这儿被改写成第二套说法
+    assert_eq!(handshake_hint("这个配对码刚被换掉，请扫桌面上当前那张"), "这个配对码刚被换掉，请扫桌面上当前那张");
+}

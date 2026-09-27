@@ -153,6 +153,14 @@ export function withError(node: TreeNode, dirPath: string, message: string): Tre
   return updateNode(node, dirPath, n => ({ ...n, error: message, children: n.children ?? null }));
 }
 
+/** 树里是否还挂着失败的节点。远程根上那句「手机上还没有连着桌面」就属于这一类：
+    它是一次时机问题（树先于链路去列目录），链路接回来之后该重列而不是留着让它当结论。 */
+export function treeHasError(node: TreeNode | null): boolean {
+  if (!node) return false;
+  if (node.error) return true;
+  return (node.children ?? []).some(treeHasError);
+}
+
 /** 收集已加载过 children 的目录路径（含根），父先子后：刷新按此序重列后同批合并 */
 export function loadedDirPaths(node: TreeNode): string[] {
   const out: string[] = [];

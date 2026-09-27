@@ -230,6 +230,18 @@ fn 只在可见变化时判定为有变化() {
     moved.col = 7;
     assert!(!b.set_tabs("main", vec![moved]), "只有光标变了不该推");
 
+    // 换的只是「正看着哪一张」：要推。手机上连上那一刻先把哪份摊开给用户，看的正是这一项，
+    // 用户在桌面上点了一下标签而这边还拿着旧的那一张，接过来的就是错的文件。
+    let mut looked = file(p.to_str().unwrap());
+    looked.line = 42;
+    looked.col = 7;
+    looked.active = true;
+    assert!(b.set_tabs("main", vec![looked]), "正看着哪一张变了要推");
+    let mut same = file(p.to_str().unwrap());
+    same.line = 8;
+    same.active = true;
+    assert!(!b.set_tabs("main", vec![same]), "同一张上继续挪光标不该再推");
+
     // 但脏标记、标题、开关标签都要推
     let mut dirty = file(p.to_str().unwrap());
     dirty.dirty = true;
@@ -329,6 +341,39 @@ fn 根内标签以斜杠分隔的相对路径回传() {
     assert_eq!(rel_from_root(&root, &root).as_deref(), Some(""));
     // 根外没有相对路径可给（走白名单引用），返回 None 由调用方决定怎么标
     assert_eq!(rel_from_root(&root, &canon(t.base.join("outside/secret.txt"))), None);
+}
+
+/// 桌面上「正看着哪一张」要原样传到手机上那份列表里：手机连上那一刻先把哪一份摊开
+/// 给用户、其余排进标签条，全靠这一项。接管不了的行也带着它 —— 那些行要落到
+/// 「电脑上正打开的文件」那一屏说清为什么不能接管，说清之后仍要说得出桌面当时看着的是它。
+#[test]
+fn 标签列表带上桌面上正看着的那一张() {
+    let t = Temp::new("board-active");
+    let a = make(&t.base.join("open/a.md"), b"a");
+    let b_ = make(&t.base.join("open/b.md"), b"b");
+    let mut one = file(a.to_str().unwrap());
+    one.active = true;
+    let mut two = file(b_.to_str().unwrap());
+    two.title = "b.md".to_string();
+    two.dirty = true;
+    two.active = true;
+    let mut b = Board::default();
+    b.set_root("main", Some(canon(&t.base.join("open"))));
+    b.set_tabs("main", vec![one, {
+        let mut clean = file(b_.to_str().unwrap());
+        clean.title = "b.md".to_string();
+        clean
+    }]);
+    let views = b.scope().tabs;
+    assert!(views[0].active, "第一张是桌面上正看着的");
+    assert!(!views[1].active, "没标的那一张不该被认成正看着");
+
+    // 脏到接管不了的那一张也带着它（rel 空、reason 有，但「桌面看着的是它」这件事仍然成立）
+    b.set_tabs("main", vec![file(a.to_str().unwrap()), two]);
+    let views = b.scope().tabs;
+    assert_eq!(views[1].rel, "", "脏标签不给引用");
+    assert_eq!(views[1].reason, "dirty");
+    assert!(views[1].active);
 }
 
 /// `Scope::default()` 意味着「什么都没暴露」：根为 None、白名单为空，

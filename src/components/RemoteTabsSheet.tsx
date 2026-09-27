@@ -6,20 +6,20 @@
  * 原因不能藏在 tooltip 里。**脏标签不接管是产品硬规定**（§2 决策 5）：两端永远只有一份
  * 「正在改的内容」，手机要接手必须先在电脑上落盘。
  *
- * 挂载（App 侧的活，本组件不碰 App.tsx）：`DeviceLinkSection` 手机那一半在已连接时给一个
- * 入口并渲染本页；`onOpen` 走 App → SettingsDialog → DeviceLinkSection 的 `onOpenRemoteFile`
- * （与 `onBrowseRemote` 同一条道），App 把它接到自己那条「按路径打开标签」的入口即可
- * ——阶段 2 已让 `hide-remote://` 走通读写，App 侧不必再区分远程与否。
- * 安卓系统返回键要先把本页收掉而不是连带关掉设置页，得把它记进
+ * 挂载（App 侧的活，本组件不碰 App.tsx）：App 挂**唯一一份**，两个入口掀开它 ——
+ * 手机扫完码 / 粘完配对码 / 点免扫重连之后自动落地到这一屏（那是他点名要的「连上就该看见那边的东西」），
+ * 以及「设置 → 设备互联」里那颗同名按钮。`onOpen` 走 App 那条「按路径打开标签」的入口
+ * （阶段 2 已让 `hide-remote://` 走通读写，App 侧不必再区分远程与否）。
+ * 安卓系统返回键要先把本页收掉而不是连带关掉底下的界面，得把它记进
  * `usePlatformIntegration` 的 overlay 栈 —— 那也在 App 侧。
  *
- * **必须 portal 到 body**：本页从设置弹窗里打开，而弹窗带 `backdrop-blur`，
+ * **必须 portal 到 body**：本页可能从设置弹窗里掀开，而弹窗带 `backdrop-blur`，
  * 它会成为 `position: fixed` 的包含块，不 portal 出去在平板上就只占弹窗那一格
  * （与 `QrScanner` 同一条坑）。背景一律实底不透明，半透明会把底下的设置弹窗透出来。
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, ChevronRight, Files, Loader2, RefreshCw, Unlink, X } from 'lucide-react';
+import { ArrowLeft, ChevronRight, Files, FolderTree, Loader2, RefreshCw, Unlink, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import type { MessageKey } from '../lib/i18n';
@@ -37,6 +37,8 @@ interface RemoteTabsSheetProps {
    * 即 `hide-remote://<deviceId>/<相对路径>` 身份键。
    */
   onOpen: (path: string) => void;
+  /** 从这一屏跳到「这台电脑共享出来的那棵树」：给的是远程根（`<deviceId>/`），App 侧开抽屉 */
+  onBrowse?: (rootPath: string) => void;
 }
 
 /** 桌面 `reason` → 文案码；意外的第四种取值走兜底句，别在界面上什么都不说 */
@@ -55,7 +57,7 @@ const MD_KEYS: Record<string, MessageKey> = {
 
 type Phase = 'loading' | 'ready' | 'failed';
 
-export function RemoteTabsSheet({ dark, onClose, onOpen }: RemoteTabsSheetProps) {
+export function RemoteTabsSheet({ dark, onClose, onOpen, onBrowse }: RemoteTabsSheetProps) {
   const t = useT();
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [tabs, setTabs] = useState<RemoteTabView[]>([]);
@@ -146,8 +148,26 @@ export function RemoteTabsSheet({ dark, onClose, onOpen }: RemoteTabsSheetProps)
 
   let content: ReactNode;
   if (!online) {
-    content = statusBlock(<Unlink size={22} className="opacity-40" />, t('remoteTabs.offline'),
-      <button type="button" onClick={onClose} className={wideBtn}>{t('common.back')}</button>);
+    /* 扫码那一下之后本页就先摆出来了，此刻链路还在握手中（桌面已不再问一句确认，
+       但手机要等桌面发出第一帧才算连上）。所以这里得分三档说：还在连、连败了、曾经连着现在断了。
+       「还在拨过去」与「曾经连着、现在断了」在 `connected` 上长得一模一样，分得开靠 `peerAddr`：
+       拨号一开始就写上、断开那一刻清掉。
+       失败那一档的原因串是桌面给的（拒什么都在 `Refused.reason` 里说了人话），原样摆出来，
+       顶栏那颗「扫一扫」就是重试的入口 —— 这里不另造一颗。 */
+    const err = status?.lastError || '';
+    const connecting = status?.role === 'client' && !err && !!status?.peerAddr;
+    content = connecting
+      ? (
+        <p className="flex flex-1 items-center justify-center gap-2 text-sm opacity-70">
+          <Loader2 size={14} className="animate-spin" />
+          {t('remoteTabs.connecting', { device: device || t('link.desktopFallback') })}
+        </p>
+      )
+      : statusBlock(
+        <Unlink size={22} className="opacity-40" />,
+        err || t('remoteTabs.offline'),
+        <button type="button" onClick={onClose} className={wideBtn}>{t('common.back')}</button>,
+      );
   } else if (phase === 'failed' && error) {
     content = (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
@@ -169,7 +189,15 @@ export function RemoteTabsSheet({ dark, onClose, onOpen }: RemoteTabsSheetProps)
       </p>
     );
   } else if (tabs.length === 0) {
-    content = statusBlock(<Files size={22} className="opacity-40" />, t('remoteTabs.empty'));
+    /* 那边一个标签都没开：这一屏就没别的话可说了，把入口直接给到那台电脑共享出来的树，
+       而不是让人退回设置里再找那颗钮 */
+    content = statusBlock(<Files size={22} className="opacity-40" />, t('remoteTabs.empty'),
+      onBrowse && (
+        <button type="button" onClick={() => { onClose(); onBrowse(makeRemotePath(deviceId, '')); }} className={wideBtn}>
+          <FolderTree size={14} />
+          {t('link.browseRemote')}
+        </button>
+      ));
   } else {
     content = (
       <ul className="heid-scroll min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain px-2 py-2">
@@ -228,6 +256,18 @@ export function RemoteTabsSheet({ dark, onClose, onOpen }: RemoteTabsSheetProps)
           </h2>
           {device && <p className={cn(metaCls, 'truncate')}>{t('remoteTabs.onDevice', { device })}</p>}
         </div>
+        {onBrowse && (
+          <button
+            type="button"
+            onClick={() => { onClose(); onBrowse(makeRemotePath(deviceId, '')); }}
+            disabled={!online}
+            aria-label={t('link.browseRemote')}
+            title={t('link.browseRemote')}
+            className={iconBtn}
+          >
+            <FolderTree size={19} />
+          </button>
+        )}
         <button
           type="button"
           onClick={refresh}

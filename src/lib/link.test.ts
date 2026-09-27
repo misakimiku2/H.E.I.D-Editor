@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_LINK_PORT, DEFAULT_PREFS, EMPTY_STATUS, autoReconnectFromPrefs, autoStartFromPrefs, deviceName, isKeyId,
-  isTicket, isUsablePort, linkRole, normalizePairReq, normalizeStatus, parsePrefs,
+  isTicket, isUsablePort, linkRole, loadPrefs, normalizeStatus, parsePrefs, rememberPeer,
   subscribeLinkStatus, tabReports,
 } from './link';
 
@@ -38,14 +39,6 @@ describe('normalizeStatus', () => {
     expect(normalizeStatus({ testPair: 'yes' }).testPair).toBe(false);
     expect(normalizeStatus({}).testPair).toBe(false);
     expect(EMPTY_STATUS.testPair).toBe(false);
-  });
-
-  it('手机的中档「等待电脑上确认」按字面采信', () => {
-    // 握手已完成但对端还没发过任何帧：这一档既不是没连上、也不能报成已连接（(b)）
-    expect(normalizeStatus({ waitingConfirm: true }).waitingConfirm).toBe(true);
-    expect(normalizeStatus({ waitingConfirm: 'yes' }).waitingConfirm).toBe(false);
-    expect(normalizeStatus({}).waitingConfirm).toBe(false);
-    expect(EMPTY_STATUS.waitingConfirm).toBe(false);
   });
 
   it('测试配对不进偏好（重启必须是关的）', () => {
@@ -110,17 +103,38 @@ describe('输入校验', () => {
   });
 });
 
-describe('normalizePairReq', () => {
-  it('形状合法按原样返回', () => {
-    const r = normalizePairReq({ device: 'SM-X808U', keyId: '0123456789abcdef' });
-    expect(r.device).toBe('SM-X808U');
-    expect(r.keyId).toBe('0123456789abcdef');
+describe('rememberPeer：免扫重连记的是哪一份', () => {
+  /* 2026-09-27 实测的根因：`link_client_pair` 在握手完成前就返回，那一刻 peerKeyId 是空的。
+     在命令返回值上记 → 偏好里的 keyId 永远慢一次配对 → 下次启动拿桌面不认的 keyId 去撞。
+     所以记对端只认**带 peerKeyId 的那份状态推送**，没带就一个字都不写。 */
+  const key = 'heid-link-prefs';
+  const clean = () => localStorage.removeItem(key);
+  afterEach(clean);
+
+  it('peerKeyId 为空时一个字都不写（不拿旧值凑数）', () => {
+    clean();
+    rememberPeer({ ...EMPTY_STATUS, role: 'client', peerAddr: '192.168.31.87:47123' });
+    expect(loadPrefs().keyId).toBe('');
+    expect(loadPrefs().host).toBe('');
   });
 
-  it('缺字段与坏 keyId 归零，绝不让 TOFU 弹窗崩', () => {
-    expect(normalizePairReq(undefined)).toEqual({ device: '', keyId: '' });
-    expect(normalizePairReq({ device: 123, keyId: 'short' }).keyId).toBe('');
-    expect(normalizePairReq({ device: 123 }).device).toBe('');
+  it('只有 keyId、地址已被清掉时也不记（那是断开后的半成品）', () => {
+    clean();
+    rememberPeer({ ...EMPTY_STATUS, role: 'client', peerKeyId: 'a4f9e74f4009c330', peerAddr: '' });
+    expect(loadPrefs().keyId).toBe('');
+  });
+
+  it('带上 peerKeyId 才记，地址从 peerAddr 拆', () => {
+    clean();
+    rememberPeer({
+      ...EMPTY_STATUS, role: 'client', connected: true,
+      peerKeyId: 'a4f9e74f4009c330', peerDevice: 'MISAKIMIKU', peerAddr: '192.168.31.87:47123',
+    });
+    const p = loadPrefs();
+    expect(p.keyId).toBe('a4f9e74f4009c330');
+    expect(p.host).toBe('192.168.31.87');
+    expect(p.port).toBe(47123);
+    expect(p.peerName).toBe('MISAKIMIKU');
   });
 });
 
@@ -160,8 +174,21 @@ describe('tabReports', () => {
     expect(one).not.toHaveProperty('content');
     expect(one).toEqual({
       path: 'C:\\notes\\a.md', title: 'a.md', language: 'markdown', mdView: 'edit',
-      dirty: false, readOnly: false, line: 3, col: 4,
+      dirty: false, readOnly: false, line: 3, col: 4, active: true,
     });
+  });
+
+  /* 手机端连上那一刻先把哪一份摊开给用户，看的正是这一项。它必须由服务端这一侧
+     按 activeTabId 现算，而不是信调用方传进来的东西 —— 两处各判一次就会有两份答案。 */
+  it('「桌面上正看着哪一张」按 activeTabId 算，且只有一张', () => {
+    const list = tabReports([t({ id: 'a' }), t({ id: 'b' }), t({ id: 'c' })], 'b', { line: 1, col: 1 });
+    expect(list.map(x => x.active)).toEqual([false, true, false]);
+    expect(list.filter(x => x.active)).toHaveLength(1);
+  });
+
+  it('activeTabId 对不上任何一张时不硬标一张（新窗口还没标签，或刚被关掉）', () => {
+    const list = tabReports([t({ id: 'a' }), t({ id: 'b' })], 'ghost', { line: 5, col: 2 });
+    expect(list.map(x => x.active)).toEqual([false, false]);
   });
 
   it('光标只给激活标签，别的标签是 0', () => {

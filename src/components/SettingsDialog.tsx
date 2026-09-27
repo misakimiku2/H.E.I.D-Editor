@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import type { BeginHandoff } from '../hooks/useLinkHandoff';
 import {
   X, RotateCcw, Settings, Palette, Sparkles, Type, LayoutGrid, Save,
   Check, Moon, Sun, ArrowLeft, Minus, Plus, Usb,
@@ -15,6 +16,9 @@ import { CODE_THEMES, type CodeTheme } from '../lib/editorThemes';
 import { Dropdown } from './Dropdown';
 import { useT, type MessageKey } from '../lib/i18nContext';
 
+/** `focusSection` 与那一格 `id` 共用的前缀：两头都从这里拼，不会一处改了另一处静默失效 */
+export const SETTINGS_ANCHOR_PREFIX = 'heid-settings-';
+
 interface SettingsDialogProps {
   isDarkMode: boolean;
   settings: EditorSettings;
@@ -25,8 +29,12 @@ interface SettingsDialogProps {
   asPage?: boolean;
   /** 设备互联里「浏览这台电脑的文件」：转发给 App 去开文件树 */
   onBrowseRemote?: (rootPath: string) => void;
-  /** 设备互联里「电脑上正打开的文件」某一行：转发给 App 按路径开标签（阶段 3） */
-  onOpenRemoteFile?: (path: string) => void;
+  /** 设备互联里「电脑上正打开的文件」：掀开 App 挂着的唯一那一屏（阶段 3） */
+  onShowRemoteTabs?: () => void;
+  /** 设备互联里那四个「我主动要连」的动作共用的交接触发器，转给 `DeviceLinkSection` */
+  onHandoff: BeginHandoff;
+  /** 打开时直接滚到某一格：顶栏那颗「已连接」按钮点开的是 `deviceLink`，不该从设置顶上找起 */
+  focusSection?: string;
   /** 手机侧离线队列摘要，原样转给「设备互联」那一格 */
   offline?: LinkOfflineInfo;
 }
@@ -176,7 +184,7 @@ function ThemeCard({ theme, selected, isDarkMode, onSelect }: {
   );
 }
 
-export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage, onBrowseRemote, onOpenRemoteFile, offline }: SettingsDialogProps) {
+export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage, onBrowseRemote, onShowRemoteTabs, onHandoff, focusSection, offline }: SettingsDialogProps) {
   const t = useT();
 
   useEffect(() => {
@@ -186,6 +194,16 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  /* 从顶栏那颗「已连接」按钮点进来时落在「设备互联」那一格：设置是整页一栏到底，
+     不滚过去就得让人自己找。弹窗刚挂载时子树已经在了，但要等一帧布局才量得到位置。 */
+  useEffect(() => {
+    if (!focusSection) return;
+    const el = document.getElementById(SETTINGS_ANCHOR_PREFIX + focusSection);
+    if (!el) return;
+    const raf = requestAnimationFrame(() => el.scrollIntoView({ block: 'start' }));
+    return () => cancelAnimationFrame(raf);
+  }, [focusSection]);
 
   const set = <K extends keyof EditorSettings>(key: K, value: EditorSettings[K]) =>
     onChange({ ...settings, [key]: value });
@@ -233,8 +251,9 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
     </span>
   );
 
-  const sectionNode = (icon: React.ComponentType<{ size?: number | string; className?: string }>, title: string, children: React.ReactNode) => (
-    <section>
+  /** `anchor` 给了就给这一格挂一个可滚过去的锚（见 props 里的 `focusSection`） */
+  const sectionNode = (icon: React.ComponentType<{ size?: number | string; className?: string }>, title: string, children: React.ReactNode, anchor?: string) => (
+    <section id={anchor ? SETTINGS_ANCHOR_PREFIX + anchor : undefined}>
       <div className={cn("flex items-center gap-2 pt-4 pb-1.5", asPage ? "px-4" : "px-5")}>
         <span className="text-[#A3B3FF] shrink-0">
           {(() => { const Icon = icon; return <Icon size={12} className="pointer-coarse:w-3.5 pointer-coarse:h-3.5" />; })()}
@@ -525,8 +544,8 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
           ))}
 
           {sectionNode(Usb, t('settings.section.deviceLink'), (
-            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} offline={offline} onBrowseRemote={onBrowseRemote} onOpenRemoteFile={onOpenRemoteFile} />
-          ))}
+            <DeviceLinkSection dark={dark} rowCls={rowCls} labelCls={labelCls} offline={offline} onBrowseRemote={onBrowseRemote} onShowRemoteTabs={onShowRemoteTabs} onHandoff={onHandoff} />
+          ), 'deviceLink')}
         </div>
 
         {/* 底栏：恢复默认 / 完成。触屏两个按钮都按 48dp 命中区做 */}

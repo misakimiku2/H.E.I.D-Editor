@@ -1,13 +1,13 @@
 /**
  * v1.5 设备互联的运行时验收脚本（一次性工具）。
  *
- * 交付判据：两端能握手、抓包看不到明文（阶段 0），且阶段 1 的配对 → TOFU → 记住设备 →
+ * 交付判据：两端能握手、抓包看不到明文（阶段 0），且阶段 1 的配对（扫码即连、桌面不再二次确认）→ 记住设备 →
  * 免扫自动重连 端到端成立。关键是这里用 Node 的 crypto **独立实现**一遍对端协议
  * （X25519 + HKDF + ChaCha20-Poly1305 + Ed25519 身份签名 + LS 派生），与真应用握多次手。
  * 独立实现能通，才说明帧格式、密钥派生、身份签名不是「只有 Rust 自己解得开」的私有约定。
  *
  * 覆盖：
- *   A 应用当服务端：Node 当手机走「配对 + 允许 TOFU + 验桌面指纹 + LS 对称 + 免扫重连 + 票用后即废」
+ *   A 应用当服务端：Node 当手机走「配对 + 验桌面指纹 + LS 对称 + 免扫重连 + 票用后即废」
  *   B 应用当客户端：Node 当桌面（带身份、发 Auth）；含「期望指纹不符 → 应用中止」
  *   C 配对票不匹配、D 入参校验、E 未登记 keyId 的重连被拒
  *   F 阶段 2：已加密连接上跑 list / stat / read / write，结果逐条与磁盘核对，
@@ -263,7 +263,7 @@ async function phoneHandshake(port, { mode, saltStr, ticket, keyId = '', slot = 
 /* ---------------------------------------------------- A：应用当服务端（手机视角） */
 
 async function appAsServer(invoke) {
-  log('\n=== A. 应用当服务端，Node 当手机：配对 → TOFU → LS 对称 → 免扫重连 → 票作废 ===');
+  log('\n=== A. 应用当服务端，Node 当手机：配对（桌面不问第二句）→ LS 对称 → 免扫重连 → 票作废 ===');
   const st = await invoke('link_server_start', { port: 47123 });
   ok('link_server_start 起监听', st.listening === true, `port=${st.port}`);
 
@@ -283,16 +283,13 @@ async function appAsServer(invoke) {
   const nextOnPair = pair.next;
   ok('握手后首帧密文无明文痕迹', !/auth|sig|pong|seq|heid-link/.test(cipher) && !cipher.includes(p.ticket));
 
-  // TOFU 有竞态：服务端读完 pong 才挂 pending；approve 到生效前反复点，直到连上
-  let conn = null;
-  for (let i = 0; i < 40; i++) {
-    try { await invoke('link_pair_approve'); } catch { /* pending 还没挂上 */ }
-    conn = await waitStatus(invoke, (x) => x.connected, 1000);
-    if (conn.connected) break;
-    await sleep(150);
-  }
-  ok('允许 TOFU 后应用状态转已连接 + 带手机名',
-    conn && conn.connected && conn.peerDevice === 'Node-Probe', conn ? `${conn.peerDevice} @ ${conn.peerAddr}` : '未连上');
+  /* 2026-09-26：桌面这道确认撤了 —— 出示过配对票就是准入本身。
+     所以这一段一次表态都不做，握完手就该转已连接；这里等的只是状态推过来。 */
+  const tPair = Date.now();
+  const conn = await waitStatus(invoke, (x) => x.connected, 8000);
+  ok('没人点任何东西，应用状态就转已连接 + 带手机名',
+    conn && conn.connected && conn.peerDevice === 'Node-Probe',
+    conn ? `${conn.peerDevice} @ ${conn.peerAddr}（回 pong → 已连接 ${Date.now() - tPair}ms）` : '未连上');
 
   /* 桌面「开始服务你了」的信号：一进 run_pump 就发的第一帧 ping。
      手机那份 connected 就是押在它到达之后（(b)），所以要等满一个 15 s 心跳才转已连接的说法作废。
@@ -314,7 +311,7 @@ async function appAsServer(invoke) {
   const re = await phoneHandshake(47123, { mode: 'reconnect', saltStr: pair.ls.toString('hex'), keyId: kid, expectFp: p.fp });
   ok('重连握手用存下的 LS 成功、身份仍匹配', re.sigOk && re.fpMatch);
   const reConnected = await waitStatus(invoke, (x) => x.connected, 4000);
-  ok('免扫重连后应用再次已连接（没弹第二次 TOFU）', reConnected.connected === true);
+  ok('免扫重连后应用再次已连接（桌面一句话都没问）', reConnected.connected === true);
   re.conn.destroy();
   // 等应用确实断开再试二次配对，否则先撞上"同一时刻只服务一台"的 busy 门（它在票检查之前）
   await waitStatus(invoke, (x) => !x.connected, 4000);
@@ -378,7 +375,7 @@ async function testPairMode(invoke) {
     `code=${qr.code} 状态里的票=${armed.ticket?.slice(0, 8)}…`);
   ok('状态快照里的票就是那张哨兵票（手机侧照旧走同一个入口）', armed.ticket === TEST_TICKET);
 
-  // 关键一条：这一段**从头到尾不调 link_pair_approve**。连上了就证明自动允许真生效了。
+  // 哨兵票这条路现在与普通票只差在"不过期、可反复用"，准入面上走的是同一条代码路径。
   const pair = await phoneHandshake(PORT, { mode: 'pair', saltStr: TEST_TICKET, ticket: TEST_TICKET });
   ok('测试票握手：桌面身份签名验得过', pair.sigOk);
   let status = null;
@@ -410,7 +407,7 @@ async function testPairMode(invoke) {
   ok('关掉后固定码立刻被拒', rj.t === 'refused' && rj.code === 'ticket', rj.reason || JSON.stringify(rj));
   after.destroy();
 
-  // 再确认可普通配对这条路没被这个模式带松：重新开一次共享走一次正常票 + TOFU
+  // 再确认普通配对这条路没被这个模式带松：重新开一次共享走一次普通票
   const qr2 = await invoke('link_pair_qr');
   const p2 = parsePairUri(qr2.uri);
   ok('关掉之后 pair_qr 回到随机票（不是那张公开的哨兵票）',
@@ -499,12 +496,15 @@ async function appAsClient(invoke) {
   let mid = null;
   for (let i = 0; i < 20; i += 1) {
     mid = await invoke('link_status');
-    if (mid.waitingConfirm || mid.connected || mid.lastError) break;
+    if (mid.connected || mid.lastError) break;
     await sleep(100);
   }
+  /* (b) 桌面进维持泵之前不许报已连接。确认撤掉之后中间那一档只剩几百毫秒、也没有独立状态位了，
+     判据落成「地址已写上、connected 仍是 false」；界面上那一档（「正在连上…」）在
+     link-lan-check 的 pairtiming 里连着 DOM 一起取。 */
   ok('(b) 桌面开始服务之前，手机不谎报已连接',
-    mid.connected === false && mid.waitingConfirm === true,
-    JSON.stringify({ connected: mid.connected, waitingConfirm: mid.waitingConfirm, err: mid.lastError }));
+    mid.connected === false && !!mid.peerAddr,
+    JSON.stringify({ connected: mid.connected, peerAddr: mid.peerAddr, err: mid.lastError }));
   ok('(c) 桌面设备名随 Auth 上来，中间那一档也叫得出对面是哪台电脑',
     mid.peerDevice === DESKTOP, `status.peerDevice=${mid.peerDevice}`);
 
@@ -587,18 +587,14 @@ async function badInputs(invoke) {
 
 /* ------------------------------------------------- 阶段 2：命令面走真实连接 */
 
-/** 配一次对并允许 TOFU，返回握手后的连接。与 A 段同一套流程，只是不带 A 那些断言。 */
+/** 配一次对，返回握手后的连接。与 A 段同一套流程，只是不带 A 那些断言。 */
 async function pairedPhone(invoke, port) {
   const qr = await invoke('link_pair_qr');
   const p = parsePairUri(qr.uri);
   const pair = await phoneHandshake(port, { mode: 'pair', saltStr: p.ticket, ticket: p.ticket, expectFp: p.fp });
-  for (let i = 0; i < 40; i++) {
-    try { await invoke('link_pair_approve'); } catch { /* pending 还没挂上 */ }
-    const st = await waitStatus(invoke, (x) => x.connected, 1000);
-    if (st.connected) return pair;
-    await sleep(150);
-  }
-  throw new Error('TOFU 允许之后仍未进入已连接');
+  const st = await waitStatus(invoke, (x) => x.connected, 8000);
+  if (st.connected) return pair;
+  throw new Error('握手完成后仍未进入已连接：' + (st.lastError || '没等到'));
 }
 
 async function stage2Files(invoke) {

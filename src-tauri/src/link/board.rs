@@ -39,6 +39,9 @@ pub struct TabReport {
     /// 光标只在激活标签上有值（编辑器只报当前那份），供手机端打开后定位一次
     pub line: u32,
     pub col: u32,
+    /// 桌面上正看着的那一张。手机连上时按它决定先把哪一份摊开给用户（其余排进标签条），
+    /// 所以它必须随每次上报走一遍 —— 只切了标签、列表内容没变的那一次也不能例外。
+    pub active: bool,
 }
 
 /// 一个窗口的上报槽
@@ -327,6 +330,8 @@ pub struct TabView {
     /// `''`（能打开）| `dirty`（桌面有未保存的修改）| `novirtual`（还没保存到磁盘）
     /// | `missing`（桌面上这个路径现在读不到）
     pub reason: String,
+    /// 桌面上正看着这一张（手机端连上时先把它摊开）
+    pub active: bool,
 }
 
 impl TabView {
@@ -341,6 +346,7 @@ impl TabView {
             col: t.col,
             rel: String::new(),
             reason: String::new(),
+            active: t.active,
         };
         // 无路径优先判：一个「新建还没保存」的标签必然也是脏的，此时说「桌面上有未保存的
         // 修改」会让人以为去存一下就能接管 —— 它压根还没落到磁盘上，要走的是移交语义（阶段 6）。
@@ -379,8 +385,10 @@ impl TabView {
 }
 
 /// 「看起来变了没」的比较口径：光标不参与。
-fn visible(tabs: &[TabReport]) -> Vec<(&Option<String>, &str, &str, &str, bool, bool)> {
+/// 光标变了列表上什么都没变，为它推一帧只是吵；**正看着哪一张**变了则要推 ——
+/// 手机端连上那一刻先把哪一份摊开给用户，看的正是这一项。
+fn visible(tabs: &[TabReport]) -> Vec<(&Option<String>, &str, &str, &str, bool, bool, bool)> {
     tabs.iter()
-        .map(|t| (&t.path, t.title.as_str(), t.language.as_str(), t.md_view.as_str(), t.dirty, t.read_only))
+        .map(|t| (&t.path, t.title.as_str(), t.language.as_str(), t.md_view.as_str(), t.dirty, t.read_only, t.active))
         .collect()
 }

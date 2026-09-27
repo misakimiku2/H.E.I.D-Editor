@@ -3,7 +3,7 @@
  * 免得同一个连接状态在三个地方显示出三种样子。
  *
  * 四档沿用应用里已有的那套状态色（`TabBar.tsx` 的标签点、`FileTreeSidebar` 离线横幅）：
- * 绿=已连上、琥珀=要等一等（待同步 / 等电脑确认 / 测试配对开着）、红=要我处理（冲突待确认）、
+ * 绿=已连上、琥珀=要等一等（待同步 / 测试配对开着）、红=要我处理（冲突待确认）、
  * 灰=开着但没人连。链路完全没起来时不给点 —— 一颗常灭的灰点等于噪音。
  */
 import type { LinkStatus } from './link';
@@ -24,7 +24,7 @@ export function linkBadge(s: LinkStatus, extra: LinkBadgeExtra = {}): LinkBadge 
     if (s.role !== 'client') return null;
     if (conflicts > 0) return 'attention';
     if (s.connected) return 'connected';
-    if (s.waitingConfirm || pending > 0) return 'pending';
+    if (pending > 0) return 'pending';
     return 'idle';
   }
   if (!s.listening && !s.connected) return null;

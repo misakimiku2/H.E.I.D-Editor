@@ -25,6 +25,8 @@ export interface OverlayState {
   settingsOpen: boolean;
   /** 手机顶栏那颗「扫一扫」点开的相机层 */
   scanOpen: boolean;
+  /** 「电脑上正打开的文件」那一整屏（盖在设置之上，扫码连上后的落地页也是它） */
+  remoteTabsOpen: boolean;
   shortcutsOpen: boolean;
   tabMenuOpen: boolean;
 }
@@ -34,6 +36,7 @@ export interface OverlayActions {
   closeFind: () => void;
   closeSettings: () => void;
   closeScan: () => void;
+  closeRemoteTabs: () => void;
   closeShortcuts: () => void;
   closeTabMenu: () => void;
   closeTabSheet: () => void;
@@ -222,6 +225,8 @@ export function usePlatformIntegration({
       const o = overlayStateRef.current;
       const a = overlayActionsRef.current;
       if (o.pendingDiscard) { a.cancelDiscard(); return; }
+      /* 远程标签那一屏是全屏层（z-150，压在设置与相机之上），所以它第一个被返回键收掉 */
+      if (o.remoteTabsOpen) { a.closeRemoteTabs(); return; }
       if (o.findOpen) { a.closeFind(); return; }
       if (o.scanOpen) { a.closeScan(); return; }
       if (o.settingsOpen) { a.closeSettings(); return; }

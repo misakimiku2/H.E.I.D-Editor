@@ -30,6 +30,13 @@ vi.mock('../lib/remote', async (importOriginal) => {
   return { ...real, remoteList: (rel: string) => remoteList(rel), remoteStat: (rel: string) => remoteStat(rel) };
 });
 
+/** 链路状态：树要在"接回来"的那一刻把先前那句「没连着桌面」重列掉，所以测试得能推它 */
+let linkCb: ((s: unknown) => void) | null = null;
+vi.mock('../lib/link', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  subscribeLinkStatus: (cb: (s: unknown) => void) => { linkCb = cb; return () => { linkCb = null; }; },
+}));
+
 import { FileTreeSidebar } from './FileTreeSidebar';
 import { makeRemotePath } from '../lib/remote';
 
@@ -50,6 +57,7 @@ afterEach(() => {
   opened.length = 0;
   remoteList.mockReset();
   remoteStat.mockReset();
+  linkCb = null;
   delete (globalThis as any).HeidBridge;
 });
 
@@ -149,6 +157,31 @@ describe('远程根下的文件树', () => {
     const el = render();
     await settle();
     expect(el.textContent).toContain('桌面还没设置共享的文件夹');
+  });
+
+  /* 冷启动那一下：根是上次记下来的远程根，树比链路先去列目录，于是留下一句「没连着桌面」。
+     链路接回来要自己重列一次 —— 否则用户看到的是一棵坏掉的树，而得他想到去点刷新
+     （2026-09-27 手机上实拍到的正是那一屏）。 */
+  it('链路接回来时把「没连着桌面」那一屏重列掉', async () => {
+    remoteList.mockRejectedValueOnce(new Error('unavailable: 这台设备没有连着桌面，请先完成配对'));
+    const el = render();
+    await settle();
+    expect(el.textContent).toContain('没有连着桌面');
+    remoteList.mockResolvedValue({ entries: [{ name: 'plan.md', isDir: false, size: 12, mtimeMs: 2 }], truncated: false });
+    act(() => { linkCb?.({ connected: true }); });
+    await settle();
+    expect(el.textContent, '那句时机性的错该被重列的结果替掉').not.toContain('没有连着桌面');
+    expect(rowsOf(el)).toContain(makeRemotePath(DEV, 'notes/plan.md'));
+  });
+
+  it('树是好的时候链路接回来不重列（别把他展开的层收起来）', async () => {
+    remoteList.mockResolvedValue({ entries: [{ name: 'a.md', isDir: false, size: 1, mtimeMs: 1 }], truncated: false });
+    render();
+    await settle();
+    const before = remoteList.mock.calls.length;
+    act(() => { linkCb?.({ connected: true }); });
+    await settle();
+    expect(remoteList).toHaveBeenCalledTimes(before);
   });
 
 });

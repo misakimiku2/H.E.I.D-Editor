@@ -7,12 +7,13 @@
  *    浮层里就是那一整块（共享开关 / 配对二维码 / 已配对设备 / 离线队列）。
  *  - **手机**：顶栏那颗直接就是**「扫一扫」** —— 点下去开相机配对，不再先弹一层抽屉。
  *    其余入口（改用配对码、看桌面上正打开的文件、断开、离线队列）留在「设置 → 设备互联」里。
+ *    连着电脑时它换成连接状态按钮，见下面 `ScanLinkEntry` 的注释。
  *
  * 状态一律取 `useLinkStatus` 那一份订阅，与状态栏的 `LinkShareChip` 同源：
  * 入口与标记各算各的「连上了没有」是这条入口最容易写歪的地方。
  */
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { MonitorSmartphone, QrCode, X } from 'lucide-react';
+import { lazy, Suspense, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { Loader2, MonitorSmartphone, QrCode, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
@@ -20,8 +21,8 @@ import { useLinkStatus } from '../hooks/useLinkStatus';
 import { linkBadge, linkDotCls, type LinkBadge } from '../lib/linkBadge';
 import { linkStateText } from '../lib/linkStatusText';
 import { appAlert } from '../lib/appAlert';
-import { showNotification } from '../lib/notifications';
-import { deviceName, loadPrefs, pairUri, rememberPeer } from '../lib/link';
+import { deviceName, linkRedialSnapshot, loadPrefs, pairUri, subscribeLinkRedial } from '../lib/link';
+import type { BeginHandoff } from '../hooks/useLinkHandoff';
 import { DeviceLinkSection, type LinkOfflineInfo } from './DeviceLinkSection';
 import { PANEL_LABEL_CLS, panelRowCls } from './panelRows';
 
@@ -33,7 +34,10 @@ export interface DeviceLinkPanelProps {
   /** 离线队列摘要；桌面（服务端）不传，那一行就不出现 */
   offline?: LinkOfflineInfo;
   onBrowseRemote?: (rootPath: string) => void;
-  onOpenRemoteFile?: (path: string) => void;
+  /** 掀开 App 那份唯一的「电脑上正打开的文件」 */
+  onShowRemoteTabs?: () => void;
+  /** 手机那四个「我主动要连」的动作共用的交接触发器（桌面那一侧用不到，但仍要传进来） */
+  onHandoff: BeginHandoff;
 }
 
 export interface LinkEntryState {
@@ -146,13 +150,16 @@ export function DeviceLinkMenuButton(props: DeviceLinkPanelProps) {
             </button>
           </div>
           <div className="heid-scroll heid-scroll-none min-h-0 overflow-y-auto pb-1">
+            {/* 掀开「电脑上正打开的文件」或进远程树的那一刻，本浮层就该收掉：
+                它俩都是整屏的去处，浮层留在上面只是挡编辑器（平板壳实测到的一次残留） */}
             <DeviceLinkSection
               dark={props.dark}
               rowCls={panelRowCls(props.dark)}
               labelCls={PANEL_LABEL_CLS}
               offline={props.offline}
-              onBrowseRemote={props.onBrowseRemote}
-              onOpenRemoteFile={props.onOpenRemoteFile}
+              onHandoff={props.onHandoff}
+              onBrowseRemote={(p) => { setOpen(false); props.onBrowseRemote?.(p); }}
+              onShowRemoteTabs={() => { setOpen(false); props.onShowRemoteTabs?.(); }}
             />
           </div>
         </div>
@@ -162,15 +169,52 @@ export function DeviceLinkMenuButton(props: DeviceLinkPanelProps) {
 }
 
 /**
- * 手机顶栏那颗「扫一扫」（App 把它交给 `TopAppBar` 的 linkSlot，位置与间距仍由顶栏管）。
- * 点下去直接开相机，扫到 `hide-link://pair` 就配对；结果与失败都走全局提示 ——
- * 这条路上没有面板可以落那行错误文字。钮上那颗点仍是连接状态。
+ * 手机顶栏那颗互联入口（App 把它交给 `TopAppBar` 的 linkSlot，位置与间距仍由顶栏管）。
+ * 它有三副样子，按**连没连上那台电脑、以及没连上时是不是正在自己接回来**分：
+ *
+ *  - **没连着、也没在接**：就是「扫一扫」，点下去直接开相机，扫到 `hide-link://pair` 就配对。
+ *    配对发起成功之后不弹一句"连上了"：`onHandoff` 立起的交接会把桌面上正看着的那一份
+ *    直接摊开（其余桌面标签排在后面补进标签条），失败就把桌面的原话摆在同一处 ——
+ *    一句话报告完还要用户自己去找东西在哪，是白多一步。
+ *  - **没连着、但正在自己接回来**（亮屏之后退避重连在跑，或那一次拨号还在路上）：转圈，
+ *    点下去与连着时同一格。这时候摆一颗扫码是把"等一等"说成"你来动手"（2026-09-27 他点名）。
+ *  - **已经连着**：换成连接状态按钮，点下去是「设置 · 设备互联」那一格（断开、
+ *    浏览那台电脑的文件都在里面）。**扫码入口就此收起**：手机端同时只服务一台电脑，
+ *    连着的时候再摆一颗扫码，扫了也只会把当前这条顶掉，那是误操作而不是功能。
+ *    要换一台，先在设置里断开，那颗「扫一扫」自己就回来了。
+ *
+ * 三副样子用的是同一颗按钮位、同一份状态点（`useLinkEntryBadge`），所以切换时
+ * 顶栏不会抖一下 —— 变的只有图标与它点下去去处。
  */
 export function ScanLinkEntry({
-  dark, offline, open, onOpenChange,
-}: { dark: boolean; offline?: LinkOfflineInfo; open: boolean; onOpenChange: (v: boolean) => void }) {
+  dark, offline, open, onOpenChange, onHandoff, onStatus,
+}: {
+  dark: boolean;
+  offline?: LinkOfflineInfo;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  /** 记一笔「这次连上了要交接」，返回收回它的函数（配对命令本身没过时收回，别等超时） */
+  onHandoff: BeginHandoff;
+  /** 已连接那副样子点下去的去处 */
+  onStatus: () => void;
+}) {
   const t = useT();
   const { badge, tip } = useLinkEntryBadge(offline);
+  const status = useLinkStatus();
+  const connected = status.connected === true;
+  const redial = useSyncExternalStore(subscribeLinkRedial, linkRedialSnapshot);
+  /* 自动接回途中（含刚拨出去那一次）转圈，不摆「扫一扫」：亮屏之后手机正在自己接回来，
+     这时候摆一颗扫码是把"等一等"说成"你来动手"。整套退避跑完（约一分四十七秒）转圈自己收掉，
+     因为那时它已经不再预告任何结果 —— 后台仍在按 60 秒一档试下去，图标变回去不等于放弃。
+     点下去与连着时同一去处（设置 · 设备互联），那里有断开，也有那台电脑的文件。 */
+  const dialing = !connected && status.role === 'client' && !!status.peerAddr;
+  const redialing = !connected && (dialing || redial.spinning);
+
+  /* 相机开着的时候链路被后台接回来（免扫重连 / 退避重试成功）：把开合状态一起收掉。
+     不收的话 `open` 会一直停在 true，等他下次断开时相机自己弹出来。 */
+  useEffect(() => {
+    if (connected && open) onOpenChange(false);
+  }, [connected, open, onOpenChange]);
 
   /* 预热扫码用的两个懒加载包：顶栏一挂出来就把 QrScanner 与 jsQR 取回来（不挂相机、不申请权限）。
      资源在 APK 内、不走网络，提前解包是白赚的——省掉点「扫一扫」后那一段空窗。 */
@@ -185,36 +229,59 @@ export function ScanLinkEntry({
       appAlert(t('link.errUri'));
       return;
     }
+    const cancel = onHandoff();
     void pairUri(s, deviceName())
-      .then((st) => {
-        rememberPeer(st);
-        /* 说的还是那一句状态话（「等待电脑上确认」/「已连接：X」），不在这儿另编一套措辞 */
-        showNotification({
-          kind: 'success',
-          title: t('settings.section.deviceLink'),
-          message: linkStateText(t, st, true),
-          timeoutMs: 4000,
-        });
-      })
-      .catch((e: unknown) => appAlert(String((e as { message?: string })?.message ?? e)));
+      .catch((e: unknown) => {
+        // 命令本身没过（地址为空、URI 不对）：那次拨号没发生，别留在待交接里等超时
+        cancel();
+        appAlert(String((e as { message?: string })?.message ?? e));
+      });
   };
+
+  const btnCls = cn(
+    'relative w-12 h-12 rounded-md flex items-center justify-center shrink-0 transition-colors',
+    dark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500',
+  );
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => onOpenChange(true)}
-        aria-label={t('link.scan')}
-        title={`${t('link.scan')} · ${tip}`}
-        className={cn(
-          'relative w-12 h-12 rounded-md flex items-center justify-center shrink-0 transition-colors',
-          dark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500',
-        )}
-      >
-        <QrCode size={20} />
-        {badge && <LinkDot badge={badge} dark={dark} big />}
-      </button>
-      {open && (
+      {connected ? (
+        <button
+          type="button"
+          onClick={onStatus}
+          aria-label={t('settings.section.deviceLink')}
+          title={tip}
+          className={btnCls}
+        >
+          <MonitorSmartphone size={20} />
+          {badge && <LinkDot badge={badge} dark={dark} big />}
+        </button>
+      ) : redialing ? (
+        <button
+          type="button"
+          onClick={onStatus}
+          aria-label={t('link.redialing')}
+          title={t('link.redialing')}
+          className={btnCls}
+        >
+          <Loader2 size={20} className="animate-spin" />
+          {badge && <LinkDot badge={badge} dark={dark} big />}
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => onOpenChange(true)}
+          aria-label={t('link.scan')}
+          title={`${t('link.scan')} · ${tip}`}
+          className={btnCls}
+        >
+          <QrCode size={20} />
+          {badge && <LinkDot badge={badge} dark={dark} big />}
+        </button>
+      )}
+      {/* 相机层只在「没连着」这一侧挂：连着那一下该把它收掉（见上面那个 effect），
+          而它挂在按钮外面，所以底下这颗是扫一扫还是在转圈都不影响这一层 */}
+      {!connected && open && (
         <Suspense fallback={null}>
           <QrScanner onResult={onResult} onClose={() => onOpenChange(false)} dark={dark} />
         </Suspense>

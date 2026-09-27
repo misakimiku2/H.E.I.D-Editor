@@ -19,6 +19,11 @@ use super::identity;
 /// 一次性配对票的有效期（设计稿 §7.1 第 2 条：票 2 分钟有效）。超时得让桌面重开一次配对。
 pub const PAIRING_TTL: Duration = Duration::from_secs(120);
 
+/// 一张票挂多久就该换：留出 50 秒的余量，别让手机上正对着的码在有效期内最后一秒还被人去扫。
+/// **换码这件事只在服务端判**（`link_pair_info` 一次调用里判完换完），前端只管按时来问 ——
+/// 两个面板各起一个定时器换码，就会出现「屏幕上这张已经不是当前那张」。
+pub const REFRESH_AFTER: Duration = Duration::from_secs(70);
+
 /// 测试配对模式的哨兵票（32 位十六进制，与随机票同形状，所以手机侧的三条入口一行都不用改）。
 /// 值公开在源码里 —— 这不是一个秘密，它的作用只是让「开着开发配对时任何设备都能连」这件事
 /// 有一个稳定的入口，详见 [`PairingTicket::test`]。
@@ -213,12 +218,20 @@ impl PairingTicket {
     pub fn code(&self) -> String {
         short_code(&self.value)
     }
+    /// 这张票的公开标识，用来在配对窗里指认是哪一张（见 [`PairingWindow::select`]）
+    pub fn tag(&self) -> String {
+        slot_tag(&self.value)
+    }
     fn expired(&self) -> bool {
         !self.test && self.created.elapsed() > PAIRING_TTL
     }
     /// 这张票现在还能不能用（没被用过、没过期）。
     pub fn usable(&self) -> bool {
         !self.used && !self.expired()
+    }
+    /// 挂出来多久了（决定要不要换一张，见 [`REFRESH_AFTER`]）
+    pub fn age(&self) -> Duration {
+        self.created.elapsed()
     }
     /// 消费一次：成功配对后调用，把它置为已用；同时返回是否本来可用。用后即废在这里落实。
     /// 测试票例外 —— 它要能被反复配对（否则第一次之后这道「门」就自己关了，
@@ -231,6 +244,122 @@ impl PairingTicket {
             true
         } else {
             false
+        }
+    }
+}
+
+/// 票值的公开标识：SHA-256(票值) 前 3 字节的十六进制（6 字符）。
+///
+/// 它解决的是「一次配对窗里同时活着两张票，手机扫的是哪一张」这一件事 —— 从票值算得出、
+/// 从它推不回票值（还差 2^104），所以可以放进握手帧而不改变「票从不上网」这条。
+pub fn slot_tag(value: &str) -> String {
+    let d = digest::digest(&digest::SHA256, value.as_bytes());
+    d.as_ref()[..3].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `hello.slot` 的形态：`ticket` / `code`，或带上票标识的 `ticket:<tag>` / `code:<tag>`。
+/// 带标识用来指认配对窗里的哪一张；**旧版手机不带**，按当前那张处理（见 [`PairingWindow::select`]）。
+fn split_slot(slot: &str) -> (&str, Option<&str>) {
+    match slot.split_once(':') {
+        Some((kind, tag)) if !tag.is_empty() => (kind, Some(tag)),
+        _ => (slot, None),
+    }
+}
+
+/// 桌面此刻开放的配对窗：**当前显示的那张票** + **刚被换下、仍在自身有效期内的那张**。
+///
+/// 为什么留旧票：开着共享时桌面前端会按小于有效期的间隔自动换码，好让屏幕上永远有一张能扫的。
+/// 换码即作废旧票的话，手机上相机正对着的那张会在拨过去的一瞬间变成「配对码已过期」——
+/// 一种每次都可能撞上、撞上要回电脑前重扫的偶发失败最难查。
+///
+/// 旧票不累积：只留最后换下的那一张，且它照样受自身 [`PAIRING_TTL`] 与「用后即废」约束。
+#[derive(Default)]
+pub struct PairingWindow {
+    /// 最后一个是当前显示的那张
+    slots: Vec<PairingTicket>,
+}
+
+impl PairingWindow {
+    pub fn new(t: PairingTicket) -> Self {
+        PairingWindow { slots: vec![t] }
+    }
+
+    /// 换一张新码进窗：被换下的那张留到它自己过期为止。
+    /// 测试票不叠加 —— 哨兵票本来就只有一张，重复换也还是同一张。
+    pub fn rotate(&mut self, t: PairingTicket) {
+        self.slots.retain(|s| s.usable());
+        if t.is_test() {
+            self.slots.retain(|s| !s.is_test());
+        }
+        self.slots.push(t);
+        if self.slots.len() > 2 {
+            let extra = self.slots.len() - 2;
+            self.slots.drain(0..extra);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    /// 当前显示的那张（二维码、短码、界面上那行配对码都取自它）
+    pub fn current(&self) -> Option<&PairingTicket> {
+        self.slots.last()
+    }
+
+    /// 当前那张是不是该换了（没开窗、过期、用过、或挂够久了都算）
+    pub fn stale(&self) -> bool {
+        match self.current() {
+            Some(t) => !t.usable() || t.age() >= REFRESH_AFTER,
+            None => true,
+        }
+    }
+
+    /// 按 `hello.slot` 指认这次配对用的是窗里的哪一张，返回下标。
+    /// 拒因串必须含「配对」字样，才能被 `refuse_code` 归成稳定的 `ticket` 码。
+    pub fn select(&self, slot: &str) -> Result<usize, String> {
+        match split_slot(slot).1 {
+            Some(want) => self
+                .slots
+                .iter()
+                .rposition(|t| t.usable() && t.tag() == want)
+                .ok_or_else(|| "这个配对码刚被换掉，请扫桌面上当前那张".to_string()),
+            None => match self.current() {
+                Some(t) if t.usable() => Ok(self.slots.len() - 1),
+                Some(_) => Err("配对码已过期，请在桌面上换一个".to_string()),
+                None => Err("当前没有开放的配对码，请先在桌面上打开共享".to_string()),
+            },
+        }
+    }
+
+    /// 这趟 `slot` 走的是不是 6 位短码那扇门（只有那扇门需要失败限速，见 `link::GATE_LIMIT`）
+    pub fn slot_is_code(slot: &str) -> bool {
+        split_slot(slot).0 == "code"
+    }
+
+    /// 指认出来的那张票给出 salt：`slot` 的种别决定取票值还是取 6 位短码
+    pub fn salt_of(&self, idx: usize, slot: &str) -> String {
+        match self.slots.get(idx) {
+            Some(t) if split_slot(slot).0 == "code" => t.code(),
+            Some(t) => t.value().to_string(),
+            None => String::new(),
+        }
+    }
+
+    pub fn tag_of(&self, idx: usize) -> String {
+        self.slots.get(idx).map(|t| t.tag()).unwrap_or_default()
+    }
+
+    pub fn is_test_tag(&self, tag: &str) -> bool {
+        self.slots.iter().any(|t| t.tag() == tag && t.is_test())
+    }
+
+    /// 成功配对后把命中的那张作废（用后即废）。按票标识而不是下标 —— 握手与登记之间
+    /// 前端可能又换了一次码，下标会漂。
+    pub fn consume_tag(&mut self, tag: &str) -> bool {
+        match self.slots.iter_mut().rposition(|t| t.tag() == tag) {
+            Some(i) => self.slots[i].consume(),
+            None => false,
         }
     }
 }
@@ -521,5 +650,92 @@ mod tests {
         let s = Store::load(&path);
         assert!(s.devices.is_empty() && s.identity_pkcs8.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* ------------------------------------------------------------ 一次配对窗 */
+
+    const TICKET_A: &str = "00112233445566778899aabbccddeeff";
+    const TICKET_B: &str = "112233445566778899aabbccddeeff00";
+
+    #[test]
+    fn 自动换码后正对着的那张旧码还配得上() {
+        // 桌面每 70 秒换一张码。手机扫的是屏幕上的图像，从入镜到拨过去有一两秒，
+        // 换码若当场作废旧票，这一两秒就是「每次都可能撞上、撞上又说不清」的偶发失败。
+        let mut w = PairingWindow::new(PairingTicket::new(TICKET_A.into()));
+        let old_tag = w.current().unwrap().tag();
+        w.rotate(PairingTicket::new(TICKET_B.into()));
+        assert_eq!(w.current().unwrap().value(), TICKET_B, "换进来的那张是当前显示的那张");
+
+        let slot = format!("ticket:{old_tag}");
+        let idx = w.select(&slot).expect("刚换下的那张还在窗里");
+        assert_eq!(w.salt_of(idx, &slot), TICKET_A, "salt 取的是扫的那张，不是屏幕上现在这张");
+        assert!(w.consume_tag(&old_tag));
+        assert!(w.select(&slot).is_err(), "用后即废：旧票配过一次就再也配不上");
+        // 当前那张不受影响
+        assert_eq!(w.salt_of(w.select("ticket").unwrap(), "ticket"), TICKET_B);
+    }
+
+    #[test]
+    fn 只有短码那扇门算试错() {
+        // 失败限速只数这一种口（`link::GATE_LIMIT`）：票与 LS 都猜不出来，
+        // 把它们算进去会把"拿着旧码来扫"的正常用户关在门外
+        assert!(PairingWindow::slot_is_code("code"));
+        assert!(!PairingWindow::slot_is_code("ticket"), "扫码那趟不该计数");
+        assert!(!PairingWindow::slot_is_code("ticket:0a1b2c"), "带标识的票也不计数");
+        assert!(!PairingWindow::slot_is_code(""), "缺字段兜底成不计数");
+    }
+
+    #[test]
+    fn 不带票标识按当前那张认_旧版手机与短码都走这条() {
+        let mut w = PairingWindow::new(PairingTicket::new(TICKET_A.into()));
+        w.rotate(PairingTicket::new(TICKET_B.into()));
+        // 手输 6 位短码那趟手里没有票值、算不出标识；旧版手机也从来只发 "ticket"/"code"。
+        assert_eq!(w.salt_of(w.select("ticket").unwrap(), "ticket"), TICKET_B);
+        assert_eq!(w.salt_of(w.select("code").unwrap(), "code"), short_code(TICKET_B));
+    }
+
+    #[test]
+    fn 该不该换码只由窗自己判() {
+        // 前端定时器只是按时来问一句，"换不换"在这里判：两处各判一次就会出现
+        // 「屏幕上这张已经不是当前那张」（2026-09-27 他那次重配撞上的就是这个）
+        assert!(PairingWindow::default().stale(), "没开窗就该换");
+        let w = PairingWindow::new(PairingTicket::new(TICKET_A.into()));
+        assert!(!w.stale(), "刚挂出来的票不该被立刻换掉");
+    }
+
+    #[test]
+    fn 票标识对不上就是拒_且拒因归得成稳定码() {
+        let w = PairingWindow::new(PairingTicket::new(TICKET_A.into()));
+        let e = w.select("ticket:deadbe").unwrap_err();
+        // `refuse_code` 按「配对/票」字样归类，串里必须带着这两个字之一
+        assert!(e.contains("配对"), "拒因串要能被归成 ticket 稳定码：{e}");
+    }
+
+    #[test]
+    fn 窗里最多两张_且没开窗时拒因说的是没开启() {
+        let mut w = PairingWindow::default();
+        let e = w.select("ticket").unwrap_err();
+        assert!(e.contains("配对"), "没开窗的拒因也要归成 ticket：{e}");
+        assert!(w.stale(), "没开窗当然算该换一张");
+        for i in 0..5u8 {
+            w.rotate(PairingTicket::new(format!("{:0>32x}", i)));
+        }
+        assert_eq!(w.slots.len(), 2, "换掉的码不能一张张攒着，最多留刚换下的那一张");
+    }
+
+    #[test]
+    fn 哨兵票不叠加() {
+        // 开着测试配对模式时换码换到的还是同一张：换两次也不该在窗里攒出两张哨兵票
+        // （普通票那张留在窗里是对的行为 —— 它就是刚被换下的那张旧码）
+        let mut w = PairingWindow::new(PairingTicket::new(TICKET_A.into()));
+        w.rotate(PairingTicket::test());
+        w.rotate(PairingTicket::test());
+        assert_eq!(w.slots.iter().filter(|t| t.is_test()).count(), 1);
+        assert_eq!(w.slots.len(), 2, "另一张是刚换下的普通票，宽限期内还扫得动");
+        let idx = w.select("ticket").unwrap();
+        assert_eq!(idx, w.slots.len() - 1, "当前那张是哨兵票");
+        assert!(w.is_test_tag(&w.tag_of(idx)));
+        assert!(w.consume_tag(&w.tag_of(idx)), "哨兵票该能反复配");
+        assert!(w.select("ticket").is_ok(), "用后即废不该把测试通道关掉");
     }
 }

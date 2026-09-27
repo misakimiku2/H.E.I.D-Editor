@@ -31,13 +31,18 @@ vi.mock('../lib/remote', async (importOriginal) => {
 });
 
 const DEV = 'a1b2c3d4e5f6a7b8';
+const ADDR = '192.168.31.87:47123';
 /** link 的四个入口按可变态提供：工厂只在被调用时读这些变量，所以能安全引用后置声明 */
 let connected = true;
+let role = 'client';
+let lastError = '';
+/** 断开那一刻 Rust 侧会把地址清掉 —— 「正在拨过去」与「曾经连着现在断了」就靠它分档 */
+let peerAddr = ADDR;
 let remoteEvent: ((type: string) => void) | null = null;
 
 vi.mock('../lib/link', () => ({
   fetchStatus: () => Promise.resolve({
-    connected, peerKeyId: connected ? DEV : '', peerDevice: 'Office-PC', openShared: 0,
+    connected, role, lastError, peerAddr, peerKeyId: connected ? DEV : '', peerDevice: 'Office-PC', openShared: 0,
   }),
   subscribeLinkStatus: () => () => {},
   subscribeRemoteEvents: (cb: (type: string) => void) => {
@@ -54,6 +59,7 @@ import { RemoteError, makeRemotePath, type RemoteTabView } from '../lib/remote';
 
 let root: Root | null = null;
 const opened: string[] = [];
+const browsed: string[] = [];
 let closed = 0;
 
 afterEach(() => {
@@ -62,14 +68,18 @@ afterEach(() => {
   document.body.innerHTML = '';
   opened.length = 0;
   closed = 0;
+  browsed.length = 0;
   connected = true;
+  role = 'client';
+  lastError = '';
+  peerAddr = ADDR;
   remoteEvent = null;
   remoteTabs.mockReset();
 });
 
 const tab = (over: Partial<RemoteTabView>): RemoteTabView => ({
   title: 'plan.md', language: 'markdown', mdView: 'preview', dirty: false, readOnly: false,
-  line: 0, col: 0, rel: '', reason: '', ...over,
+  line: 0, col: 0, rel: '', reason: '', active: false, ...over,
 });
 
 function render() {
@@ -78,7 +88,12 @@ function render() {
   root = createRoot(host);
   act(() => {
     root!.render(
-      <RemoteTabsSheet dark={false} onClose={() => { closed += 1; }} onOpen={(p: string) => opened.push(p)} />,
+      <RemoteTabsSheet
+        dark={false}
+        onClose={() => { closed += 1; }}
+        onOpen={(p: string) => opened.push(p)}
+        onBrowse={(p: string) => browsed.push(p)}
+      />,
     );
   });
   return document.body;
@@ -155,11 +170,55 @@ describe('手机上「电脑上正打开的」列表', () => {
     expect(remoteTabs).toHaveBeenCalledTimes(2);
   });
 
-  it('没连着桌面时一次都不拉，只说明连不上', async () => {
+  it('曾经连着、现在地址已清：说"断开了"而不是"正在连"', async () => {
     connected = false;
+    peerAddr = '';
     render();
     await flush();
     expect(remoteTabs).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('remoteTabs.offline');
+  });
+
+  /* 2026-09-26 扫码即连：这一屏是扫完码的落地页，所以它必须自己说清"还在连"，
+     不再靠先前那句弹完就消失的"已连接"toast（那一弹之后用户还是不知道东西在哪） */
+  it('刚把码递过去、桌面还没开始服务：这一屏说"正在连上"并带着设备名', async () => {
+    connected = false;
+    remoteTabs.mockRejectedValue(new RemoteError('nolink', '还没连上'));
+    render();
+    await flush();
+    expect(document.body.textContent).toContain('remoteTabs.connectingOffice-PC');
+    expect(document.body.textContent, '不该把连接中的空档渲染成"电脑上没有标签页"').not.toContain('remoteTabs.empty');
+  });
+
+  it('桌面拒了这次配对：把它的原话摆在这一屏上，不静默回到空标签', async () => {
+    connected = false;
+    peerAddr = '';
+    lastError = '这个配对码刚被换掉，请扫桌面上当前那张';
+    render();
+    await flush();
+    expect(document.body.textContent).toContain('这个配对码刚被换掉');
+  });
+
+  it('那边一个标签都没开：这一屏直接把「浏览这台电脑的文件」给出来', async () => {
+    remoteTabs.mockResolvedValue([]);
+    render();
+    await flush();
+    expect(document.body.textContent).toContain('remoteTabs.empty');
+    const btn = [...document.body.querySelectorAll('button')]
+      .find((b) => (b.textContent ?? '').includes('link.browseRemote'));
+    expect(btn, '空列表这一屏要留得下去看整棵树的入口').toBeTruthy();
+    act(() => { btn!.click(); });
+    expect(browsed).toEqual([makeRemotePath(DEV, '')]);
+    expect(closed).toBe(1);
+  });
+
+  it('列表非空时头部也有一颗进树的钮，交出的是远程根', async () => {
+    remoteTabs.mockResolvedValue([tab({ title: 'plan.md', rel: 'notes/plan.md' })]);
+    render();
+    await flush();
+    const tree = document.body.querySelector('button[aria-label="link.browseRemote"]');
+    expect(tree).toBeTruthy();
+    act(() => { (tree as HTMLButtonElement).click(); });
+    expect(browsed).toEqual([makeRemotePath(DEV, '')]);
   });
 });

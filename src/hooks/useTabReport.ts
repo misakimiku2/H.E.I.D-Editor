@@ -32,9 +32,11 @@ export interface TabReportOptions {
 /**
  * 一次上报的「可见变化」判据：手机上那份列表看得出来的东西。
  * 光标不在其中 —— 它变了列表上什么都没变，为它推一帧只是吵。
+ * **正看着哪一张**要在其中 —— 手机连上那一刻先把哪份摊开给用户按它定，
+ * 用户在桌面上点了一下标签而这里把它滤掉，接过来的就是错的那一份。
  */
 export function tabReportSignature(list: TabReport[]): string {
-  return JSON.stringify(list.map(t => [t.path, t.title, t.language, t.mdView, t.dirty, t.readOnly]));
+  return JSON.stringify(list.map(t => [t.path, t.title, t.language, t.mdView, t.dirty, t.readOnly, t.active]));
 }
 
 export function useTabReport({ enabled, windowLabel, rootPath, tabs, activeTabId, cursor }: TabReportOptions) {

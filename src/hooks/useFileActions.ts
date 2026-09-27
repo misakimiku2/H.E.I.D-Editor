@@ -82,8 +82,17 @@ export function useFileActions({
 
   /** 按路径打开（最近打开 / 文件树 / 拖拽 / argv / 选择器路径共用）；
       桌面端先按字节数分层：>512MB 拒绝、32~512MB 只读分块预览、其余整体读入。
-      jump：打开后跳转到指定行列（跨文件搜索结果点击），编辑器挂载后消费一次 */
-  const openPathIntoTab = useCallback(async (path: string, jump?: { line: number; col: number }) => {
+      jump：打开后跳转到指定行列（跨文件搜索结果点击），编辑器挂载后消费一次。
+      `activate: false` 只把标签排进标签条、不切前台 —— 一次摊开十几份远程标签时
+      用它在后台补剩下的那几份，用户看着的始终是已经打开的第一份。
+      （此刻没有任何东西在观察激活态：CodeEditor 按 `active === true` 挂载，
+        会话与脏标记都从 tab 自己读。哪天加了跟着激活态跑的副作用，这里要跟着改。）
+      `recent: false` 不进「最近打开」：手机端一次交接最多带进来 12 份，而那份身份键
+      里的 keyId 每重新配对一次就换，留在最近列表里是一排点了就打不开的死条目。 */
+  const openPathIntoTab = useCallback(
+    async (path: string, jump?: { line: number; col: number }, opts?: { activate?: boolean; recent?: boolean }) => {
+    const raise = (id: string) => { if (opts?.activate !== false) setActiveTabIdRef.current(id); };
+    const note = (p: string, name: string) => { if (opts?.recent !== false) addRecent(p, name); };
     const jumpRequest = jump
       ? { line: jump.line, col: jump.col, seq: ++jumpSeq }
       : undefined;
@@ -110,14 +119,14 @@ export function useFileActions({
         if (cls === 'preview') {
           const existing = tabsRef.current.find(t => t.path === path);
           if (existing) {
-            setActiveTabIdRef.current(existing.id);
+            raise(existing.id);
             return;
           }
           const name = displayNameFromPath(path);
           const newTab = makeLargePreviewTab(path, name, detectLanguageFromPath(name));
           setTabs(prev => [...prev, newTab]);
-          setActiveTabIdRef.current(newTab.id);
-          addRecent(path, name);
+          raise(newTab.id);
+          note(path, name);
           return;
         }
       }
@@ -128,15 +137,15 @@ export function useFileActions({
         if (jumpRequest) {
           /* 跳转请求：文件已在标签中，直接定位——不重读磁盘覆盖未保存内容 */
           setTabs(prev => prev.map(t => t.id === existing.id ? { ...t, jumpRequest } : t));
-          setActiveTabIdRef.current(existing.id);
+          raise(existing.id);
           return;
         }
         setTabs(prev => prev.map(t => t.id === existing.id
           ? { ...t, content: file.content, originalContent: file.content, isDirty: false, encoding: file.encoding, bom: file.bom, eol: file.eol, originalEol: file.eol, remoteBaseHash: file.remoteBaseHash }
           : t
         ));
-        setActiveTabIdRef.current(existing.id);
-        addRecent(path, file.name);
+        raise(existing.id);
+        note(path, file.name);
         return;
       }
       const newTab: FileTab = {
@@ -161,8 +170,8 @@ export function useFileActions({
         jumpRequest,
       };
       setTabs(prev => [...prev, newTab]);
-      setActiveTabIdRef.current(newTab.id);
-      addRecent(path, file.name);
+      raise(newTab.id);
+      note(path, file.name);
     } catch (e) {
       console.error('Failed to open file:', path, e);
       appAlert(t('open.errPath', { path }));

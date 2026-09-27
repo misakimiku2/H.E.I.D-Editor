@@ -41,8 +41,8 @@ describe('linkBadge：手机（客户端）', () => {
     expect(linkBadge(s({ role: 'client', connected: true, peerDevice: 'PC' }), client)).toBe('connected');
   });
 
-  it('等电脑上确认与有待同步项都算「要等一等」这一档', () => {
-    expect(linkBadge(s({ role: 'client', waitingConfirm: true }), client)).toBe('pending');
+  it('有待同步项算「要等一等」，但已连上压过它', () => {
+    // 客户端不再有「等电脑确认」那一档（扫码即连），所以 pending 是这一档唯一的来源
     expect(linkBadge(s({ role: 'client', connected: true }), { ...client, pending: 3 })).toBe('connected');
     expect(linkBadge(s({ role: 'client' }), { ...client, pending: 3 })).toBe('pending');
   });

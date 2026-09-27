@@ -196,6 +196,8 @@ export interface RemoteTabView {
   rel: string;
   /** `''` | `dirty`（桌面有未保存的修改）| `novirtual`（还没保存到磁盘）| `missing`（现在读不到） */
   reason: string;
+  /** 桌面上正看着这一张：手机连上时先把它摊开，其余排进标签条 */
+  active: boolean;
 }
 
 function decodeSegment(seg: string): string {
@@ -232,7 +234,7 @@ export function parseRemotePath(path: string): RemoteRef | null {
 
 /* ------------------------------------------------------------------ 命令封装 */
 
-export type RemoteMethod = 'list' | 'stat' | 'read' | 'write' | 'tabs';
+export type RemoteMethod = 'list' | 'stat' | 'read' | 'write' | 'tabs' | 'scope';
 
 /**
  * `link_request` 成功时带回的是**结果 JSON 文本**而不是对象（Rust 侧返回 `String`），
@@ -295,4 +297,16 @@ export async function remoteTabs(): Promise<RemoteTabView[]> {
   const list = await request<RemoteTabView[]>('tabs', {});
   // 桌面上的命令面只会给数组；真给了别的形状就是协议错开，如实报而不是当空列表
   return Array.isArray(list) ? list : [];
+}
+
+/** 桌面这一刻的共享范围。`hasRoot` = 那台电脑的文件树确实开着某个文件夹。 */
+export interface RemoteScope {
+  hasRoot: boolean;
+}
+
+/** 问一声桌面上有没有共享根：手机端连上时按它决定换不换自己的文件夹树。
+    单独一条命令而不是列一次根目录看它怎么答 —— 共享根可能就是 `node_modules`。 */
+export async function remoteScope(): Promise<RemoteScope> {
+  if (!isTauri) throw unavailable();
+  return request<RemoteScope>('scope', {});
 }
