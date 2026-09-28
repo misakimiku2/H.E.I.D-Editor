@@ -65,7 +65,7 @@ async function mount(patch: Record<string, unknown>) {
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    root!.render(<DeviceLinkSection dark={false} rowCls="" labelCls="" onHandoff={() => () => {}} />);
+    root!.render(<DeviceLinkSection dark={false} onHandoff={() => () => {}} />);
   });
   /* 状态取回 + 懒加载的二维码 chunk 各要一帧 */
   for (let i = 0; i < 4; i += 1) await act(async () => { await Promise.resolve(); });
@@ -197,21 +197,21 @@ describe('有设备连着时那一格说什么', () => {
     for (let i = 0; i < 3; i += 1) await act(async () => { await Promise.resolve(); });
     expect(qrShown(), '一张扫不动的码不该留在屏幕上').toBe(false);
     expect(infoCalls, '连着的时候不再问码').toBe(before);
-    expect(container!.textContent).toContain('link.deviceConnected');
+    expect(container!.textContent).toContain('link.stateConnected');
   });
 
   it('面板是连着之后才打开的：一次都不问码，那一行照样在', async () => {
     await mount({ ...listening(true), ...onLine });
     expect(infoCalls).toBe(0);
     expect(qrShown()).toBe(false);
-    expect(container!.textContent).toContain('link.deviceConnected');
+    expect(container!.textContent).toContain('link.stateConnected');
   });
 
   it('断开之后那一行让回给码', async () => {
     await mount({ ...listening(true), ...onLine });
     await act(async () => { emit?.(listening(true)); });
     for (let i = 0; i < 3; i += 1) await act(async () => { await Promise.resolve(); });
-    expect(container!.textContent).not.toContain('link.deviceConnected');
+    expect(container!.textContent).not.toContain('link.stateConnected');
     expect(qrShown()).toBe(true);
   });
 });

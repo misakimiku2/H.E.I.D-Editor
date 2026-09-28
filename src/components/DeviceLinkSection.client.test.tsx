@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 /**
- * 手机侧「设备互联」那一块（2026-09-25 第二次点名之后定形，2026-09-28 搬进整屏）：
- * 扫一扫不在这一块里了 —— 它是顶栏那颗入口，点下去直接开相机；
- * 这一块留下的是不需要相机的等价入口，以及离线队列那一行。
+ * 安卓侧「设备互联」那一块（2026-09-25 定形，2026-09-28 搬进整屏 + 重做成状态卡）。
+ *
+ * 状态卡按"现在是什么状况"组织，所以这里钉住的是**当前那一步该摆哪一颗**：
+ *  - 宿主给了扫码的去处（`onScan`）→ 扫一扫就是卡里的主操作；没给 → 那颗不许出现；
+ *  - 没有扫码这条路时，「配对方式」那一组必须自己摊开 —— 收起来等于把人关在死路里；
+ *  - 相机层不在这一块里挂（开合归宿主），这里只验它有没有被错误地挂出来。
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import React, { act } from 'react';
@@ -45,7 +48,7 @@ vi.mock('./QrImage', () => ({ default: () => React.createElement('div') }));
 vi.mock('./QrScanner', () => ({ default: () => React.createElement('div', { 'data-testid': 'heid-scanner' }) }));
 
 import { DeviceLinkSection } from './DeviceLinkSection';
-import { EMPTY_STATUS, type LinkStatus } from '../lib/link';
+import { EMPTY_STATUS, savePrefs, type LinkStatus } from '../lib/link';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root | null = null;
@@ -55,6 +58,7 @@ async function mount(
   offline?: Record<string, unknown>,
   onShowRemoteTabs?: () => void,
   onHandoff?: () => () => void,
+  onScan?: () => void,
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -63,10 +67,9 @@ async function mount(
     root!.render(
       <DeviceLinkSection
         dark={false}
-        rowCls=""
-        labelCls=""
         offline={offline as never}
         onShowRemoteTabs={onShowRemoteTabs}
+        onScan={onScan}
         onHandoff={onHandoff ?? (() => noopCancel)}
       />,
     );
@@ -80,6 +83,10 @@ const queue = (patch: Record<string, unknown>) => ({
   onSync: () => {}, onCancel: () => {}, ...patch,
 });
 const buttons = () => [...container!.querySelectorAll('button')].map(b => b.textContent || '');
+/** 粘贴配对码那一栏：标签挪进了 `aria-label`（占位符本身就是那枚码的样子，不再重复一遍） */
+const pasteInput = () => container!.querySelector('input[aria-label="link.pasteCode"]');
+const btnByText = (text: string) => [...container!.querySelectorAll('button')]
+  .find(b => (b.textContent || '').trim() === text);
 
 /** 在「粘贴配对码」那个输入框里填一枚码并点「配对」 */
 async function pair(uri: string) {
@@ -103,17 +110,44 @@ afterEach(() => {
   document.body.innerHTML = '';
   status = {};
   pairUriCalls = 0;
+  /* `paired` 是从 localStorage 读的偏好里来的，不清就会漏到下一个用例 */
+  localStorage.clear();
 });
 
 describe('手机侧那一格', () => {
-  it('没有「扫一扫」那颗按钮，也不挂相机层', async () => {
-    /* 没链路时这一格该出现的是不需要相机的等价入口（粘贴 / 短码 / 手填） */
+  it('宿主没给扫码的去处：卡里不摆扫一扫，配对方式那一组自己摊开', async () => {
     status = { ...EMPTY_STATUS };
     await mount(queue({}));
     expect(buttons()).not.toContain('link.scan');
     expect(container!.querySelector('[data-testid="heid-scanner"]')).toBeNull();
-    expect(container!.textContent).toContain('link.pasteCode');
+    /* 没有相机这条路时它就是唯一的路，收起来等于把人关在死路里 */
+    expect(pasteInput()).toBeTruthy();
     expect(container!.textContent).toContain('link.shortCode');
+  });
+
+  it('宿主给了去处：扫一扫是状态卡上当前那一步的主操作（满宽那颗，不是角落小钮）', async () => {
+    status = { ...EMPTY_STATUS };
+    const onScan = vi.fn();
+    await mount(queue({}), undefined, undefined, onScan);
+    const btn = btnByText('link.scan')!;
+    expect(btn).toBeTruthy();
+    expect(btn.className).toContain('w-full');
+    act(() => { btn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(onScan).toHaveBeenCalledTimes(1);
+  });
+
+  /* 一屏只许有一颗主操作：记住过设备之后主操作是「接回去」，扫一扫退成旁边那颗。
+     两条一样重的路等于没有路（2026-09-28 重做时定下的判法）。 */
+  it('记住过设备：主操作换成「连接到那台」，扫一扫退成次级', async () => {
+    status = { ...EMPTY_STATUS };
+    savePrefs({ keyId: 'ab12cd34ef56ab78', host: '192.168.1.20', port: 47123, peerName: 'PC-1' });
+    await mount(queue({}), undefined, undefined, vi.fn());
+    const primaries = [...container!.querySelectorAll('button')].filter(b => b.className.includes('bg-indigo-600'));
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0].textContent).toContain('link.reconnect');
+    const scan = btnByText('link.scan')!;
+    expect(scan).toBeTruthy();
+    expect(scan.className).not.toContain('bg-indigo-600');
   });
 
   it('有待同步与需确认时各报一行，并给「立即同步」', async () => {
@@ -129,6 +163,17 @@ describe('手机侧那一格', () => {
     await mount(queue({ offline: true, pending: 2 }));
     expect(container!.textContent).toContain('offline.banner:2');
     expect(buttons()).not.toContain('offline.syncNow');
+  });
+
+  /* 源码里的中文注释被当成界面文字渲染出来过一次：JSX 子元素位置上写块注释（少了外面那对花括号）
+     不会报错，只会把注释原样摊在屏幕上 —— 屏幕上一大段日期与"他点名"。这条守住这类泄漏。 */
+  it('注释不会漏成界面上的文字', async () => {
+    status = { ...EMPTY_STATUS };
+    await mount(queue({}));
+    const text = container!.textContent || '';
+    expect(text).not.toMatch(/2026-\d{2}-\d{2}/);
+    expect(text).not.toContain('/*');
+    expect(text).not.toContain('他点名');
   });
 
   it('没有欠账时那一行不占位', async () => {
@@ -165,7 +210,7 @@ describe('手机侧那一格', () => {
        粘贴配对码 / 短码 / 手填全被藏起来 —— 想改扫一张新码就没有路。 */
     status = client({ peerAddr: '192.168.31.87:47123', lastError: '这台设备未配对或已被移除，请重新扫码' });
     await mount(queue({}));
-    expect(container!.textContent).toContain('link.pasteCode');
+    expect(pasteInput()).toBeTruthy();
     expect(container!.querySelector('input[placeholder^="hide-link://pair"]')).toBeTruthy();
     expect(buttons()).toContain('link.pairByCode');
     expect(container!.textContent, '同时该看得懂上次为什么没连上').toContain('这台设备未配对或已被移除');

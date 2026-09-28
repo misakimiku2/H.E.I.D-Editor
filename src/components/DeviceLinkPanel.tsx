@@ -5,6 +5,8 @@
  * 两端形状不同，是他 2026-09-25 第二次点名后定的：
  *  - **桌面 / 平板**：菜单栏「菜单」按钮右侧一颗常驻按钮，点开是贴着按钮的浮层，
  *    浮层里就是那一整块（共享开关 / 配对二维码 / 已配对设备 / 离线队列 / 互联日志）。
+ *    安卓平板在这一整块的最上面多一颗「扫一扫」（2026-09-28 他实测点名平板没有扫码）：
+ *    平板顶栏走的是桌面布局，没有手机那颗顶栏按钮位，扫码只能从这一层进。
  *  - **手机**：顶栏那颗直接就是**「扫一扫」** —— 点下去开相机配对，不再先弹一层抽屉。
  *    其余入口（改用配对码、看桌面上正打开的文件、断开、离线队列、日志）在「设备互联」那一屏里
  *    （`DeviceLinkPage`，2026-09-28 他从设置里把它剥离出来了），连着时顶栏那颗换成状态按钮，
@@ -16,7 +18,7 @@
 import { lazy, Suspense, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Loader2, MonitorSmartphone, QrCode, X } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { useT } from '../lib/i18nContext';
+import { useT, type Translate } from '../lib/i18nContext';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
 import { useLinkStatus } from '../hooks/useLinkStatus';
 import { linkBadge, linkDotCls, type LinkBadge } from '../lib/linkBadge';
@@ -25,7 +27,6 @@ import { appAlert } from '../lib/appAlert';
 import { deviceName, linkRedialSnapshot, loadPrefs, pairUri, subscribeLinkRedial } from '../lib/link';
 import type { BeginHandoff } from '../hooks/useLinkHandoff';
 import { DeviceLinkSection, type LinkOfflineInfo } from './DeviceLinkSection';
-import { PANEL_LABEL_CLS, panelRowCls } from './panelRows';
 
 /* 扫码器 + 解码库（jsqr）只在点「扫一扫」时才用得到，懒加载、不进主包 */
 const QrScanner = lazy(() => import('./QrScanner'));
@@ -81,12 +82,53 @@ function LinkDot({ badge, dark, big }: { badge: LinkBadge; dark: boolean; big: b
   );
 }
 
+/**
+ * 懒加载包预热：手机顶栏与平板浮层各挂一次，谁先出现谁预热。
+ * 资源在 APK 内、不走网络，提前解包是白赚的 —— 省掉点「扫一扫」后那一段空窗。
+ */
+function useScanPreload() {
+  useEffect(() => {
+    if (!IS_ANDROID_APP) return;
+    void Promise.all([import('./QrScanner'), import('jsqr')]).catch(() => {});
+  }, []);
+}
+
+/**
+ * 扫到码之后那一条路径（手机顶栏与平板浮层共用，两处别各写一套）：
+ * 校验 URI → 立起交接 → 发配对。命令本身没过（地址为空、URI 不对）的话那次拨号没发生，
+ * 把交接收回，别等它超时报一句无关的话。
+ */
+function pairFromScan(text: string, t: Translate, onHandoff: BeginHandoff) {
+  const s = text.trim();
+  if (!s.startsWith('hide-link://pair')) {
+    appAlert(t('link.errUri'));
+    return;
+  }
+  const cancel = onHandoff();
+  void pairUri(s, deviceName())
+    .catch((e: unknown) => {
+      cancel();
+      appAlert(String((e as { message?: string })?.message ?? e));
+    });
+}
+
 /** 桌面 / 平板菜单栏上的互联按钮 + 贴着按钮的浮层 */
 export function DeviceLinkMenuButton(props: DeviceLinkPanelProps) {
   const t = useT();
   const { badge, tip } = useLinkEntryBadge(props.offline);
+  const status = useLinkStatus();
+  const connected = status.connected === true;
   const [open, setOpen] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  useScanPreload();
+
+  /* 相机开着的时候链路被后台接回来（免扫重连 / 退避重试成功）：把开合一起收掉。
+     不收的话 `scanOpen` 停在 true，下次断开时相机自己弹出来（与手机那颗同一条理由） */
+  useEffect(() => {
+    if (connected && scanOpen) setScanOpen(false);
+  }, [connected, scanOpen]);
 
   useEffect(() => {
     if (!open) return;
@@ -103,6 +145,9 @@ export function DeviceLinkMenuButton(props: DeviceLinkPanelProps) {
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
+
+  /* 状态卡里那颗「扫一扫」点下去：浮层自己收掉，相机层是全屏幕（z-150）的那一层 */
+  const startScan = () => { setOpen(false); setScanOpen(true); };
 
   return (
     <div ref={wrapRef} className="relative shrink-0">
@@ -157,16 +202,31 @@ export function DeviceLinkMenuButton(props: DeviceLinkPanelProps) {
                 它们都是整屏的去处，浮层留在上面只是挡编辑器（平板壳实测到的一次残留） */}
             <DeviceLinkSection
               dark={props.dark}
-              rowCls={panelRowCls(props.dark)}
-              labelCls={PANEL_LABEL_CLS}
               offline={props.offline}
               onHandoff={props.onHandoff}
+              onScan={IS_ANDROID_APP ? startScan : undefined}
               onBrowseRemote={(p) => { setOpen(false); props.onBrowseRemote?.(p); }}
               onShowRemoteTabs={() => { setOpen(false); props.onShowRemoteTabs?.(); }}
               onShowLog={() => { setOpen(false); props.onShowLog?.(); }}
             />
           </div>
         </div>
+      )}
+
+      {/* 相机层压在浮层之上（z-150 vs z-50）。浮层已经自己收掉了，
+          相机里那颗「改用配对码」再把浮层掀回来，两条路是同一格的两个入口 */}
+      {scanOpen && !connected && (
+        <Suspense fallback={null}>
+          <QrScanner
+            dark={props.dark}
+            onResult={(text) => {
+              setScanOpen(false);
+              pairFromScan(text, t, props.onHandoff);
+            }}
+            onClose={() => setScanOpen(false)}
+            onUseCode={() => { setScanOpen(false); setOpen(true); }}
+          />
+        </Suspense>
       )}
     </div>
   );
@@ -220,26 +280,12 @@ export function ScanLinkEntry({
     if (connected && open) onOpenChange(false);
   }, [connected, open, onOpenChange]);
 
-  /* 预热扫码用的两个懒加载包：顶栏一挂出来就把 QrScanner 与 jsQR 取回来（不挂相机、不申请权限）。
-     资源在 APK 内、不走网络，提前解包是白赚的——省掉点「扫一扫」后那一段空窗。 */
-  useEffect(() => {
-    void Promise.all([import('./QrScanner'), import('jsqr')]).catch(() => {});
-  }, []);
+  /* 预热扫码用的两个懒加载包：顶栏一挂出来就把 QrScanner 与 jsQR 取回来（不挂相机、不申请权限） */
+  useScanPreload();
 
   const onResult = (text: string) => {
     onOpenChange(false);
-    const s = text.trim();
-    if (!s.startsWith('hide-link://pair')) {
-      appAlert(t('link.errUri'));
-      return;
-    }
-    const cancel = onHandoff();
-    void pairUri(s, deviceName())
-      .catch((e: unknown) => {
-        // 命令本身没过（地址为空、URI 不对）：那次拨号没发生，别留在待交接里等超时
-        cancel();
-        appAlert(String((e as { message?: string })?.message ?? e));
-      });
+    pairFromScan(text, t, onHandoff);
   };
 
   const btnCls = cn(

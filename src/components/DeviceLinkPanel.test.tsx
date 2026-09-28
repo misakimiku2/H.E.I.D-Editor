@@ -29,7 +29,10 @@ vi.mock('../lib/fileIO', async (importOriginal) => ({
 }));
 
 let status: Record<string, unknown> = {};
-let emit: ((s: unknown) => void) | null = null;
+/** 状态订阅的替身：真身给每个订阅者各推一份，这里也必须广播 —— 一个组件里可以有两处
+    `useLinkStatus`（状态点那份与扫码那颗那份），只记下最后挂上的那个会漏掉另一处 */
+const statusSubs = new Set<(s: unknown) => void>();
+const emitStatus = (s: unknown) => { for (const cb of [...statusSubs]) cb(s); };
 const paired: { uri: string; device: string }[] = [];
 const alerts: string[] = [];
 const notes: { title: string; message?: string }[] = [];
@@ -38,7 +41,7 @@ vi.mock('../lib/link', async (importOriginal) => {
   return {
     ...real,
     fetchStatus: () => Promise.resolve({ ...real.EMPTY_STATUS, ...status }),
-    subscribeLinkStatus: (cb: (s: unknown) => void) => { emit = cb; return () => { emit = null; }; },
+    subscribeLinkStatus: (cb: (s: unknown) => void) => { statusSubs.add(cb); return () => { statusSubs.delete(cb); }; },
     subscribeLinkRedial: (cb: () => void) => { redialSubs.add(cb); return () => { redialSubs.delete(cb); }; },
     linkRedialSnapshot: () => redialSnap,
     pairingsList: () => Promise.resolve([]),
@@ -114,7 +117,7 @@ afterEach(() => {
   root = null;
   document.body.innerHTML = '';
   status = {};
-  emit = null;
+  statusSubs.clear();
   scanProps = null;
   paired.length = 0;
   alerts.length = 0;
@@ -140,6 +143,14 @@ describe('桌面 / 平板菜单栏的互联按钮', () => {
     expect(container!.querySelector('[data-testid="link-section"]')).toBeTruthy();
   });
 
+  it('桌面这一侧不摆扫一扫：桌面是被扫的那一方，扫码是客户端那半栏的动作', async () => {
+    await mount(<DeviceLinkMenuButton dark={false} onHandoff={beginHandoff} />);
+    act(() => { button().dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(panel()).toBeTruthy();
+    const labels = [...container!.querySelectorAll('button')].map(b => b.textContent ?? '');
+    expect(labels.some(x => x.includes('link.scan'))).toBe(false);
+  });
+
   it('点浮层外面收掉，点里面不收（里面有开关和输入框）', async () => {
     await mount(<DeviceLinkMenuButton dark={false} onHandoff={beginHandoff} />);
     act(() => { button().dispatchEvent(new MouseEvent('click', { bubbles: true })); });
@@ -161,7 +172,7 @@ describe('桌面 / 平板菜单栏的互联按钮', () => {
     status = base({ role: 'server', listening: true, port: 47123 });
     await mount(<DeviceLinkMenuButton dark onHandoff={beginHandoff} />);
     expect(dot()?.getAttribute('data-link-badge')).toBe('idle');
-    await act(async () => { emit?.(base({ role: 'server', listening: true, connected: true })); });
+    await act(async () => { emitStatus(base({ role: 'server', listening: true, connected: true })); });
     expect(dot()?.getAttribute('data-link-badge')).toBe('connected');
     /* 悬停说明说的是同一句话，不另编一份状态文案 */
     expect(button().getAttribute('title')).toContain('link.stateConnected');
@@ -271,7 +282,7 @@ describe('手机顶栏那颗互联入口：已经连着 = 状态按钮', () => {
     status = base(onLine);
     await mount(<ScanLinkEntry dark={false} open={false} onOpenChange={noop} onHandoff={beginHandoff} onStatus={noop} />);
     expect(button().getAttribute('aria-label')).toBe('settings.section.deviceLink');
-    await act(async () => { emit?.(base({ role: 'client', connected: false })); });
+    await act(async () => { emitStatus(base({ role: 'client', connected: false })); });
     expect(button().getAttribute('aria-label')).toBe('link.scan');
   });
 });

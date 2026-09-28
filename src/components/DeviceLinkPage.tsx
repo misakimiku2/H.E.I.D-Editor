@@ -16,14 +16,12 @@
  * 所以在这屏里按下扫一扫，相机是盖在这一屏上面的，而不是藏在它底下。
  */
 import { createPortal } from 'react-dom';
-import { ArrowLeft, QrCode } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useT } from '../lib/i18nContext';
 import { IS_TOUCH_PRIMARY } from '../lib/platform';
-import { useLinkStatus } from '../hooks/useLinkStatus';
 import type { BeginHandoff } from '../hooks/useLinkHandoff';
 import { DeviceLinkSection, type LinkOfflineInfo } from './DeviceLinkSection';
-import { PANEL_LABEL_CLS, panelRowCls } from './panelRows';
 
 interface DeviceLinkPageProps {
   dark: boolean;
@@ -33,7 +31,7 @@ interface DeviceLinkPageProps {
   onShowRemoteTabs: () => void;
   onShowLog: () => void;
   onHandoff: BeginHandoff;
-  /** 顶栏那颗「扫一扫」的同一个开合状态：这一屏里再给一颗入口，不必先退回去 */
+  /** 顶栏那颗「扫一扫」的同一个开合状态：交给状态卡当主操作，这一屏不再另摆一颗 */
   onScan?: () => void;
 }
 
@@ -41,15 +39,6 @@ export function DeviceLinkPage({
   dark, onClose, offline, onBrowseRemote, onShowRemoteTabs, onShowLog, onHandoff, onScan,
 }: DeviceLinkPageProps) {
   const t = useT();
-  const status = useLinkStatus();
-  /* 连着的时候不摆「扫一扫」：手机同时只服务一台电脑，扫了只会把当前这条顶掉，
-     那是误操作而不是功能（与顶栏那颗按钮同一套判法） */
-  const connected = status.connected === true;
-
-  const btn = cn(
-    'flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-medium text-white transition-colors active:bg-indigo-500',
-    IS_TOUCH_PRIMARY ? 'min-h-[52px]' : 'min-h-[40px]',
-  );
 
   return createPortal(
     <div
@@ -77,22 +66,13 @@ export function DeviceLinkPage({
       </header>
 
       <div className="heid-scroll heid-scroll-none min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2">
-        {onScan && !connected && (
-          <div className="px-3 pb-1 pt-2">
-            <button type="button" onClick={onScan} className={btn}>
-              <QrCode size={17} />
-              {t('link.scan')}
-            </button>
-          </div>
-        )}
         <DeviceLinkSection
           dark={dark}
-          rowCls={panelRowCls(dark)}
-          labelCls={PANEL_LABEL_CLS}
           offline={offline}
           onBrowseRemote={onBrowseRemote}
           onShowRemoteTabs={onShowRemoteTabs}
           onShowLog={onShowLog}
+          onScan={onScan}
           onHandoff={onHandoff}
         />
       </div>

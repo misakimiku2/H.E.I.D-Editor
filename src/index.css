@@ -192,6 +192,43 @@ body {
 .heid-pop-in {
   animation: heid-pop-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
+/* 设备互联状态卡的「接线轨道」：轨道上那个点走向对端 = 这条链路正在握手。
+   只在 connecting 一档跑；连上之后轨道是静止的实心 —— 一个还在动的点会让人以为没连稳 */
+@keyframes heid-rail-run {
+  0% { left: 8%; opacity: 0; }
+  18% { opacity: 1; }
+  82% { opacity: 1; }
+  100% { left: 88%; opacity: 0; }
+}
+.heid-rail-run {
+  animation: heid-rail-run 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* 服务端开着共享、还没有设备来连：对端那颗空心节点缓慢呼吸，说的是"在等你"而不是"坏了" */
+@keyframes heid-rail-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.95; }
+}
+.heid-rail-pulse {
+  animation: heid-rail-pulse 1.9s ease-in-out infinite;
+}
+
+/* 系统开了"减少动效"就全部静止：轨道的形状与颜色已经把状态说完了，动画只是加快的读法 */
+@media (prefers-reduced-motion: reduce) {
+  .heid-rail-run,
+  .heid-rail-pulse {
+    animation: none;
+  }
+}
+
+/* 轨道上「还没接上」那一档画虚线：实心 = 通了，虚线 = 没通。
+   两档都画成实线的话，「没开」和「断在半路」就成了同一个形状，
+   而这两个状态用户要做的事完全相反（一个去开，一个去查防火墙） */
+.heid-rail-dash {
+  height: 2px;
+  background-image: repeating-linear-gradient(90deg, currentColor 0 5px, transparent 5px 10px);
+}
+
 /* 主题预览卡片悬停：预览块轻微提亮 */
 .heid-theme-card .heid-theme-preview {
   transition: filter 0.15s ease;
