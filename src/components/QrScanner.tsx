@@ -111,11 +111,13 @@ const lensConstraints = (deviceId: string, res: { width: number; height: number 
     : { facingMode: 'environment', width: { ideal: res.width }, height: { ideal: res.height } };
 
 export default function QrScanner({
-  onResult, onClose,
+  onResult, onClose, onUseCode,
 }: {
   onResult: (text: string) => void;
   onClose: () => void;
   dark: boolean;
+  /** 「改用粘贴 / 短码」的去处：相机这条路走不通（或被用户跳过）时的等价入口 */
+  onUseCode?: () => void;
 }) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -925,9 +927,21 @@ export default function QrScanner({
           <p className="text-center text-sm text-amber-200/90">{t('link.scanBusy')}</p>
         )}
         {state === 'scanning' && (
-          <p className={cn('text-center text-sm', notCode ? 'text-amber-300' : 'text-white/85')}>
-            {notCode ? t('link.scanNotCode') : t('link.scanHint')}
-          </p>
+          <>
+            <p className={cn('text-center text-sm', notCode ? 'text-amber-300' : 'text-white/85')}>
+              {notCode ? t('link.scanNotCode') : t('link.scanHint')}
+            </p>
+            {/* 不想用相机、或者这颗镜头就是扫不上时的等价入口：配对码 / 6 位短码 / 手填 32 位 */}
+            {onUseCode && (
+              <button
+                type="button"
+                onClick={onUseCode}
+                className="mx-auto block min-h-[48px] px-3 text-center text-sm text-white/70"
+              >
+                {t('link.scanUseManual')}
+              </button>
+            )}
+          </>
         )}
         {(state === 'noperm' || state === 'nosupport' || state === 'unavail') && (
           <div className="space-y-2 text-center">
@@ -945,7 +959,7 @@ export default function QrScanner({
               )}
               <button
                 type="button"
-                onClick={onClose}
+                onClick={onUseCode ?? onClose}
                 className={cn('inline-flex min-h-[48px] items-center rounded-lg bg-white/15 px-5 text-sm text-white', !IS_TOUCH_PRIMARY && 'min-h-[36px]')}
               >
                 {t('link.scanUseManual')}

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Info, SaveAll, Plus, MoreVertical,
-  Keyboard, Link2, GitCompare, MonitorSmartphone,
+  FileText, Info, SaveAll, Plus, MoreVertical,
+  Keyboard, Link2, GitCompare,
   Eye, Pencil, Code, Table, Image as ImageIcon, Settings,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
@@ -13,6 +13,8 @@ interface TopAppBarProps {
   isDirty: boolean;
   isMarkdown: boolean;
   saving: boolean;
+  tabCount: number;
+  onOpenTabs: () => void;
   onNew: () => void;
   /** 另存为（底栏的「保存」在无名文档上也会走系统另存为，但这里保留显式入口） */
   onSaveAs: () => void;
@@ -25,7 +27,7 @@ interface TopAppBarProps {
   onSettings: () => void;
   onShortcuts: () => void;
   onAbout: () => void;
-  /** 预览切换（仅 markdown 等支持预览的内容提供；顶栏只留扫码与菜单，这一颗在「更多」菜单里） */
+  /** 预览切换（仅 markdown 等支持预览的内容提供；不在顶栏摆，收在下面「更多」菜单里） */
   canToggleView?: boolean;
   view?: 'edit' | 'preview';
   onToggleView?: () => void;
@@ -34,31 +36,27 @@ interface TopAppBarProps {
   csvView?: 'grid' | 'text';
   onToggleCsvView?: () => void;
   /**
-   * 「设备互联」一级入口（v1.5）：App 给一颗已经带好状态点的按钮，位置排在文件树右侧。
+   * 设备互联的一级入口（App 给一颗已经带好状态点的按钮）：没连着时它就是「扫一扫」，
+   * 连着时它换成「设备互联」—— 所以那一屏不再在「更多」菜单里重复摆一行。
    * 顶栏只负责排布与 48dp 档，状态怎么判归 `DeviceLinkPanel` 那一份，免得两处各写一套。
    */
   linkSlot?: React.ReactNode;
-  /**
-   * 「设备互联」那一屏的入口（顶栏那颗按钮没连着时是扫一扫，所以整屏另给一行）。
-   * 不给就不出现在「更多」菜单里 —— 非原生环境下那一屏没有内容可摆。
-   */
-  onDeviceLink?: () => void;
 }
 
 /**
- * 手机端顶栏：当前文件名（脏点）+ 扫一扫 + 溢出菜单。
+ * 手机端顶栏：标签页入口（数量徽标）+ 当前文件名（脏点）+ 扫一扫 / 设备互联 + 溢出菜单。
  * 取代桌面端自绘标题栏与菜单栏（安卓没有窗口按钮的概念）。
- * 标签页抽屉与文件树不在这里摆按钮，由屏幕左右边缘滑入（`usePhoneEdgeSwipes`）。
+ * 文件树不在这里摆按钮，由屏幕左边缘滑入（`usePhoneEdgeSwipes`）。
  * 溢出菜单只放底栏没有的：新建 / 另存为 / 预览切换 / 导入网址 / Diff / markdown 插入 / 设置等。
  * 打开文件、保存、关闭当前标签页已移除（v1.4.1 反馈）——前两项底部工具栏已有，
  * 关标签在标签页抽屉里做，不该藏进二级菜单。
  */
 export function TopAppBar({
-  isDarkMode, title, isDirty, isMarkdown, saving,
-  onNew, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
+  isDarkMode, title, isDirty, isMarkdown, saving, tabCount,
+  onOpenTabs, onNew, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
   onSettings, onShortcuts, onAbout,
   canToggleView, view, onToggleView,
-  csvView, onToggleCsvView, linkSlot, onDeviceLink,
+  csvView, onToggleCsvView, linkSlot,
 }: TopAppBarProps) {
   const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -114,7 +112,26 @@ export function TopAppBar({
          挤压导致按钮被裁切（v1.4 用户反馈），与桌面标题栏同用 calc 方案 */
       style={{ height: 'calc(3rem + var(--heid-safe-top, 0px))' }}
     >
-      {/* 标签页抽屉与文件树都改由屏幕左右边缘滑入（见 `usePhoneEdgeSwipes`），顶栏不再摆这两颗按钮 */}
+      {/* 标签页入口：数量徽标 */}
+      <button
+        onClick={onOpenTabs}
+        className={cn(
+          'flex items-center gap-1 px-2.5 h-12 rounded-md shrink-0 transition-colors',
+          isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600'
+        )}
+        aria-label={t('mobile.tabsTitle', { n: tabCount })}
+      >
+        <FileText size={17} />
+        <span
+          className={cn(
+            'min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center',
+            isDarkMode ? 'bg-zinc-700 text-zinc-300' : 'bg-zinc-200 text-zinc-600'
+          )}
+        >
+          {tabCount}
+        </span>
+      </button>
+
       {/* 当前文件名 + 状态点：这一行显示的就是当前标签，所以干净时是「当前」的绿点
           （与标签条 TabBar、标签页抽屉 TabSheet 同配色），只有未保存才换成琥珀 */}
       <div className="flex-1 min-w-0 flex items-center gap-1.5 px-1">
@@ -127,8 +144,7 @@ export function TopAppBar({
         <span className="truncate text-sm font-medium">{title}</span>
       </div>
 
-      {/* 预览切换与文件树不在顶栏摆（用户点名：顶栏只留扫码与菜单两颗），收进下面的更多菜单。
-          CSV 的两档切换仍留在顶栏——它是这一份文档的主视图，不是可选开关 */}
+      {/* CSV 的两档切换仍留在顶栏——它是这一份文档的主视图，不是可选开关 */}
       {csvView && onToggleCsvView && (
         <button
           onClick={onToggleCsvView}
@@ -169,7 +185,7 @@ export function TopAppBar({
           >
             {menuItem(<Plus size={16} className="shrink-0" />, t('menu.newFile'), onNew)}
             {menuItem(<SaveAll size={16} className="shrink-0" />, t('menu.saveAs'), onSaveAs, { disabled: saving })}
-            {/* 预览切换从顶栏搬到这里（顶栏只留扫码与菜单两颗） */}
+            {/* 预览切换不在顶栏摆（用户点名顶栏只留扫码与菜单），收在这里 */}
             {canToggleView && onToggleView && menuItem(
               view === 'preview' ? <Pencil size={16} className="shrink-0" /> : <Eye size={16} className="shrink-0" />,
               view === 'preview' ? t('mobile.switchToEdit') : t('mobile.switchToPreview'),
@@ -184,9 +200,6 @@ export function TopAppBar({
               </>
             )}
             <div className={cn('h-px mx-3 my-1', isDarkMode ? 'bg-zinc-700' : 'bg-zinc-200')} />
-            {onDeviceLink && (
-              menuItem(<MonitorSmartphone size={16} className="shrink-0" />, t('settings.section.deviceLink'), onDeviceLink)
-            )}
             {menuItem(<Settings size={16} className="shrink-0" />, t('menu.settings'), onSettings)}
             {menuItem(<Keyboard size={16} className="shrink-0" />, t('menu.shortcuts'), onShortcuts)}
             {menuItem(<Info size={16} className="shrink-0" />, t('menu.about'), onAbout)}

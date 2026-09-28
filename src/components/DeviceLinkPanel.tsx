@@ -287,7 +287,13 @@ export function ScanLinkEntry({
           而它挂在按钮外面，所以底下这颗是扫一扫还是在转圈都不影响这一层 */}
       {!connected && open && (
         <Suspense fallback={null}>
-          <QrScanner onResult={onResult} onClose={() => onOpenChange(false)} dark={dark} />
+          <QrScanner
+            onResult={onResult}
+            onClose={() => onOpenChange(false)}
+            dark={dark}
+            /* 「改用粘贴 / 短码」收掉相机、进同一去处（连着时那颗按钮点开的就是这一屏） */
+            onUseCode={() => { onOpenChange(false); onStatus(); }}
+          />
         </Suspense>
       )}
     </>

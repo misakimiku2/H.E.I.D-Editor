@@ -1767,6 +1767,8 @@ export default function App() {
           isDirty={!!activeTab?.isDirty}
           isMarkdown={!!isMarkdown}
           saving={file.saving}
+          tabCount={editor.tabs.length}
+          onOpenTabs={() => setTabSheetOpen(true)}
           onNew={file.handleNewFile}
           onSaveAs={file.handleSaveAs}
           onImportUrl={isTauri ? () => setUrlImportOpen(true) : undefined}
@@ -1785,9 +1787,6 @@ export default function App() {
               onStatus={showDeviceLink}
             />
           ) : undefined}
-          /* 「设备互联」整屏的第二个入口：没连着的时候顶栏那颗是扫一扫（点下去直接开相机，
-             不多一层），这一屏就从更多菜单进；连着时顶栏那颗自己就变成了入口 */
-          onDeviceLink={linkOffline ? showDeviceLink : undefined}
           onInsertTable={() => { if (isMarkdown) previewRef.current?.insertTable(); }}
           onInsertImage={() => { if (isMarkdown) previewRef.current?.openImageModal(); }}
           onSettings={() => setSettingsOpen(true)}
