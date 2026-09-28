@@ -798,7 +798,12 @@ export default function App() {
     }));
   }, [editor.setTabs]);
 
-  const menuRef = useRef<HTMLDivElement | null>(null);
+  /* 主菜单的「自己人」= 「菜单」那颗按钮 + 它摊开的面板，不是整条菜单栏。
+     算成整条栏的话，点栏上别的按钮收不掉菜单 —— 菜单栏上自己也有一颗带浮层的
+     （设备互联），两层于是同时摊在左上角，DOM 里靠后的把靠前的压住，
+     浮层的标题被菜单挡掉半张（2026-09-28 平板实测）。 */
+  const menuRef = useRef<HTMLButtonElement | null>(null);
+  const menuPanelRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<MarkdownPreviewHandle | null>(null);
 
   /* 关于弹窗：Esc 关闭 */
@@ -820,6 +825,7 @@ export default function App() {
     }
     const onDown = (e: MouseEvent) => {
       if (menuRef.current?.contains(e.target as Node)) return;
+      if (menuPanelRef.current?.contains(e.target as Node)) return;
       if (recentSubRef.current?.contains(e.target as Node)) return;
       setMenuOpen(false);
     };
@@ -1845,7 +1851,6 @@ export default function App() {
       {/* 菜单栏（手机端由顶栏取代） */}
       {!isPhone && (
       <div
-        ref={menuRef}
         className={cn(
           "border-b flex items-center px-2 shrink-0 relative select-none",
           IS_TOUCH_PRIMARY ? "h-14" : "h-9",
@@ -1853,6 +1858,7 @@ export default function App() {
         )}
       >
         <button
+          ref={menuRef}
           onClick={() => setMenuOpen(v => !v)}
           className={cn(
             IS_TOUCH_PRIMARY
@@ -2216,7 +2222,7 @@ export default function App() {
         )}
 
         {menuOpen && (
-          <div className={cn(
+          <div ref={menuPanelRef} className={cn(
             "absolute left-2 top-full -mt-px z-50 w-52 rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col",
             isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
           )}>
