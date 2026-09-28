@@ -100,6 +100,7 @@ import { useFileActions } from './hooks/useFileActions';
 import { useSessionPersistence } from './hooks/useSessionPersistence';
 import { useTabReport } from './hooks/useTabReport';
 import { usePlatformIntegration } from './hooks/usePlatformIntegration';
+import { usePhoneEdgeSwipes } from './hooks/usePhoneEdgeSwipes';
 import { useAppShortcuts } from './hooks/useAppShortcuts';
 import { useSplitScroll } from './hooks/useSplitScroll';
 import { useShowKbdHints } from './hooks/useHardwareKeyboard';
@@ -1123,6 +1124,13 @@ export default function App() {
     setTreeRootPath(p);
     if (!p) setTreeOpen(false);
   }, []);
+  /* 手机端顶栏只留扫码与菜单两颗：标签页抽屉与文件树改由屏幕左右边缘滑入 */
+  usePhoneEdgeSwipes({
+    enabled: isPhone,
+    blocked: () => Object.values(overlayState).some(Boolean),
+    onLeftEdge: () => { if (!treeOpen) handleToggleTree(); },
+    onRightEdge: () => setTabSheetOpen(true),
+  });
   /* 手机「浏览这台电脑的文件」：远程根由已连接设备的 id 直接构成，没有"再选一次目录"
      这一步（共享范围就是桌面文件树那个根）；顺手收掉设置页，抽屉才看得见 */
   const openRemoteTree = useCallback((p: string) => {
@@ -1759,8 +1767,6 @@ export default function App() {
           isDirty={!!activeTab?.isDirty}
           isMarkdown={!!isMarkdown}
           saving={file.saving}
-          tabCount={editor.tabs.length}
-          onOpenTabs={() => setTabSheetOpen(true)}
           onNew={file.handleNewFile}
           onSaveAs={file.handleSaveAs}
           onImportUrl={isTauri ? () => setUrlImportOpen(true) : undefined}
@@ -1787,9 +1793,6 @@ export default function App() {
           onSettings={() => setSettingsOpen(true)}
           onShortcuts={() => setShortcutsOpen(true)}
           onAbout={() => setAboutOpen(true)}
-          treeOpen={treeOpen}
-          hasTreeRoot={!!treeRootPath}
-          onToggleTree={handleToggleTree}
           canToggleView={!!isMarkdown && !activeTab?.readOnly}
           view={effectiveView === 'preview' ? 'preview' : 'edit'}
           onToggleView={toggleMdView}

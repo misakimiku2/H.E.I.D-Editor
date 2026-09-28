@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  FileText, Folder, FolderOpen,
   Info, SaveAll, Plus, MoreVertical,
   Keyboard, Link2, GitCompare, MonitorSmartphone,
   Eye, Pencil, Code, Table, Image as ImageIcon, Settings,
@@ -14,8 +13,6 @@ interface TopAppBarProps {
   isDirty: boolean;
   isMarkdown: boolean;
   saving: boolean;
-  tabCount: number;
-  onOpenTabs: () => void;
   onNew: () => void;
   /** 另存为（底栏的「保存」在无名文档上也会走系统另存为，但这里保留显式入口） */
   onSaveAs: () => void;
@@ -28,11 +25,7 @@ interface TopAppBarProps {
   onSettings: () => void;
   onShortcuts: () => void;
   onAbout: () => void;
-  /** 文件树抽屉：已开 → 收起；未开 → 无根目录时唤起系统目录选择，有根目录 → 展开 */
-  treeOpen?: boolean;
-  hasTreeRoot?: boolean;
-  onToggleTree?: () => void;
-  /** 预览切换（仅 markdown 等支持预览的内容提供；放在顶栏，见 v1.4 用户反馈） */
+  /** 预览切换（仅 markdown 等支持预览的内容提供；顶栏只留扫码与菜单，这一颗在「更多」菜单里） */
   canToggleView?: boolean;
   view?: 'edit' | 'preview';
   onToggleView?: () => void;
@@ -53,17 +46,17 @@ interface TopAppBarProps {
 }
 
 /**
- * 手机端顶栏：标签数入口 + 当前文件名（脏点）+ 溢出菜单。
+ * 手机端顶栏：当前文件名（脏点）+ 扫一扫 + 溢出菜单。
  * 取代桌面端自绘标题栏与菜单栏（安卓没有窗口按钮的概念）。
- * 溢出菜单只放底栏没有的：新建 / 另存为 / 导入网址 / Diff / markdown 插入 / 设置等。
+ * 标签页抽屉与文件树不在这里摆按钮，由屏幕左右边缘滑入（`usePhoneEdgeSwipes`）。
+ * 溢出菜单只放底栏没有的：新建 / 另存为 / 预览切换 / 导入网址 / Diff / markdown 插入 / 设置等。
  * 打开文件、保存、关闭当前标签页已移除（v1.4.1 反馈）——前两项底部工具栏已有，
  * 关标签在标签页抽屉里做，不该藏进二级菜单。
  */
 export function TopAppBar({
-  isDarkMode, title, isDirty, isMarkdown, saving, tabCount,
-  onOpenTabs, onNew, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
+  isDarkMode, title, isDirty, isMarkdown, saving,
+  onNew, onSaveAs, onInsertTable, onInsertImage, onImportUrl, onOpenDiff,
   onSettings, onShortcuts, onAbout,
-  treeOpen, hasTreeRoot, onToggleTree,
   canToggleView, view, onToggleView,
   csvView, onToggleCsvView, linkSlot, onDeviceLink,
 }: TopAppBarProps) {
@@ -121,26 +114,7 @@ export function TopAppBar({
          挤压导致按钮被裁切（v1.4 用户反馈），与桌面标题栏同用 calc 方案 */
       style={{ height: 'calc(3rem + var(--heid-safe-top, 0px))' }}
     >
-      {/* 标签页入口：数量徽标 */}
-      <button
-        onClick={onOpenTabs}
-        className={cn(
-          'flex items-center gap-1 px-2.5 h-12 rounded-md shrink-0 transition-colors',
-          isDarkMode ? 'hover:bg-zinc-700 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600'
-        )}
-        aria-label={t('mobile.openTabs')}
-      >
-        <FileText size={17} />
-        <span
-          className={cn(
-            'min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center',
-            isDarkMode ? 'bg-zinc-700 text-zinc-300' : 'bg-zinc-200 text-zinc-600'
-          )}
-        >
-          {tabCount}
-        </span>
-      </button>
-
+      {/* 标签页抽屉与文件树都改由屏幕左右边缘滑入（见 `usePhoneEdgeSwipes`），顶栏不再摆这两颗按钮 */}
       {/* 当前文件名 + 状态点：这一行显示的就是当前标签，所以干净时是「当前」的绿点
           （与标签条 TabBar、标签页抽屉 TabSheet 同配色），只有未保存才换成琥珀 */}
       <div className="flex-1 min-w-0 flex items-center gap-1.5 px-1">
@@ -153,22 +127,8 @@ export function TopAppBar({
         <span className="truncate text-sm font-medium">{title}</span>
       </div>
 
-      {/* 预览切换：仅支持预览的内容（markdown）显示，放在顶栏（v1.4 用户反馈：
-          不占据全局底栏位置） */}
-      {canToggleView && onToggleView && (
-        <button
-          onClick={onToggleView}
-          className={cn(
-            'w-12 h-12 rounded-md flex items-center justify-center shrink-0 transition-colors',
-            isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500'
-          )}
-          aria-label={view === 'preview' ? t('mobile.switchToEdit') : t('mobile.switchToPreview')}
-        >
-          {view === 'preview' ? <Pencil size={19} /> : <Eye size={19} />}
-        </button>
-      )}
-
-      {/* CSV 网格/文本切换：图标指向可切换到的视图 */}
+      {/* 预览切换与文件树不在顶栏摆（用户点名：顶栏只留扫码与菜单两颗），收进下面的更多菜单。
+          CSV 的两档切换仍留在顶栏——它是这一份文档的主视图，不是可选开关 */}
       {csvView && onToggleCsvView && (
         <button
           onClick={onToggleCsvView}
@@ -182,24 +142,8 @@ export function TopAppBar({
         </button>
       )}
 
-      {/* 设备互联一级入口（App 给的按钮，自带状态点）：排在文件树右侧、更多菜单左侧 */}
+      {/* 设备互联一级入口（App 给的按钮，自带状态点）：没连着时就是扫一扫 */}
       {linkSlot}
-
-      {/* 文件树抽屉入口：已开=实心(点击收起)；未开且有根目录=展开；无根目录=唤起系统目录选择 */}
-      {onToggleTree && (
-        <button
-          onClick={onToggleTree}
-          className={cn(
-            'w-12 h-12 rounded-md flex items-center justify-center shrink-0 transition-colors',
-            treeOpen
-              ? (isDarkMode ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-200 text-zinc-700')
-              : (isDarkMode ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-100 text-zinc-500')
-          )}
-          aria-label={hasTreeRoot ? t('tree.toggle') : t('tree.openFolder')}
-        >
-          {treeOpen || !hasTreeRoot ? <Folder size={19} /> : <FolderOpen size={19} />}
-        </button>
-      )}
 
       <div ref={menuRef} className="relative shrink-0">
         <button
@@ -225,6 +169,12 @@ export function TopAppBar({
           >
             {menuItem(<Plus size={16} className="shrink-0" />, t('menu.newFile'), onNew)}
             {menuItem(<SaveAll size={16} className="shrink-0" />, t('menu.saveAs'), onSaveAs, { disabled: saving })}
+            {/* 预览切换从顶栏搬到这里（顶栏只留扫码与菜单两颗） */}
+            {canToggleView && onToggleView && menuItem(
+              view === 'preview' ? <Pencil size={16} className="shrink-0" /> : <Eye size={16} className="shrink-0" />,
+              view === 'preview' ? t('mobile.switchToEdit') : t('mobile.switchToPreview'),
+              onToggleView
+            )}
             {onOpenDiff && menuItem(<GitCompare size={16} className="shrink-0" />, t('diff.menuTitle'), onOpenDiff)}
             {onImportUrl && menuItem(<Link2 size={16} className="shrink-0" />, t('import.menu'), onImportUrl)}
             {isMarkdown && (

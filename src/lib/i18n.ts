@@ -64,7 +64,6 @@ const zh = {
   'tools.insertTable': '插入表格',
   'tools.insertImage': '插入图片',
 
-  'mobile.openTabs': '打开标签页列表',
   'mobile.moreMenu': '更多菜单',
   'mobile.switchToEdit': '切换到编辑',
   'mobile.switchToPreview': '切换到预览',
@@ -917,7 +916,6 @@ const en: Record<MessageKey, string> = {
   'tools.insertTable': 'Insert Table',
   'tools.insertImage': 'Insert Image',
 
-  'mobile.openTabs': 'Open tab list',
   'mobile.moreMenu': 'More menu',
   'mobile.switchToEdit': 'Switch to Edit',
   'mobile.switchToPreview': 'Switch to Preview',
