@@ -21,6 +21,12 @@ export interface OverlayState {
   menuOpen: boolean;
   aboutOpen: boolean;
   pendingDiscard: PendingDiscardConfirm | null;
+  /** 保存文件名确认抽屉（EMUI 系统保存框会强补 .txt，另存为/首次保存前先问真名） */
+  saveNameOpen: boolean;
+  /** 编辑器/预览的 Markdown 格式菜单（选区菜单、空白插入菜单；状态经 fmtMenuBus 上报） */
+  fmtMenuOpen: boolean;
+  /** 跟随选区的操作条（复制 / 更多）：比格式菜单低一层，返回键第二个才轮到它 */
+  selBarOpen: boolean;
   findOpen: boolean;
   settingsOpen: boolean;
   /** 手机顶栏那颗「扫一扫」点开的相机层 */
@@ -35,6 +41,9 @@ export interface OverlayState {
 
 export interface OverlayActions {
   cancelDiscard: () => void;
+  closeSaveName: () => void;
+  closeFmtMenu: () => void;
+  closeSelBar: () => void;
   closeFind: () => void;
   closeSettings: () => void;
   closeScan: () => void;
@@ -228,6 +237,8 @@ export function usePlatformIntegration({
       const o = overlayStateRef.current;
       const a = overlayActionsRef.current;
       if (o.pendingDiscard) { a.cancelDiscard(); return; }
+      /* 文件名抽屉在保存流程里：取消它 = 取消这次保存，不能落到退出确认 */
+      if (o.saveNameOpen) { a.closeSaveName(); return; }
       /* 远程标签那一屏是全屏层（z-150，压在设置与相机之上），所以它第一个被返回键收掉 */
       if (o.remoteTabsOpen) { a.closeRemoteTabs(); return; }
       if (o.findOpen) { a.closeFind(); return; }
@@ -238,6 +249,12 @@ export function usePlatformIntegration({
       if (o.shortcutsOpen) { a.closeShortcuts(); return; }
       if (o.tabMenuOpen) { a.closeTabMenu(); return; }
       if (o.tabSheetOpen) { a.closeTabSheet(); return; }
+      /* 格式菜单浮在编辑面上（z-90，比标签页抽屉/主菜单低）：那些都收掉之后才轮到它，
+         不能让它开着就落到退出确认 */
+      if (o.fmtMenuOpen) { a.closeFmtMenu(); return; }
+      /* 选区操作条在格式菜单之下：菜单收掉后条会重新露出来（它只是被菜单遮住），
+         第二次返回才把它一并收掉——不收到链里，选中文字后按返回会直接走出 App */
+      if (o.selBarOpen) { a.closeSelBar(); return; }
       if (o.menuOpen) { a.closeMenu(); return; }
       if (o.aboutOpen) { a.closeAbout(); return; }
       void (async () => {

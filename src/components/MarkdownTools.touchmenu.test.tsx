@@ -99,4 +99,37 @@ describe('FormatMenu 触屏变体', () => {
     act(() => { bold.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect(applied).toEqual([{ kind: 'bold' }]);
   });
+
+  it('面板高度封顶（≤70vh 且 ≤640）并带 overscroll-behavior: contain——不再糊满整屏', () => {
+    render(
+      <FormatMenu
+        menu={{ x: 10, y: 10, text: '' }}
+        isDarkMode={false}
+        onApply={() => {}}
+        onClose={() => {}}
+      />
+    );
+    const st = panel().getAttribute('style') || '';
+    /* jsdom 视口高 768 → 70% = 538（< 640 封顶值） */
+    expect(st).toContain('max-height: 538px');
+    expect(st).toContain('overscroll-behavior: contain');
+  });
+
+  it('菜单自身的滚动不关闭（面板内可滚）；面板外的滚动才关闭', () => {
+    const onClose = vi.fn();
+    render(
+      <FormatMenu
+        menu={{ x: 10, y: 10, text: '' }}
+        isDarkMode={false}
+        onApply={() => {}}
+        onClose={onClose}
+      />
+    );
+    /* 面板自己滚（scroll 事件以面板为 target 经过 window 捕获段）：不关 */
+    act(() => { panel().dispatchEvent(new Event('scroll')); });
+    expect(onClose).not.toHaveBeenCalled();
+    /* 背后文档滚：关 */
+    act(() => { document.dispatchEvent(new Event('scroll')); });
+    expect(onClose).toHaveBeenCalled();
+  });
 });

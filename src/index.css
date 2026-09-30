@@ -168,6 +168,17 @@ body {
   bottom: calc(var(--heid-kb, 0px) + var(--heid-dock-inset-kb, 0px));
 }
 
+/* 文件名确认抽屉的停靠：平时让出手势条，键盘弹出时贴键盘上沿（--heid-kb 是唯一的键盘高度来源） */
+.heid-savename-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--heid-safe-bottom, 0px));
+}
+.heid-kb-open .heid-savename-dock {
+  bottom: calc(var(--heid-kb, 0px));
+}
+
 /* 底部抽屉动画 */
 @keyframes heid-sheet-up {
   from { transform: translateY(100%); }

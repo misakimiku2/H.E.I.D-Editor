@@ -58,6 +58,11 @@ export interface FileActionsOptions {
   /** 远程保存成功了：这一份如果还躺在离线队列里（断连期间攒过一次、刚才又当场存了一次），
       桌面已经收下更新的那份，队列里那条就该跟着没 —— 不摘它会留下一个假的「待同步」 */
   onRemoteSaved?: (path: string) => Promise<void>;
+  /**
+   * 安卓另存为/首次保存：EMUI 系统保存框会把改过的扩展名强补回 .txt，先在自己应用里问文件名，
+   * 系统框只负责选位置。返回 null = 用户取消这次保存。
+   */
+  askSaveName?: (defaultName: string) => Promise<string | null>;
   /* 自动保存设置（App 层持有 settings 状态，只传相关字段） */
   autosaveEnabled: boolean;
   autosaveIntervalSec: number;
@@ -66,7 +71,7 @@ export interface FileActionsOptions {
 
 export function useFileActions({
   editor, askDiscardConfirm, pendingDiscardRef, exitingRef, updateKnownDiskContent, onRemoteConflict,
-  onRemoteOffline, onRemoteSaved, autosaveEnabled, autosaveIntervalSec, t,
+  onRemoteOffline, onRemoteSaved, askSaveName, autosaveEnabled, autosaveIntervalSec, t,
 }: FileActionsOptions) {
   const { tabsRef, setTabs, activeTab, setActiveTabId, setActiveTabIdRef, recordContentChange, updateTabContent, deleteTab } = editor;
   const [saving, setSaving] = useState(false);
@@ -319,7 +324,7 @@ export function useFileActions({
       savingRef.current = true;
       setSaving(true);
       try {
-        const r = await saveFileToDisk(tab, renderLogText(t, logFileHeader(t, deviceName())), true, opts?.silent ?? false);
+        const r = await saveFileToDisk(tab, renderLogText(t, logFileHeader(t, deviceName())), true, opts?.silent ?? false, askSaveName);
         return !!r.ok;
       } finally {
         savingRef.current = false;
@@ -330,7 +335,7 @@ export function useFileActions({
     savingRef.current = true;
     setSaving(true);
     try {
-      const result = await saveFileToDisk(tab, tab.content, saveAs, opts?.silent ?? false);
+      const result = await saveFileToDisk(tab, tab.content, saveAs, opts?.silent ?? false, askSaveName);
       const conflict = result.remoteConflict;
       if (conflict) {
         /* 桌面一个字都没写。基线换成桌面当前那份：用户采纳完再存，不会撞上同一次冲突 */
@@ -378,7 +383,7 @@ export function useFileActions({
       savingRef.current = false;
       setSaving(false);
     }
-  }, [addRecent, onRemoteConflict, onRemoteOffline, onRemoteSaved, setTabs, t, updateKnownDiskContent]);
+  }, [addRecent, askSaveName, onRemoteConflict, onRemoteOffline, onRemoteSaved, setTabs, t, updateKnownDiskContent]);
 
   const handleSave = useCallback(async () => {
     if (!activeTab) return;

@@ -61,7 +61,14 @@ export const ContextMenu = React.memo<{
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
-    const onScrollOrResize = () => onClose();
+    /* 菜单自身的滚动（触屏上条目多了必滚）不是「外面在动」：不关；
+       桌面滚轮在菜单内滚动同理。只有面板外的滚动才关。
+       scroll 的 target 可能是 window/document（非 Node），先 instanceof 再 contains */
+    const onScrollOrResize = (e: Event) => {
+      const target = e.target;
+      if (e.type === 'scroll' && target instanceof Node && ref.current?.contains(target)) return;
+      onClose();
+    };
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
@@ -89,7 +96,11 @@ export const ContextMenu = React.memo<{
         "fixed z-[95] rounded-xl border shadow-xl backdrop-blur-md py-1 flex flex-col select-none overflow-y-auto heid-scroll heid-panel-fit",
         isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
       )}
-      style={{ left, top, width: PANEL_W }}
+      style={{
+        left, top, width: PANEL_W,
+        /* 触屏：滚到顶/底不链到背后的文件树（桌面滚轮穿透是习惯行为，不动） */
+        ...(TOUCH ? { overscrollBehavior: 'contain' as const } : {}),
+      }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {menu.items.map((item, i) => (

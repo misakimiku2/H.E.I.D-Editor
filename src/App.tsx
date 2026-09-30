@@ -84,6 +84,7 @@ import { TopAppBar } from './components/mobile/TopAppBar';
 import { BottomToolbar } from './components/mobile/BottomToolbar';
 import { StatusStrip } from './components/mobile/StatusStrip';
 import { TabSheet } from './components/mobile/TabSheet';
+import { SaveNameSheet } from './components/mobile/SaveNameSheet';
 import { androidCreateDoc, androidWriteUri, formatFileSize, isTauri, writeLocalPath, type RemoteConflict } from './lib/fileIO';
 import {
   INITIAL_WELCOME_ID, LINK_LOG_TAB_ID, makeLinkLogTab, makeReleaseNotesTab, makeUntitledTab, makeWelcomeTab,
@@ -96,10 +97,12 @@ import { useTheme } from './hooks/useTheme';
 import { useEditorState } from './hooks/useEditorState';
 import { useDiffTimelines } from './hooks/useDiffTimelines';
 import { useDiscardConfirm } from './hooks/useDiscardConfirm';
+import { useSaveNamePrompt } from './hooks/useSaveNamePrompt';
 import { useFileActions } from './hooks/useFileActions';
 import { useSessionPersistence } from './hooks/useSessionPersistence';
 import { useTabReport } from './hooks/useTabReport';
 import { usePlatformIntegration } from './hooks/usePlatformIntegration';
+import { closeAllFmtMenus, subscribeFmtMenuOpen, closeAllSelBars, subscribeSelBarOpen } from './lib/fmtMenuBus';
 import { usePhoneEdgeSwipes } from './hooks/usePhoneEdgeSwipes';
 import { useAppShortcuts } from './hooks/useAppShortcuts';
 import { useSplitScroll } from './hooks/useSplitScroll';
@@ -182,6 +185,8 @@ export default function App() {
     initialTabs: [makeWelcomeTab(INITIAL_WELCOME_ID)],
   });
   const { pendingDiscard, pendingDiscardRef, askDiscardConfirm } = useDiscardConfirm();
+  /* 安卓另存为/首次保存的文件名确认（EMUI 系统保存框强补 .txt，先问真名再进系统框） */
+  const { pendingSaveName, askSaveName } = useSaveNamePrompt();
   /* 保存并退出进行中，忽略期间的重复关闭请求 */
   const exitingRef = useRef(false);
 
@@ -322,6 +327,7 @@ export default function App() {
     onRemoteConflict: handleRemoteConflict,
     onRemoteOffline: offline.enqueueOffline,
     onRemoteSaved: offline.dropForPath,
+    askSaveName,
     autosaveEnabled: settings.autosaveEnabled,
     autosaveIntervalSec: settings.autosaveIntervalSec,
     t,
@@ -948,9 +954,15 @@ export default function App() {
   }, [editor.setTabs, editor.setActiveTabId, t]);
 
   /* ---- 平台适配（拖拽 / 外部交来的文件 / 链接守卫 / 关闭拦截 / 安卓返回键与安全区 / 浏览器兜底）---- */
+  /* 编辑器/预览的 Markdown 格式菜单与选区操作条：开不开跟选区住在组件内部，经 fmtMenuBus
+     上报——返回键逐层关闭链要看得见它们，否则菜单开着按返回会直接走到退出确认 */
+  const [fmtMenuOpen, setFmtMenuOpen] = useState(false);
+  const [selBarOpen, setSelBarOpen] = useState(false);
+  useEffect(() => subscribeFmtMenuOpen(setFmtMenuOpen), []);
+  useEffect(() => subscribeSelBarOpen(setSelBarOpen), []);
   const overlayState = {
-    tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, findOpen: findState.open, settingsOpen, scanOpen,
-    remoteTabsOpen, deviceLinkOpen, shortcutsOpen, tabMenuOpen: !!tabMenu,
+    tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, saveNameOpen: !!pendingSaveName, findOpen: findState.open, settingsOpen, scanOpen,
+    remoteTabsOpen, deviceLinkOpen, shortcutsOpen, tabMenuOpen: !!tabMenu, fmtMenuOpen, selBarOpen,
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
@@ -963,6 +975,9 @@ export default function App() {
     overlayState,
     overlayActions: {
       cancelDiscard: () => pendingDiscard?.resolve('cancel'),
+      closeSaveName: () => pendingSaveName?.resolve(null),
+      closeFmtMenu: () => closeAllFmtMenus(),
+      closeSelBar: () => closeAllSelBars(),
       closeFind,
       closeSettings: () => setSettingsOpen(false),
       closeScan: () => setScanOpen(false),
@@ -1133,7 +1148,9 @@ export default function App() {
   /* 手机端顶栏只留扫码与菜单两颗：标签页抽屉与文件树改由屏幕左右边缘滑入 */
   usePhoneEdgeSwipes({
     enabled: isPhone,
-    blocked: () => Object.values(overlayState).some(Boolean),
+    /* 跟随选区的那条小工具条不算「盖住界面的浮层」：选中文字时也该能边缘滑出抽屉/文件树。
+       格式菜单、抽屉这类成屏的浮层才拦（overlayState 的其余项） */
+    blocked: () => Object.entries(overlayState).some(([k, v]) => !!v && k !== 'selBarOpen'),
     onLeftEdge: () => { if (!treeOpen) handleToggleTree(); },
     onRightEdge: () => setTabSheetOpen(true),
   });
@@ -3177,6 +3194,15 @@ export default function App() {
             : undefined}
           onConfirm={() => pendingDiscard.resolve('discard')}
           onCancel={() => pendingDiscard.resolve('cancel')}
+        />
+      )}
+
+      {/* 保存文件名确认抽屉（安卓另存为/首次保存；EMUI 系统框会强补 .txt，先问真名） */}
+      {pendingSaveName && (
+        <SaveNameSheet
+          defaultName={pendingSaveName.defaultName}
+          isDarkMode={isDarkMode}
+          onResolve={pendingSaveName.resolve}
         />
       )}
 

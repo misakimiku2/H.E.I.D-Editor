@@ -22,6 +22,8 @@ import { readClipboardText, writeClipboardText, clipboardReadPermissionState, is
 import { clipboardHasImage as detectClipboardHasImage, imageFileFromClipboard } from '../lib/markdownImagePaste';
 import { loadLanguageExtension } from '../lib/codemirror';
 import { parseColorLiteral, serializeColorLiteral } from '../lib/colorLiteral';
+import { notifyFmtMenuClosed, notifyFmtMenuOpen, registerFmtMenuClose,
+  notifySelBarClosed, notifySelBarOpen, registerSelBarClose } from '../lib/fmtMenuBus';
 import type { Rgba } from '../lib/colorMath';
 import { colorDotExtension, colorLiteralCovering } from './colorDotExtension';
 import { ColorPickerPopover } from './ColorPickerPopover';
@@ -441,6 +443,14 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   /* markdown 右键格式化后，下一次 onChange 以 major 记入撤销历史 */
   const majorNextRef = useRef(false);
   const [mdMenu, setMdMenu] = useState<{ x: number; y: number; from: number; to: number; text: string } | null>(null);
+  /* mdMenu（选区格式菜单）的开关上报与返回键成批关闭：见 fmtMenuBus（与预览侧同一总线，
+     App 的安卓返回键链只订一个「有没有开着的」布尔，不分 pane） */
+  useEffect(() => {
+    if (!mdMenu) return;
+    notifyFmtMenuOpen();
+    return () => notifyFmtMenuClosed();
+  }, [mdMenu]);
+  useEffect(() => registerFmtMenuClose(() => setMdMenu(null)), []);
   /* 通用右键菜单（非 markdown 格式化路径都走这里；minimap/行号随容器一并接管） */
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [clipboardHasImage, setClipboardHasImage] = useState(false);
@@ -472,6 +482,18 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     /** 选区压在某条颜色字面量上时为其完整区间，否则 null（触屏取色入口） */
     colorRange: { from: number; to: number } | null;
   } | null>(null);
+  /* 选区工具条是格式菜单低一层的浮层：返回键先关菜单、再关这条（见 fmtMenuBus）。
+     关闭＝把 CodeMirror 选区收回头部，工具条由 updateListener 跟着退场 */
+  useEffect(() => {
+    if (!touchFmtBtn) return;
+    notifySelBarOpen();
+    return () => notifySelBarClosed();
+  }, [touchFmtBtn]);
+  useEffect(() => registerSelBarClose(() => {
+    const view = viewReadyRef.current;
+    if (view) view.dispatch({ selection: { anchor: view.state.selection.main.head } });
+    setTouchFmtBtn(null);
+  }), []);
   /* 最近使用的格式化命令（工具条「最近使用」面板） */
   const [lastMdOp, setLastMdOp] = useState<MdOp | null>(() => loadLastMdOp());
   /* 颜色取色会话：seq 为会话 id（key），from/to 随文档编辑重映射；anchor 是圆点视口坐标。
@@ -1866,19 +1888,30 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               onSelect: () => {
                 const view = viewReadyRef.current;
                 const range = touchFmtBtn.colorRange;
-                if (view && range) openColorPickerRef.current(view, range);
+                if (view && range) {
+                  openColorPickerRef.current(view, range);
+                  /* 取色器有自己的浮层，工具条让位（选区留着，取色结果仍能写回） */
+                  setTouchFmtBtn(null);
+                }
               },
             }] : []),
           ]}
           onCopy={() => {
             const view = viewReadyRef.current;
-            if (view) void copySelectionText(view);
+            if (!view) return;
+            const head = view.state.selection.main.head;
+            void copySelectionText(view);
+            /* 复制即消费选区：光标收回头部，工具条由 updateListener 收起——
+               不然条永远赖在选区旁（工具条的可见性跟着选区走） */
+            view.dispatch({ selection: { anchor: head } });
           }}
           onApply={markdownMenu ? (op) => {
             const view = viewReadyRef.current;
             if (!view) return;
             const { from, to } = touchFmtBtn;
             applyEditorMdOp(op, { from, to, text: view.state.sliceDoc(from, to) });
+            /* 命令已落到选区上：同样收掉选区让工具条退走 */
+            view.dispatch({ selection: { anchor: view.state.selection.main.head } });
           } : undefined}
           onMore={() => {
             const view = viewReadyRef.current;

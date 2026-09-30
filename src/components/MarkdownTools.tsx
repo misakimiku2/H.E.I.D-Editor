@@ -318,7 +318,15 @@ export const FormatMenu = React.memo<{
     const onDown = (e: PointerEvent | MouseEvent) => {
       if (!ref.current?.contains(e.target as Node)) onClose();
     };
-    const onScrollOrResize = () => onClose();
+    /* 触屏菜单自身可滚（35 条命令 + 系统字号放大后必超高，见下 maxHeight）：
+       面板自己的滚动不是「外面在动」，不能关——否则滚第一条命令菜单就没了；
+       桌面同理：滚轮在菜单内滚动不该把它关掉。只有面板外的滚动（编辑器/预览在动）才关。
+       scroll 的 target 可能是 window/document（非 Node），先 instanceof 再 contains */
+    const onScrollOrResize = (e: Event) => {
+      const target = e.target;
+      if (e.type === 'scroll' && target instanceof Node && ref.current?.contains(target)) return;
+      onClose();
+    };
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
@@ -424,9 +432,10 @@ export const FormatMenu = React.memo<{
 
   /* 视口内夹紧。桌面沿用原有的固定估算（560），行为不变。
      触屏不行：格子高度随系统字号变化（实测同一份内容 1.0 时面板 730、1.3 时 792），
-     任何固定估算都会估小，把底部几行顶到屏幕外——面板自身 maxHeight 只到
-     视口高减 8（.heid-panel-fit），超出部分连内部滚动都滚不到。所以先按触发点放，再用真实渲染
-     尺寸在 layout 阶段校正一次（useLayoutEffect 在绘制前跑，不会闪）。 */
+     任何固定估算都会估小，把底部几行顶到屏幕外——面板高度另封了顶（style 里
+     maxHeight = 视口 70% 与 640 取小，见下），超高部分走面板内部滚动；滚到顶/底
+     由 overscroll-behavior: contain 拦住，不再链到背后的编辑器/预览。所以先按触发点放，
+     再用真实渲染尺寸在 layout 阶段校正一次（useLayoutEffect 在绘制前跑，不会闪）。 */
   const [touchPos, setTouchPos] = useState<{ left: number; top: number } | null>(null);
   useLayoutEffect(() => {
     if (!TOUCH) return;
@@ -448,7 +457,14 @@ export const FormatMenu = React.memo<{
         "fixed z-[90] rounded-xl border shadow-xl backdrop-blur-md p-2 flex flex-col gap-1.5 select-none overflow-y-auto heid-panel-fit",
         isDarkMode ? "border-zinc-700/70 bg-zinc-800/70" : "border-zinc-200/80 bg-white/70"
       )}
-      style={{ left, top, width: PANEL_W }}
+      style={{
+        left, top, width: PANEL_W,
+        /* 触屏：最多占视口高 70%（手机 412×731 视口上＝512px，实测面板 1350 物理px）——
+           35 条命令在放大字号下会糊到 792px，满屏菜单既看不见上下文、
+           滚动手势又分不清「菜单还是背后文档」。超高部分面板内滚。
+           桌面维持 .heid-panel-fit（100vh-8）原样 */
+        ...(TOUCH ? { maxHeight: Math.min(Math.round(window.innerHeight * 0.7), 640), overscrollBehavior: 'contain' as const } : {}),
+      }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {sections}

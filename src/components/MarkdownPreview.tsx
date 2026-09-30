@@ -27,6 +27,8 @@ import { useT } from '../lib/i18nContext';
 import { parseLangBlocks } from '../lib/markdownLangs';
 import { applyImageTab, applySelectionTab } from '../lib/markdownTabs';
 import { collectRemoteImages } from '../lib/imageLocalize';
+import { notifyFmtMenuClosed, notifyFmtMenuOpen, registerFmtMenuClose,
+  notifySelBarClosed, notifySelBarOpen, registerSelBarClose } from '../lib/fmtMenuBus';
 
 /** 页签文档按块渲染时，块 md 的全文起始偏移（右键选区映射回源码用） */
 const BlockBaseContext = createContext(0);
@@ -1403,16 +1405,46 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       }
       onChangeRef.current!(next);
     });
+    /* 命令吃掉了选区：DOM 选区一并收掉，工具条（由 selectionchange 驱动）随之收起 */
+    window.getSelection()?.removeAllRanges();
     setMenu(null);
     setLastMdOp(recordMdOp(op));
   }, [menu, content, onChange, withScrollRestore, t]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
-  /* 工具条「复制」：复制选中的渲染文本（与系统选择工具条的复制等价） */
+  /* 格式菜单（选区菜单 + 空白插入菜单）的开关上报与返回键成批关闭：状态跟选区住在
+     这层（上提要牵动选区坐标链路，不值当），App 的安卓返回键链经 fmtMenuBus 订一个
+     「有没有开着的」布尔；返回键触发时逐个执行这里登记的关闭 */
+  useEffect(() => {
+    if (!menu) return;
+    notifyFmtMenuOpen();
+    return () => notifyFmtMenuClosed();
+  }, [menu]);
+  useEffect(() => {
+    if (!blankMenu) return;
+    notifyFmtMenuOpen();
+    return () => notifyFmtMenuClosed();
+  }, [blankMenu]);
+  useEffect(() => registerFmtMenuClose(() => { setMenu(null); setBlankMenu(null); }), []);
+  /* 选区操作条（复制 / 更多）是比格式菜单低一层的浮层：菜单开着时它让位（见渲染条件），
+     但状态还在——返回键先关菜单，再关它，两层都收掉才轮到退出确认 */
+  useEffect(() => {
+    if (!selBar) return;
+    notifySelBarOpen();
+    return () => notifySelBarClosed();
+  }, [selBar]);
+  useEffect(() => registerSelBarClose(() => {
+    window.getSelection()?.removeAllRanges();
+    setSelBar(null);
+  }), []);
+
+  /* 工具条「复制」：复制选中的渲染文本（与系统选择工具条的复制等价）。
+     复制即消费选区——不收掉选区，工具条会一直赖在选区旁 */
   const handleCopySelection = useCallback(() => {
     const text = window.getSelection()?.toString() ?? '';
     if (text) void writeClipboardText(text);
+    window.getSelection()?.removeAllRanges();
   }, []);
 
   /* 工具条「最近使用」：直接对当前选区套用该命令，不必再展开完整菜单 */

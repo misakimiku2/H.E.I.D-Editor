@@ -256,8 +256,13 @@ export async function writeLocalPath(path: string, content: string, encoding = '
 }
 
 /* saveAs = true 时忽略已有路径，总是弹出保存对话框另选位置；
-   silent = true 时不弹错误提示（自动保存用，失败只返回 false） */
-export async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = false, silent = false): Promise<SaveResult> {
+   silent = true 时不弹错误提示（自动保存用，失败只返回 false）；
+   askName = 应用内先问文件名（安卓另存为/首次保存）：EMUI 系统保存框按 MIME 强补 .txt，
+   用户在系统框里改扩展名拿不到真名，所以在调系统框之前问；返回 null = 用户取消 */
+export async function saveFileToDisk(
+  tab: FileTab, contentLf: string, saveAs = false, silent = false,
+  askName?: (defaultName: string) => Promise<string | null>,
+): Promise<SaveResult> {
   /* 编辑器内是 LF，落盘前按标签页的目标换行符还原 */
   const content = applyLineEnding(contentLf, tab.eol);
   /* 远程标签：写回桌面，**不走 SAF 新建文档**（那是"在手机里落一份"的语义，
@@ -298,7 +303,18 @@ export async function saveFileToDisk(tab: FileTab, contentLf: string, saveAs = f
   if (IS_ANDROID_APP) {
     let target = tab.path;
     if (saveAs || !target) {
-      const created = await androidCreateDoc(tab.title, 'text/plain');
+      /* 系统新建文档会带名字（EMUI 还会按 MIME 强补 .txt），有 askName 时先问真名再走系统框 */
+      let name = tab.title;
+      if (askName) {
+        const asked = await askName(tab.title);
+        if (asked === null) return { ok: false, savedPath: null };
+        name = asked.trim() || tab.title;
+      }
+      // MIME 给通配（'*' + '/' + '*'）而不是 text/plain：保存框（AOSP 与 EMUI 同源）按
+      // MIME 反推扩展名，text/plain 会把用户敲的 xx.md 强补成 xx.md.txt；改名也救不回来
+      // ——改名后的新 URI 不再持有写授权，存进去的是个空文件（实测 0 字节）。
+      // 给通配类型时保存框按文件名自己识别类型，扩展名照用户写的落盘。
+      const created = await androidCreateDoc(name, '*/*');
       if (!created) return { ok: false, savedPath: null };
       target = created.uri;
     }
