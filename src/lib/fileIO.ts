@@ -244,6 +244,42 @@ export interface RemoteConflict {
   serverTooLarge: boolean;
 }
 
+/**
+ * 安卓保存前那层弹窗给回来的结果：**叫什么** 与 **存到哪一头**。
+ *
+ * 两件事一次问清，因为它们谁也离不开谁：系统 SAF 保存框拿不到真名（EMUI 按 MIME 强补
+ * `.txt`，改扩展名拿到的还是补过的那个），而「存到电脑」根本没有系统框可走。
+ */
+export interface SaveTarget {
+  name: string;
+  /** `local` = 手机本机（走 SAF 新建文档）；`desktop` = 连着的那台电脑 */
+  dest: 'local' | 'desktop';
+  /** dest='desktop'：目标文件夹的远程路径（`hide-remote://<设备>/<相对共享根>`，根那层没有尾巴） */
+  dir?: string;
+  /** 桌面上已有同名文件，用户明确选了「覆盖那一份」 */
+  overwrite?: boolean;
+  /** 覆盖时交回去的基线 = 上一次 `exists` 回回来的那一份哈希 */
+  baseHash?: string;
+}
+
+/**
+ * 桌面上那个位置被占着的现场，给弹窗把「换名字 / 覆盖」这句问准。
+ * `serverHash` 为空串 = 那一份超过手机可写的上限，桌面不接受盲覆盖，
+ * 于是「覆盖」那一颗根本不该出现（不是灰掉，是摆出来就骗人）。
+ *
+ * `dest` / `dir` 是把上一趟选过的目的地原样带回去：这一层是**重新挂载**的，
+ * 不记的话用户点「覆盖」时目的地已经悄悄回到默认的「本机」，
+ * 存出来的东西落在手机里而屏幕上写的还是电脑上那个名字（2026-10-04 模拟器实拍到）。
+ */
+export interface RemoteOccupied {
+  name: string;
+  size: number;
+  serverHash: string;
+  dest: 'local' | 'desktop';
+  /** dest='desktop' 时上一趟选中的那一层（远程路径形态） */
+  dir?: string;
+}
+
 /* 桌面：Tauri 命令按编码写盘；其余场景 UTF-8 由调用方处理 */
 export async function writeLocalPath(path: string, content: string, encoding = 'utf-8', bom = false): Promise<void> {
   if (isTauri && !IS_ANDROID_APP) {
@@ -255,13 +291,101 @@ export async function writeLocalPath(path: string, content: string, encoding = '
   await writeFile(path, new TextEncoder().encode(content));
 }
 
+/** 安卓：把一份内容作为**新文档**落到手机本机（系统 SAF 新建文档取可写 URI） */
+async function saveToPhoneLocal(
+  tab: FileTab, content: string, name: string, silent: boolean,
+): Promise<SaveResult> {
+  // MIME 给通配（'*' + '/' + '*'）而不是 text/plain：保存框（AOSP 与 EMUI 同源）按
+  // MIME 反推扩展名，text/plain 会把用户敲的 xx.md 强补成 xx.md.txt；改名也救不回来
+  // ——改名后的新 URI 不再持有写授权，存进去的是个空文件（实测 0 字节）。
+  // 给通配类型时保存框按文件名自己识别类型，扩展名照用户写的落盘。
+  const created = await androidCreateDoc(name.trim() || tab.title, '*/*');
+  if (!created) return { ok: false, savedPath: null };
+  const ok = await androidWriteUri(created.uri, content, tab.encoding, tab.bom);
+  if (!ok) {
+    if (!silent) appAlert(rt('save.errAndroidWrite'));
+    return { ok: false, savedPath: null };
+  }
+  return { ok: true, savedPath: created.uri };
+}
+
+/**
+ * 一次「存到电脑」最多回到那层弹窗几回。正常用完是 1，撞名再问是 2、3……
+ * 这个上限不是给人走的分支，是防一手「回调自己不收手」的实现错把保存转成死循环。
+ */
+const SAVE_TO_DESKTOP_MAX = 6;
+
+/**
+ * 把一份内容作为**新文件**存进连着的那台电脑的文件夹树。
+ *
+ * 与「远程标签的保存」是两条路，别混：那条已经有基线可判（内容本来就是从桌面读来的），
+ * 这条没有 —— 桌面上本来没有这个文件。所以判据全在桌面那侧（`link/fsrv.rs` 的 `create`），
+ * 这里只接它的三种回话：建出来了、那个位置被占着、以及我们问过之后桌面又改了那一份。
+ *
+ * 后两种都回同一层弹窗再问一次（换名字，或明确覆盖），所以循环握在用户手里；
+ * 覆盖那一趟把桌面刚给的哈希交回去 —— 问的那一份与写的这一份必须同一份。
+ */
+async function saveToDesktop(
+  tab: FileTab, content: string, first: SaveTarget,
+  askName: (defaultName: string, occupied?: RemoteOccupied) => Promise<SaveTarget | null>,
+  silent: boolean,
+): Promise<SaveResult> {
+  const { isRemoteError, makeRemotePath, parseRemotePath, remoteCreate } = await import('./remote');
+  let target = first;
+  for (let round = 0; round < SAVE_TO_DESKTOP_MAX; round++) {
+    // 弹窗里改回「存手机」是允许的（就在同一层，不必先取消再重进）
+    if (target.dest === 'local') return saveToPhoneLocal(tab, content, target.name, silent);
+    const name = target.name.trim() || tab.title;
+    const dir = parseRemotePath(target.dir ?? '');
+    if (!dir) {
+      if (!silent) appAlert(rt('save.errRemoteDir'));
+      return { ok: false, savedPath: null };
+    }
+    // 发给桌面的永远是**解码之后**的相对路径；带 `%2F` 的那一份只是手机上的身份键
+    const rel = dir.rel ? `${dir.rel}/${name}` : name;
+    let r;
+    try {
+      r = await remoteCreate({
+        relPath: rel, text: content, encoding: tab.encoding, bom: tab.bom,
+        overwrite: target.overwrite, baseHash: target.baseHash,
+      });
+    } catch (e) {
+      /* 这一份没落到任何地方，也**不进离线队列**：队列回放走的是 `write`，凭的是
+         「桌面上已经有这一份、基线对得上」，新建的东西两头都没有。标签保持脏、
+         内容一个字不动，剩下的是用户那一次重试。 */
+      console.error('Remote create failed:', rel, e);
+      if (!silent) appAlert(isRemoteError(e) ? e.message : String(e));
+      return { ok: false, savedPath: null };
+    }
+    if (r.exists || r.conflict) {
+      const occupied: RemoteOccupied = {
+        name,
+        size: r.size,
+        // 目的地一起带回去：这一层是重新挂载的，不记就等于悄悄回到默认的「本机」
+        dest: 'desktop',
+        dir: target.dir,
+        // exists 时哈希在 `hash` 上；conflict 时两个都是当前那一份，取 server 那一个口径
+        serverHash: r.exists ? r.hash : (r.serverHash ?? r.hash),
+      };
+      const next = await askName(name, occupied);
+      if (!next) return { ok: false, savedPath: null };
+      target = next;
+      continue;
+    }
+    return { ok: true, savedPath: makeRemotePath(dir.deviceId, rel), remoteBaseHash: r.hash };
+  }
+  if (!silent) appAlert(rt('save.errRemoteRetry'));
+  return { ok: false, savedPath: null };
+}
+
 /* saveAs = true 时忽略已有路径，总是弹出保存对话框另选位置；
    silent = true 时不弹错误提示（自动保存用，失败只返回 false）；
-   askName = 应用内先问文件名（安卓另存为/首次保存）：EMUI 系统保存框按 MIME 强补 .txt，
-   用户在系统框里改扩展名拿不到真名，所以在调系统框之前问；返回 null = 用户取消 */
+   askName = 应用内先问「叫什么 + 存手机还是存电脑」（安卓另存为/首次保存）：EMUI 系统保存框
+   按 MIME 强补 .txt，用户在系统框里改扩展名拿不到真名，所以在调系统框之前问；
+   桌面上那个位置被占着时再问一次（换名字或明确覆盖），返回 null = 用户取消 */
 export async function saveFileToDisk(
   tab: FileTab, contentLf: string, saveAs = false, silent = false,
-  askName?: (defaultName: string) => Promise<string | null>,
+  askName?: (defaultName: string, occupied?: RemoteOccupied) => Promise<SaveTarget | null>,
 ): Promise<SaveResult> {
   /* 编辑器内是 LF，落盘前按标签页的目标换行符还原 */
   const content = applyLineEnding(contentLf, tab.eol);
@@ -299,31 +423,28 @@ export async function saveFileToDisk(
       return { ok: false, savedPath: null };
     }
   }
-  /* 安卓：写盘走 SAF 桥（按编码编码字节）；另存为/无路径时先经系统新建文档取得可写 URI */
+  /* 安卓：写盘走 SAF 桥（按编码编码字节）；新建的文档首次保存与另存为，先问一次
+     「叫什么 + 存手机还是存电脑」，存电脑就发 `create` 到那台电脑上 */
   if (IS_ANDROID_APP) {
-    let target = tab.path;
-    if (saveAs || !target) {
-      /* 系统新建文档会带名字（EMUI 还会按 MIME 强补 .txt），有 askName 时先问真名再走系统框 */
-      let name = tab.title;
-      if (askName) {
-        const asked = await askName(tab.title);
-        if (asked === null) return { ok: false, savedPath: null };
-        name = asked.trim() || tab.title;
+    /* 已经有本机路径的普通保存什么都不问：直接落回原来那份，一次保存弹一层窗是倒退 */
+    if (!saveAs && tab.path) {
+      const ok = await androidWriteUri(tab.path, content, tab.encoding, tab.bom);
+      if (!ok) {
+        if (!silent) appAlert(rt('save.errAndroidWrite'));
+        return { ok: false, savedPath: null };
       }
-      // MIME 给通配（'*' + '/' + '*'）而不是 text/plain：保存框（AOSP 与 EMUI 同源）按
-      // MIME 反推扩展名，text/plain 会把用户敲的 xx.md 强补成 xx.md.txt；改名也救不回来
-      // ——改名后的新 URI 不再持有写授权，存进去的是个空文件（实测 0 字节）。
-      // 给通配类型时保存框按文件名自己识别类型，扩展名照用户写的落盘。
-      const created = await androidCreateDoc(name, '*/*');
-      if (!created) return { ok: false, savedPath: null };
-      target = created.uri;
+      return { ok: true, savedPath: tab.path };
     }
-    const ok = await androidWriteUri(target, content, tab.encoding, tab.bom);
-    if (!ok) {
-      if (!silent) appAlert(rt('save.errAndroidWrite'));
-      return { ok: false, savedPath: null };
+    let target: SaveTarget | null = askName ? await askName(tab.title) : null;
+    if (!target) {
+      if (askName) return { ok: false, savedPath: null };   // 弹窗里取消 = 这一份不存了
+      target = { name: tab.title, dest: 'local' };          // 没有应用内弹窗的环境按本机走
     }
-    return { ok: true, savedPath: target };
+    if (target.dest === 'desktop') {
+      if (!askName) return { ok: false, savedPath: null };
+      return saveToDesktop(tab, content, target, askName, silent);
+    }
+    return saveToPhoneLocal(tab, content, target.name, silent);
   }
   const encoder = new TextEncoder();
   if (!saveAs && tab.path && isTauri) {

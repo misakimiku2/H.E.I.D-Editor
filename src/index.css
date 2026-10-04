@@ -187,6 +187,16 @@ body {
 .heid-sheet-panel {
   animation: heid-sheet-up 0.18s ease-out;
 }
+
+/* 宽壳（平板 / 桌面尺寸的 WebView）上把"一个小的决定"收成居中限宽的一张卡：
+   保存那一层问的是「叫什么 + 存哪儿」，选文件夹也只是选一层 —— 都不是要看一整屏内容。
+   不限宽的话一颗「保存」会被拉到 1280 CSS px 那么宽，拇指得横着够（2026-10-04 他看平板壳实拍点名的）。
+   取向沿用 ConfirmDialog：居中、固定宽；只是仍然贴底停靠，键盘弹起来那一条（--heid-kb）不变。
+   手机壳 412 CSS px 上 max-width 根本不生效，形状与改之前逐字一致。 */
+.heid-narrow-sheet {
+  margin-inline: auto;
+  max-width: 480px;
+}
 @keyframes heid-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }

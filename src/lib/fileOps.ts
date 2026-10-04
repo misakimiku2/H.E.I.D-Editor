@@ -3,10 +3,15 @@
  * - 文件管理（新建/重命名/删除/复制/资源管理器中显示）：桌面走自定义 Tauri 命令；
  *   安卓走 HeidBridge 的 SAF 树内桥（createInTree/renameEntry/deleteEntry，
  *   v1.4 补齐新建/重命名/删除；剪切移动与复制暂不提供，UI 侧置灰）；
+ *   **连着的那台电脑**那棵树走链路（`create` / `mkdir` 两条远程命令），
+ *   重命名/删除/复制那几条协议里没有，在这里拦下来（见 [`remoteUnsupported`]）；
  * - 剪贴板读写：Tauri 内走 plugin-clipboard-manager（WebView 自带
  *   navigator.clipboard.readText 在 WebView2 默认拒绝权限），浏览器走原生 API。
  */
 import { IS_ANDROID_APP } from './platform';
+import {
+  RemoteError, isRemotePath, makeRemotePath, parseRemotePath, remoteCreate, remoteMkdir,
+} from './remote';
 
 export const isTauriRuntime =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -30,12 +35,43 @@ function lastSegmentOf(path: string): string {
   return cut >= 0 ? path.slice(cut + 1) : path;
 }
 
+/**
+ * 远程路径 → `{deviceId, rel}`（`hide-remote://<设备>/<相对共享根的路径>`）。
+ * 不是远程路径返回 null；带远程前缀却解析不出来（编码坏掉）时报错，
+ * 因为那意味着树上这一行的身份键本身坏了 —— 静默当本地路径处理会往手机上写东西。
+ */
+function remoteRefOf(path: string): { deviceId: string; rel: string } | null {
+  if (!isRemotePath(path)) return null;
+  const ref = parseRemotePath(path);
+  if (!ref) throw new RemoteError('badpath', '电脑上那个条目的路径读不出来，先刷新一次树');
+  return ref;
+}
+
+/**
+ * 协议里没有的那几条（重命名 / 删除 / 复制 / 在资源管理器中显示）。
+ *
+ * 必须在前端就拦下来：让它们落到 SAF 桥那一支，桥会把 `hide-remote://…` 当树内路径去拆
+ * `treeUri\0相对路径`，拆不出分隔符就当整串是 treeUri，最后报一句「SAF rename rejected」——
+ * 那句话既不是原因也不是用户能做的事（2026-10-04 在手机上点开电脑那棵树新建就撞过这一刀）。
+ * `unsupported` 是**永久**码：它不在 `LINK_DOWN_CODES` 里，绝不能被离线队列当成"等重连再试"。
+ */
+function remoteUnsupported(what: string): RemoteError {
+  return new RemoteError('unsupported', `电脑上的文件还不支持${what}，请在电脑上操作`);
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke<T>(cmd, args);
 }
 
 export async function fsMkdir(path: string): Promise<void> {
+  /* 远程分支判在 SAF 桥**之前**：安卓上桥一直存在（它是设备能力，与这条路径属于谁无关），
+     先问桥就等于把电脑那棵树里的路径交给 DocumentsContract 去拆 */
+  const remote = remoteRefOf(path);
+  if (remote) {
+    await remoteMkdir(remote.rel);
+    return;
+  }
   const bridge = safBridge();
   if (bridge) {
     const name = lastSegmentOf(path);
@@ -49,6 +85,16 @@ export async function fsMkdir(path: string): Promise<void> {
 
 /** 新建空文件并返回实际可用的路径：安卓为新建文档的 content URI（桌面=传入路径） */
 export async function fsCreateEmptyFile(path: string): Promise<string> {
+  const remote = remoteRefOf(path);
+  if (remote) {
+    const r = await remoteCreate({ relPath: remote.rel, text: '', encoding: 'utf-8', bom: false });
+    /* 桌面说这个位置被占着（一个字都没写）。树上这条是「新建」，占位就是没建出来 ——
+       报错让树里那句「操作失败」把桌面的原话说出来，别返回一个指向别人文件的路径 */
+    if (r.exists) throw new RemoteError('exists', '电脑上已经有同名的文件，换个名字再建');
+    /* 身份键的 device 段沿用传进来的那一份（树上那一行本来就是从它拼出来的）：
+       换一次连接就换一串的 keyId 只会在下一次 read 时变成「找不到这台设备」 */
+    return makeRemotePath(remote.deviceId, remote.rel);
+  }
   const bridge = safBridge();
   if (bridge) {
     const name = lastSegmentOf(path);
@@ -65,6 +111,7 @@ export async function fsCreateEmptyFile(path: string): Promise<string> {
 /** 重命名（桌面/安卓目录=改名不移动），返回生效后的新路径：
     安卓文件为提供器确认后的新 content URI（旧 URI 随改名失效，标签页需跟进）。 */
 export async function fsRename(from: string, to: string): Promise<string> {
+  if (isRemotePath(from) || isRemotePath(to)) throw remoteUnsupported('重命名');
   const bridge = safBridge();
   if (bridge) {
     const newName = IS_ANDROID_APP && !from.startsWith('content://')
@@ -79,11 +126,13 @@ export async function fsRename(from: string, to: string): Promise<string> {
 }
 
 export async function fsCopy(from: string, to: string): Promise<void> {
+  if (isRemotePath(from) || isRemotePath(to)) throw remoteUnsupported('复制');
   if (IS_ANDROID_APP) throw new Error('SAF copy unsupported'); /* UI 侧置灰，不应到达 */
   return invoke('fs_copy', { from, to });
 }
 
 export async function fsDelete(path: string, _isDir: boolean): Promise<void> {
+  if (remoteRefOf(path)) throw remoteUnsupported('删除');
   const bridge = safBridge();
   if (bridge) {
     if (!bridge.deleteEntry(path)) throw new Error('SAF delete rejected');
@@ -93,6 +142,7 @@ export async function fsDelete(path: string, _isDir: boolean): Promise<void> {
 }
 
 export function fsReveal(path: string): Promise<void> {
+  if (remoteRefOf(path)) return Promise.reject(remoteUnsupported('在文件管理器中显示'));
   return invoke('fs_reveal', { path });
 }
 

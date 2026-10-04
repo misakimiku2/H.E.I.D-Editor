@@ -1,5 +1,6 @@
 /**
- * 远程文件（v1.5 阶段 2）：`hide-remote://` 身份键的编解码 + 桌面四条命令的前端封装。
+ * 远程文件（v1.5 阶段 2）：`hide-remote://` 身份键的编解码 + 桌面命令的前端封装
+ * （`list` / `stat` / `read` / `write`，外加新建用的 `create` / `mkdir`）。
  *
  * 命令走 Rust 的 `link_request`（一条已加密的局域网连接），本文件只是它的一层薄壳：
  * 字段名与 `src-tauri/src/link/fsrv.rs` 的 serde 形状一一对应，改一边必须改另一边；
@@ -77,6 +78,10 @@ export interface RemoteReadResult {
  */
 export interface RemoteWriteResult {
   conflict: boolean;
+  /** 仅 `create` 会为真：那个位置上已经占着东西，一个字都没写。
+      这时 `hash` / `size` / `mtimeMs` 说的是**占着的那一份**，前端据此问「换名字还是覆盖」。
+      Rust 侧为 false 时整个字段不进帧（`write` 的应答形状与 v1.5.0 逐字节一致），所以按可能缺席读 */
+  exists?: boolean;
   hash: string;
   size: number;
   mtimeMs: number;
@@ -95,6 +100,21 @@ export interface RemoteWriteArgs {
   /** 必填：缺基线的写入等于静默覆盖桌面的改动，命令面以 `badparams` 拒掉 */
   baseHash: string;
 }
+
+/**
+ * `create` 的参数：一份**桌面上还不存在**的内容。没有基线可判，所以也不要求。
+ * 唯一能盖掉已有文件的是用户在手机上明确点过的「覆盖」，那时 `overwrite` 为真、
+ * 并且把刚才 `exists` 回回来的那份哈希交回去 —— 问的那一份与写的这一份必须是同一份。
+ */
+export interface RemoteCreateArgs {
+  relPath: string;
+  text: string;
+  encoding: string;
+  bom: boolean;
+  overwrite?: boolean;
+  baseHash?: string;
+}
+
 
 /**
  * 按码分流的失败。`code` 取自 Rust 侧的稳定标识，`unknown` 表示串不是约定形状；
@@ -161,6 +181,19 @@ export function encodeRemoteSegment(name: string): string {
 export function makeRemotePath(deviceId: string, rel: string): string {
   const body = rel.split('/').map(encodeRemoteSegment).join('/');
   return body ? `${REMOTE_SCHEME}${deviceId}/${body}` : `${REMOTE_SCHEME}${deviceId}`;
+}
+
+/**
+ * 单段名字的还原（`encodeRemoteSegment` 的反向）：编码坏了就原样返回，
+ * 与 `parseRemotePath` 里 `decodeSegment` 同一风格 —— 宁可显示一串难看的名义名，
+ * 也不要在渲染路径上把整棵树抛掉。
+ */
+export function decodeRemoteSegment(seg: string): string {
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    return seg;
+  }
 }
 
 /* ------------------------------------------------ 根外白名单引用（阶段 3 §6.3） */
@@ -238,7 +271,7 @@ export function parseRemotePath(path: string): RemoteRef | null {
 
 /* ------------------------------------------------------------------ 命令封装 */
 
-export type RemoteMethod = 'list' | 'stat' | 'read' | 'write' | 'tabs' | 'scope';
+export type RemoteMethod = 'list' | 'stat' | 'read' | 'write' | 'create' | 'mkdir' | 'tabs' | 'scope';
 
 /**
  * `link_request` 成功时带回的是**结果 JSON 文本**而不是对象（Rust 侧返回 `String`），
@@ -307,6 +340,24 @@ export async function remoteRead(relPath: string, forceEncoding?: string): Promi
 export async function remoteWrite(args: RemoteWriteArgs): Promise<RemoteWriteResult> {
   if (!isTauri) throw unavailable();
   return request<RemoteWriteResult>('write', { ...args });
+}
+
+/**
+ * 新建一份文件（手机上写好的内容存进电脑那棵树）。
+ *
+ * 返回 `exists:true` 不是失败 —— 那是桌面在说「这个位置被占着，一个字都没写」，
+ * 带回来的 `hash` / `size` 就是给前端问「换名字还是覆盖」用的。超过远程上限的占位文件
+ * `hash` 是空串，这时前端不该给覆盖那一颗（桌面也不接受这一趟）。
+ */
+export async function remoteCreate(args: RemoteCreateArgs): Promise<RemoteWriteResult> {
+  if (!isTauri) throw unavailable();
+  return request<RemoteWriteResult>('create', { ...args });
+}
+
+/** 新建一层文件夹（只建一层：目的地该是树里列出来的那一层，不是凭空长出三棵树） */
+export async function remoteMkdir(relDir: string): Promise<RemoteWriteResult> {
+  if (!isTauri) throw unavailable();
+  return request<RemoteWriteResult>('mkdir', { relPath: relDir });
 }
 
 /** 桌面正打开着的标签（阶段 3）。无参：要哪一份由桌面的聚焦窗口决定。 */

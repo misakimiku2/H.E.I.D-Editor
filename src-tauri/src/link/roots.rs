@@ -13,6 +13,10 @@
 //! - 只做 `canonicalize` 后比对，会在「目标不存在」时直接失败，也挡不住
 //!   `escape/../secret` 这类先把解析器喂给别处的写法。
 //! 所以顺序固定为：**字面拒绝 → join → canonicalize → 组件级前缀校验**。
+//!
+//! 「要新建的那个条目本来还不存在」是这条主线的唯一例外，见 [`resolve_new`]：
+//! 那种情况下被 canonicalize 的是**父目录**，名字只当作单段附加 ——
+//! 少任何一道都等于把逃逸让给客户端。
 
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -48,6 +52,91 @@ pub fn resolve_rel(root: &Path, rel: &str) -> Result<PathBuf, Reject> {
         return Err(Reject::Outside);
     }
     Ok(canon)
+}
+
+/// 把「要在根内新建的那个条目」解析成绝对路径（父目录已 canonicalize，末段是名字）。
+///
+/// 与 [`resolve_rel`] 只差一处、但正是这条路存在的原因：那条以 `canonicalize` 为权威，
+/// 而**要新建的目标本来就不存在**，拿它去 canonicalize 必然 `NotFound` ——
+/// 于是「手机上写的一份东西存不进电脑的文件夹」。
+/// 所以这里的做法是：**父目录**照老规矩走完整四道
+/// （字面拒绝 → join → canonicalize → 组件级根内校验，一道不少），**名字**当作单段附加。
+/// 名字里不可能有分隔符或 `..`（`check_rel` 已按整串切过段，末段自己再过 [`validate_new_name`]），
+/// 所以拼上去不会改变落点；能出去的唯一可能是父目录本身是根内指向根外的链接，
+/// 而那正是父目录那一次 canonicalize 挡住的（与 [`resolve_rel`] 同一个论证）。
+///
+/// 返回的是「父目录（已规范化）+ 名字」拼出来的路径，**没有**对末段做 canonicalize：
+/// 它现在还不存在。调用方若发现它其实已经存在（竞态、或桌面刚建了同名的），
+/// 要自己按 [`resolve_rel`] 那条路重新解析一遍再看真实形态（见 `fsrv::create`）。
+pub fn resolve_new(root: &Path, rel: &str) -> Result<PathBuf, Reject> {
+    let parts = check_rel(rel)?;
+    let Some((last, parents)) = parts.split_last() else {
+        return Err(Reject::Illegal("新建要给出名字"));
+    };
+    let name = validate_new_name(last)?;
+    let mut joined = root.to_path_buf();
+    for p in parents {
+        joined.push(p);
+    }
+    let parent = match joined.canonicalize() {
+        Ok(c) => c,
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Err(Reject::NotFound)
+        }
+        Err(e) => return Err(Reject::Io(e.to_string())),
+    };
+    /* `canonicalize` 对**文件**也成功，所以这一步不能省：拿 `readme.md/new.md` 这种写法过来时，
+       父目录解析出来就是那份文件本身。老路（[`resolve_rel`]）不会遇到这一种，
+       它 canonicalize 的是整条路径，`文件/子项` 在系统调用那一步就断了。
+       留在这里的代价不是逃逸（拼出来仍在根内），而是一句谁也看不懂的「写入失败：…」——
+       手机上那点保存撞到它，只会以为链路坏了。 */
+    if !parent.is_dir() {
+        return Err(Reject::Illegal("新建条目的上一层不是文件夹"));
+    }
+    if !is_within(root, &parent) {
+        return Err(Reject::Outside);
+    }
+    Ok(parent.join(name))
+}
+
+/// 新建条目（文件与文件夹共用）的名字校验。**服务端这一份才是权威**：
+/// 手机上的输入框不是安全边界，多设备里还有一台是别人写的客户端。
+///
+/// 口径与前端 `fileTree.ts` 的 `isValidEntryName` 对齐（路径分隔与 Windows 保留字符、
+/// 不以点或空格结尾），另补两条前端没有的：控制字符，以及 Windows 的保留设备名 ——
+/// `CON.md` 这类在资源管理器里建不出来，从这里建出去就是一颗「写进去了但找不到」的文件。
+pub fn validate_new_name(raw: &str) -> Result<String, Reject> {
+    if raw.is_empty() || raw != raw.trim() {
+        return Err(Reject::Illegal("名字不能为空，首尾也不能是空格"));
+    }
+    if raw.chars().any(|c| (c as u32) < 0x20) {
+        return Err(Reject::Illegal("名字含控制字符"));
+    }
+    // `:` 与两种分隔符按 `check_rel` 已经出不来了，留在这里是纵深防御：
+    // 这个名字校验是独立入口（重命名类命令以后也走它），不依赖调用方先切过段。
+    if raw.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+        return Err(Reject::Illegal("名字含路径分隔符或 Windows 保留字符"));
+    }
+    if raw.ends_with('.') || raw.ends_with(' ') {
+        return Err(Reject::Illegal("名字不能以点或空格结尾"));
+    }
+    if cfg!(windows) && is_windows_device_name(raw) {
+        return Err(Reject::Illegal("名字是 Windows 的保留设备名"));
+    }
+    Ok(raw.to_string())
+}
+
+/// 保留设备名：看第一个点之前那一段，大小写不敏感（`con`、`CoN.txt`、`nul.md` 都不许）。
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
+            | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4"
+            | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    );
+    // 数字后缀的写法（COM10、LPT10）不是保留名，别把它们一起杀了
+    reserved
 }
 
 /// 第一道：字面检查。返回允许拼进根目录的路径成分。

@@ -6,7 +6,7 @@ use super::board::{open_id, Board, Scope, TabReport};
 use super::fsrv::{handle, sha256_hex, MAX_LIST_ENTRIES, MAX_REMOTE_FILE_BYTES};
 use super::roots_tests::Temp;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 只暴露一个共享根（阶段 2 的老用例都走这一份，白名单为空）
 fn scope_of(root: &Path) -> Scope {
@@ -271,6 +271,230 @@ fn 目录与逃逸路径都不能写() {
     assert_eq!(code(&t.root(), "read", r#"{"relPath":"sub/../../outside/secret.txt"}"#), "badpath");
     // 靶子文件本身没被碰过
     assert_eq!(std::fs::read(t.base.join("outside/secret.txt")).unwrap(), b"secret");
+}
+
+/* ------------------------------------------------------------------ create / mkdir */
+
+/// 新建参数：手机上「存到电脑」发出去的就是这一组（没有基线，因为那份东西还不存在）
+fn create_params(rel: &str, text: &str) -> String {
+    serde_json::json!({ "relPath": rel, "text": text, "encoding": "utf-8", "bom": false }).to_string()
+}
+
+/// 用户在手机上明确选了「覆盖桌面上那一份」时发的那一趟
+fn create_overwrite_params(rel: &str, text: &str, base: &str) -> String {
+    serde_json::json!({
+        "relPath": rel, "text": text, "encoding": "utf-8", "bom": false,
+        "overwrite": true, "baseHash": base
+    })
+    .to_string()
+}
+
+/// 根内放一个**指向根外文件**的链接。没有建链权限时返回 None，用例就地跳过。
+/// （`roots_tests::link` 只会建目录链接，而末段是文件链接这一种要走的是另一条判据）
+fn link_to_file(src_dir: &Path, target_file: &Path, name: &str) -> Option<PathBuf> {
+    let link = src_dir.join(name);
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir(&link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(target_file, &link);
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target_file, &link);
+    #[cfg(not(any(windows, unix)))]
+    let made: Result<(), std::io::Error> = Err(std::io::Error::other("本平台不支持建符号链接"));
+    match made {
+        Ok(()) => Some(link),
+        Err(e) => {
+            eprintln!("跳过文件符号链接用例（{e}）。这条防护在该次运行里未被检验。");
+            None
+        }
+    }
+}
+
+#[test]
+fn 新建落进一个还不存在的位置并把内容原样写下去() {
+    let t = Temp::new("fsrv-create");
+    let r = ok(&t.root(), "create", &create_params("sub/新文件.md", "# 手机上写的\n"));
+    assert!(r.get("exists").is_none(), "建成功时 `exists` 整个不进帧（write 的应答形状不能因此变）：{r:?}");
+    assert_eq!(r["conflict"], false);
+    assert_eq!(t.read("sub/新文件.md"), "# 手机上写的\n".as_bytes());
+    assert_eq!(r["hash"], sha256_hex("# 手机上写的\n".as_bytes()), "回传的哈希要能直接当基线用");
+    assert_eq!(r["size"], "# 手机上写的\n".len() as u64);
+    // 带回来的那一份哈希，紧接着就能喂给 write —— 新建之后继续编辑是同一条通道
+    let base = r["hash"].as_str().unwrap().to_string();
+    ok(&t.root(), "write", &write_params("sub/新文件.md", "# 改第二遍", &base, "utf-8"));
+    assert_eq!(t.read("sub/新文件.md"), "# 改第二遍".as_bytes());
+}
+
+#[test]
+fn 新建走与桌面同源的编码与换行() {
+    let t = Temp::new("fsrv-create-encoding");
+    ok(&t.root(), "create", &serde_json::json!({
+        "relPath": "gbk-new.txt", "text": "设备互联", "encoding": "gbk", "bom": false
+    }).to_string());
+    assert_eq!(t.read("gbk-new.txt"), encoding_rs::GBK.encode("设备互联").0.into_owned());
+    // CRLF：手机上按标签的 eol 还原之后才发过来，服务端一个字都不动
+    ok(&t.root(), "create", &create_params("crlf-new.txt", "one\r\ntwo\r\n"));
+    assert_eq!(t.read("crlf-new.txt"), "one\r\ntwo\r\n".as_bytes());
+}
+
+#[test]
+fn 新建之后能在列目录里看见它() {
+    let t = Temp::new("fsrv-create-list");
+    ok(&t.root(), "create", &create_params("sub/deep.md", "x"));
+    let r = ok(&t.root(), "list", r#"{"relDir":"sub"}"#);
+    let names: Vec<&str> =
+        r["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"deep.md"), "手机上建完就该在树里看见，实际：{names:?}");
+}
+
+#[test]
+fn 位置被占时不覆盖而是把那一份带回去() {
+    let t = Temp::new("fsrv-create-exists");
+    let r = ok(&t.root(), "create", &create_params("readme.md", "# 手机上写的"));
+    assert_eq!(r["exists"], true, "同名不静默覆盖：与 write 的基线判定同一个立场");
+    assert_eq!(r["hash"], sha256_hex(b"# hi"));
+    assert_eq!(r["size"], 4);
+    assert_eq!(t.read("readme.md"), b"# hi", "占位时一个字都不许动");
+}
+
+#[test]
+fn 明确覆盖才写已存在的那一份() {
+    let t = Temp::new("fsrv-create-overwrite");
+    let cur = ok(&t.root(), "create", &create_params("readme.md", "x"))["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ok(&t.root(), "create", &create_overwrite_params("readme.md", "# 覆盖掉它", &cur));
+    assert_eq!(t.read("readme.md"), "# 覆盖掉它".as_bytes());
+}
+
+#[test]
+fn 覆盖时桌面又改过就转成冲突且一个字不写() {
+    // 手机上「问要不要覆盖」与「真正写下去」之间隔着一次用户点按，桌面完全可能在这中间改过。
+    // 带回来的基线就是为这一眼而存在的：问的那一份必须等于写的这一份。
+    let t = Temp::new("fsrv-create-conflict");
+    let cur = ok(&t.root(), "create", &create_params("readme.md", "x"))["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::write(t.root().join("readme.md"), "# 桌面刚又改的").unwrap();
+    let r = ok(&t.root(), "create", &create_overwrite_params("readme.md", "# 手机上覆盖", &cur));
+    assert_eq!(r["conflict"], true);
+    assert!(r.get("exists").is_none(), "冲突与占位是两回事：这一趟是「桌面那份不是我们问过的那份」");
+    assert_eq!(r["serverText"], "# 桌面刚又改的");
+    assert_eq!(t.read("readme.md"), "# 桌面刚又改的".as_bytes());
+}
+
+#[test]
+fn 超限的占位文件既给不出基线也不允许覆盖() {
+    // 读一遍 40 MB 只为算哈希不值，所以占位响应里哈希是空串；
+    // 相应地这条覆盖必须拒 —— 没有基线的覆盖等于「确认过一次就能盖掉任意大文件」。
+    let t = Temp::new("fsrv-create-exists-big");
+    let big = vec![b'x'; (MAX_REMOTE_FILE_BYTES + 1024) as usize];
+    std::fs::write(t.root().join("readme.md"), &big).unwrap();
+    let r = ok(&t.root(), "create", &create_params("readme.md", "x"));
+    assert_eq!(r["exists"], true);
+    assert_eq!(r["hash"], "", "超限那份不读、也不算哈希");
+    assert_eq!(r["size"], big.len() as u64, "尺寸照实报，前端才说得出那是多大一个东西");
+    assert_eq!(code(&t.root(), "create", &create_overwrite_params("readme.md", "y", "")), "toobig");
+    assert_eq!(std::fs::read(t.root().join("readme.md")).unwrap(), big);
+}
+
+#[test]
+fn 新建的内容超过上限就拒而不是写一半() {
+    let t = Temp::new("fsrv-create-toobig");
+    let big = "x".repeat(MAX_REMOTE_FILE_BYTES as usize + 1);
+    assert_eq!(code(&t.root(), "create", &create_params("big.txt", &big)), "toobig");
+    assert!(!t.root().join("big.txt").exists(), "拒了就不该在桌面上留下一个空文件");
+}
+
+#[test]
+fn 占位的末段是文件夹时报exists而冲突另说() {
+    let t = Temp::new("fsrv-create-dir");
+    // 同名是个目录：不是「换名字能解决」的那种冲突，报 exists 让前端说「换个名字或选别处」
+    assert_eq!(code(&t.root(), "create", &create_params("sub", "x")), "exists");
+    // 反过来，拿已存在的文件去 mkdir 也是同一句
+    assert_eq!(code(&t.root(), "mkdir", r#"{"relPath":"readme.md"}"#), "exists");
+}
+
+#[test]
+fn 新建也服从逃逸与名字判据() {
+    let t = Temp::new("fsrv-create-reject");
+    let root = t.root();
+    assert_eq!(code(&root, "create", &create_params("../outside/x.md", "x")), "badpath");
+    assert_eq!(code(&root, "create", &create_params("..", "x")), "badpath");
+    assert_eq!(code(&root, "create", &create_params("", "x")), "badpath");
+    assert_eq!(code(&root, "create", &create_params("a*b.md", "x")), "badpath");
+    assert_eq!(code(&root, "create", &create_params(r"C:\Windows\x.ini", "x")), "absolute");
+    assert_eq!(code(&root, "create", &create_params("nope/deep/x.md", "x")), "notfound");
+    // 靶子文件没被碰过，根外也没有多出什么来
+    assert_eq!(std::fs::read(t.base.join("outside/secret.txt")).unwrap(), b"secret");
+    assert!(!t.base.join("outside/x.md").exists());
+}
+
+#[test]
+fn 指向根外的链接末段既报不出占位也不许覆盖() {
+    // resolve_new 保住的是**父目录**的根内性；末段本来还不存在，所以没人替它看过真实形态。
+    // 桌面上有个 `link.md -> ../outside/secret.txt` 时，`fs::write` 会跟着链接跑出根外，
+    // 而「先问一句要不要覆盖」那一趟同样是在往根外看 —— 两道都得拒，且拒在同一处。
+    let t = Temp::new("fsrv-create-symlink");
+    let root = t.root();
+    let target = t.base.join("outside/secret.txt");
+    if link_to_file(&root, &target, "link.md").is_none() {
+        return;
+    }
+    assert_eq!(code(&root, "create", &create_params("link.md", "x")), "outside", "占位查询这一步就该拒");
+    assert_eq!(code(&root, "create", &create_overwrite_params("link.md", "# 想出去", "deadbeef")), "outside");
+    assert_eq!(std::fs::read(&target).unwrap(), b"secret", "根外的靶子一个字都不许被写");
+}
+
+#[test]
+fn 没有共享根时新建一律noroot而白名单引用不能当落点() {
+    // 判据来自 `resolve_new_in_scope`：新建只认共享根，`@w/…` 绝不退回按根内路径再试一次。
+    let t = Temp::new("fsrv-create-noroot");
+    let scope = Scope::default();
+    for method in ["create", "mkdir"] {
+        let (c, _) = call(&scope, method, &create_params("x.md", "x")).err().expect("没根必须拒");
+        assert_eq!(c, "noroot", "{method} 的拒绝码应是 noroot");
+    }
+    let todo = t.base.join("open/todo.md");
+    std::fs::create_dir_all(t.base.join("open")).unwrap();
+    std::fs::write(&todo, b"x").unwrap();
+    let mut b = Board::default();
+    b.set_tabs("main", vec![tab(todo.to_str(), "todo.md", false)]);
+    let rel = format!("@w/{}/todo.md", open_id(&todo.canonicalize().unwrap()));
+    assert_eq!(
+        call(&b.scope(), "create", &create_params(&rel, "x")).err().map(|(c, _)| c),
+        Some("badpath".to_string()),
+        "白名单条目既不是目录也不该成为写入落点"
+    );
+    assert_eq!(
+        call(&b.scope(), "mkdir", &create_params(&rel, "x")).err().map(|(c, _)| c),
+        Some("badpath".to_string())
+    );
+}
+
+#[test]
+fn 建文件夹只建一层且同名不顶掉() {
+    let t = Temp::new("fsrv-mkdir");
+    let r = ok(&t.root(), "mkdir", r#"{"relPath":"来自手机"}"#);
+    assert!(r.get("exists").is_none(), "建成功时不带 exists：{r:?}");
+    assert!(t.root().join("来自手机").is_dir(), "没建出目录等于手机上白点一下");
+    // 同名（且是目录）→ exists：手机上「换个名字」就是下一步，不必把目录顶掉
+    assert_eq!(code(&t.root(), "mkdir", r#"{"relPath":"来自手机"}"#), "exists");
+    // 只建一层：中间那层不在就要人先把那层建出来，而不是悄悄在桌面上长出三棵树
+    assert_eq!(code(&t.root(), "mkdir", r#"{"relPath":"a/b/c"}"#), "notfound");
+    let list = ok(&t.root(), "list", r#"{"relDir":"来自手机"}"#);
+    assert_eq!(list["entries"].as_array().unwrap().len(), 0, "新建的目录是空的，前端据此收起展开态");
+}
+
+#[test]
+fn 文件夹名也过同一道名字校验() {
+    let t = Temp::new("fsrv-mkdir-name");
+    assert_eq!(code(&t.root(), "mkdir", r#"{"relPath":"a*b"}"#), "badpath");
+    assert_eq!(code(&t.root(), "mkdir", r#"{"relPath":"trail."}"#), "badpath");
+    assert_eq!(code(&t.root(), "mkdir", r#"{"relPath":""}"#), "badpath");
+    assert_eq!(code(&t.root(), "mkdir", r#"{"relPath":"sub/.."}"#), "badpath");
 }
 
 /* ---------------------------------------------------- 阶段 3：标签与白名单引用 */

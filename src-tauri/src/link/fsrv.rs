@@ -1,4 +1,5 @@
-//! 远程文件命令（阶段 2）：`list` / `stat` / `read` / `write`。
+//! 远程文件命令（阶段 2）：`list` / `stat` / `read` / `write`，外加「手机上写的内容
+//! 存进电脑那棵树」的 `create` / `mkdir`。
 //!
 //! 服务端**不重写文件逻辑**（设计稿 §4.2）：解码走 [`encoding::detect_and_decode`]、
 //! 编码写回走 [`encoding::encode_text`]。手机因此拿到与桌面逐字一致的编码 / BOM /
@@ -12,6 +13,9 @@
 //!
 //! 基线判定也只用内容哈希、不用 mtime：同秒内的两次保存 mtime 分得出来但粒度不可信，
 //! 拿它判等会在桌面刚改过的瞬间静默覆盖掉桌面的改动。`mtimeMs` 只用于展示。
+//!
+//! `create` 守的是同一条立场，只是换了个形式：**位置被占就不写**，把占着的那一份带回去
+//! 让手机上问一句。桌面上那份不是我们建的，静默覆盖它和静默改掉它是同一件事。
 
 use std::path::Path;
 use std::time::UNIX_EPOCH;
@@ -21,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::encoding;
 
 use super::board::{self, Scope};
+use super::roots;
 
 /// 不远程打开的上限。设计稿写的是 32MB（那是桌面「可读但只读」的分块预览线），
 /// 但远程通道没有分块协议（§5.3 明确不做），而整份内容要走完两个更硬的天花板：
@@ -38,6 +43,11 @@ pub type Handled = Result<String, (String, String)>;
 
 pub fn err(code: &str, msg: impl Into<String>) -> (String, String) {
     (code.to_string(), msg.into())
+}
+
+/// `serde(skip_serializing_if)` 用的那一位：假就不进帧（见 [`WriteResult::exists`]）
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /* ------------------------------------------------------------------ 参数与结果 */
@@ -77,11 +87,16 @@ pub struct PathParams {
     pub rel_path: String,
     /// 与桌面「以编码重新打开」同一语义：指定后不再检测
     pub force_encoding: Option<String>,
-    /// 写回用的内容基线：`read` 时拿到的那一份哈希
+    /// 写回用的内容基线：`read` 时拿到的那一份哈希。
+    /// `create` 的覆盖那一趟带的也是它 —— 那时带的是**刚才那次 `exists` 回回来的**桌面哈希，
+    /// 于是「问用户要不要覆盖的那一份」与「真正写下去的那一份」必须是同一份。
     pub base_hash: String,
     pub text: String,
     pub encoding: String,
     pub bom: bool,
+    /// `create` 专用：桌面上已经有同名文件时，带 `true` 才落盘。
+    /// 默认 false，且 `write` 完全不看它 —— 少一个静默覆盖的入口就少一个。
+    pub overwrite: bool,
 }
 
 /// `scope` 的返回：桌面上那棵树此刻在不在。手机端连上时按它决定
@@ -115,10 +130,19 @@ struct ReadResult {
 
 /// `write` 的两种结局走同一个结构：`conflict` 为真时带服务端当前内容，
 /// 前端据此进既有 diff 时间线逐条采纳（不做自动三方合并）。
+///
+/// `create` / `mkdir` 也回这个形状，多出来的是 `exists`：**那个位置上已经占着东西**，
+/// 一个字都没写，`hash` / `size` / `mtimeMs` 说的是占着的那一份。
+/// 它不走 `Err` 是因为调用方需要那三个数才能问出「换名字还是覆盖」这句有意义的话。
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct WriteResult {
     conflict: bool,
+    /// 新建撞上了已有条目（仅 `create` 会为真）。
+    /// **为 false 时整个字段不进帧**：`write` 的应答形状因此与 v1.5.0 逐字节一致，
+    /// 而手机端读它按"可能缺席"处理（`r.exists === true` 才是被占着）。
+    #[serde(skip_serializing_if = "is_false")]
+    exists: bool,
     hash: String,
     size: u64,
     mtime_ms: i64,
@@ -157,6 +181,16 @@ pub fn handle(scope: &Scope, method: &str, params: &str) -> Handled {
         "write" => {
             let p: PathParams = parse(params)?;
             write(scope, p)
+        }
+        // 新建文件：手机上写好的一份内容存进桌面那棵树（位置被占就带回来问一句，不静默覆盖）
+        "create" => {
+            let p: PathParams = parse(params)?;
+            create(scope, p)
+        }
+        // 新建文件夹：保存时的目的地得能在手机上现建出来，不然「存到电脑」只能存到根那一层
+        "mkdir" => {
+            let p: PathParams = parse(params)?;
+            mkdir(scope, &p.rel_path)
         }
         // 桌面正打开着哪些标签：无参，内容已由看板算好（能不能打开、为什么不能都在里面）
         "tabs" => serde_json::to_string(&scope.tabs)
@@ -262,40 +296,165 @@ fn write(scope: &Scope, p: PathParams) -> Handled {
         return Err(err("badpath", "这是一个文件夹，不能当作文件保存"));
     }
     let current = std::fs::read(&path).map_err(|e| err("io", format!("读取失败：{e}")))?;
-    let cur_hash = sha256_hex(&current);
-    if cur_hash != p.base_hash {
-        // 桌面在这期间改过：把服务端最新内容一并回传，前端进 diff 时间线由用户逐条采纳。
-        // 但**超过远程上限的那一份不带正文**（阶段 5 补的）：冲突回包要走同一帧通道，
-        // 而单帧上限 8 MB —— 桌面把一个 6 MB 的文件改到 40 MB 之后，带上正文就等于
-        // 「手机的一条待回放把整条链路撑断」，剩下所有条目一起失败。
-        // 没有正文不影响裁决：手机知道冲突存在，尺寸与哈希也照报。
-        let fits = current.len() as u64 <= MAX_REMOTE_FILE_BYTES;
-        let d = fits.then(|| encoding::detect_and_decode(&current));
-        return serde_json::to_string(&WriteResult {
-            conflict: true,
-            server_hash: cur_hash.clone(),
-            server_text: d.as_ref().map(|x| x.text.clone()),
-            server_encoding: d.as_ref().map(|x| x.encoding.clone()),
-            server_bom: d.map(|x| x.bom).unwrap_or(false),
-            server_binary: encoding::is_binary(&current),
-            hash: cur_hash,
-            size: current.len() as u64,
-            mtime_ms: file_mtime(&path).unwrap_or(0),
-        })
-        .map_err(|e| err("io", e.to_string()));
+    if sha256_hex(&current) != p.base_hash {
+        // 桌面在这期间改过：一个字都不写，把服务端最新那份带回去让手机上的时间线接管
+        return conflict_result(&path, &current);
     }
-    let bytes = encoding::encode_text(&p.text, &p.encoding, p.bom).map_err(|e| err("io", e))?;
-    if (bytes.len() as u64) > MAX_REMOTE_FILE_BYTES {
-        return Err(err("toobig", "内容超过远程写入上限".to_string()));
-    }
-    std::fs::write(&path, &bytes).map_err(|e| err("io", format!("写入失败：{e}")))?;
-    let hash = sha256_hex(&bytes);
+    let bytes = write_bytes(&path, &p)?;
     serde_json::to_string(&WriteResult {
         conflict: false,
         size: bytes.len() as u64,
         mtime_ms: file_mtime(&path).unwrap_or(0),
-        hash,
+        hash: sha256_hex(&bytes),
         server_hash: String::new(),
+        ..Default::default()
+    })
+    .map_err(|e| err("io", e.to_string()))
+}
+
+/// 新建一个文件：手机上写好的内容存进桌面那棵树里一个**还不存在**的位置。
+///
+/// 与 `write` 的分工只有一句：`write` 的对象已经在桌面上存在（它是 `read` 之后那份的写回，
+/// 所以基线必填），`create` 的对象还不存在（所以根本没有基线可判）。两者共用同一份
+/// 编码路径与同一个上限。
+///
+/// 同名一律不静默覆盖：位置被占时回 `exists` + 占着的那一份的尺寸与哈希（超过远程上限的
+/// 不读、哈希给空串），手机上据此问「换名字还是覆盖」。用户选覆盖时这趟带 `overwrite=true`
+/// 并把刚才那份哈希当基线带回来 —— 于是中间桌面又改过的话照样转成 `conflict`。
+fn create(scope: &Scope, p: PathParams) -> Handled {
+    let (path, root) = resolve_new_in_scope(scope, &p.rel_path)?;
+    let existing = match std::fs::symlink_metadata(&path) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(err("io", format!("查这个位置失败：{e}"))),
+    };
+    if let Some(meta) = existing {
+        if meta.is_dir() {
+            return Err(err("exists", "这个位置上已经有一个同名文件夹，换个名字或选别的文件夹"));
+        }
+        /* 占着的东西可能是个**根内指向根外的符号链接**（桌面自己放的，或上一次竞态建出来的）。
+           `fs::write` 会跟着链接走，所以覆盖之前要按真实形态再过一次根内校验 ——
+           `roots::resolve_new` 保住了父目录，保不住这个末段，因为它本来还不存在。 */
+        let real = path
+            .canonicalize()
+            .map_err(|e| err("io", format!("读这个位置的落点失败：{e}")))?;
+        if !roots::is_within(&root, &real) {
+            return Err(err("outside", "这个位置上的文件经符号链接指向了共享范围之外，已拒绝"));
+        }
+        // 超限那份不读正文（读一遍大文件只为算哈希不值），也不允许覆盖：
+        // 手机上没有它的基线，允许盲写就等于开一条「确认过一次就能盖掉任意大文件」的路
+        let fits = meta.len() <= MAX_REMOTE_FILE_BYTES;
+        let current = if fits {
+            Some(std::fs::read(&real).map_err(|e| err("io", format!("读取失败：{e}")))?)
+        } else {
+            None
+        };
+        if !p.overwrite {
+            let (hash, size) = match &current {
+                Some(bytes) => (sha256_hex(bytes), bytes.len() as u64),
+                // 超限的那一份只报尺寸不报哈希：手机上「覆盖」那颗因此不会出现（没有基线就不给按）
+                None => (String::new(), meta.len()),
+            };
+            return serde_json::to_string(&WriteResult {
+                exists: true,
+                hash,
+                size,
+                mtime_ms: file_mtime(&real).unwrap_or(0),
+                ..Default::default()
+            })
+            .map_err(|e| err("io", e.to_string()));
+        }
+        if let Some(bytes) = &current {
+            if !p.base_hash.is_empty() && sha256_hex(bytes) != p.base_hash {
+                return conflict_result(&real, bytes);
+            }
+        } else {
+            return Err(err("toobig", "桌面上那个同名文件超过手机可写的上限，没有覆盖它"));
+        }
+    }
+    let bytes = write_bytes(&path, &p)?;
+    serde_json::to_string(&WriteResult {
+        conflict: false,
+        size: bytes.len() as u64,
+        mtime_ms: file_mtime(&path).unwrap_or(0),
+        hash: sha256_hex(&bytes),
+        ..Default::default()
+    })
+    .map_err(|e| err("io", e.to_string()))
+}
+
+/// 新建一个文件夹。位置被占就报 `exists` —— 这里没有「覆盖」这种下一步动作
+/// （顶掉一个目录不是同义操作），所以不像 [`create`] 那样回一份带哈希的占位响应。
+///
+/// 只建**一层**（`create_dir` 而不是 `create_dir_all`）：手机上能选出来的目的地本来就该是
+/// 树里列出来的那一层，一路静默建出三层目录等于把「这条路径写错了」变成「桌面上多出几棵树」。
+fn mkdir(scope: &Scope, rel_dir: &str) -> Handled {
+    let (path, _root) = resolve_new_in_scope(scope, rel_dir)?;
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(err("exists", "这个位置上已经有同名的条目，换个名字或选别的文件夹"));
+    }
+    std::fs::create_dir(&path).map_err(|e| err("io", format!("建文件夹失败：{e}")))?;
+    serde_json::to_string(&WriteResult {
+        size: 0,
+        mtime_ms: file_mtime(&path).unwrap_or(0),
+        ..Default::default()
+    })
+    .map_err(|e| err("io", e.to_string()))
+}
+
+/* ------------------------------------------------------------------ 工具 */
+
+/// 新建类命令唯一的落点解析：**只认共享根**，`@w/…` 白名单引用一律拒。
+///
+/// 白名单凭的是「桌面上确实开着这个文件」，它既不是目录、也不该成为写入的落点；
+/// 与 `board::resolve_in_scope` 一样，`@w/…` **绝不退回按根内路径再试一次** ——
+/// 那条接缝一旦存在，`@w/<id>/../../x` 这种写法就有机会落到别处。
+/// 带回 `root` 是给调用方做「已存在的末段是不是也落在根内」那一道复查的。
+fn resolve_new_in_scope(scope: &Scope, rel: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), (String, String)> {
+    if board::parse_open_rel(rel).is_some() {
+        return Err(err("badpath", "新建只能落在共享范围内的文件夹里"));
+    }
+    let root = scope.root.clone().ok_or_else(|| err("noroot", "桌面还没设置共享的文件夹"))?;
+    roots::resolve_new(&root, rel).map(|p| (p, root)).map_err(reject)
+}
+
+/// [`roots::Reject`] → 命令面的 `(稳定码, 给人看的原因)`
+fn reject(r: roots::Reject) -> (String, String) {
+    err(r.code(), r.message())
+}
+
+/// 按参数里的编码把正文编成字节、过大就拒、然后落盘，带回**实际写下去的字节**。
+/// `write` 与 `create` 共用这一段：上限与编码口径出现两份判据的话，
+/// 「同一条保存换个入口就过了」迟早会冒出来。
+fn write_bytes(path: &Path, p: &PathParams) -> Result<Vec<u8>, (String, String)> {
+    let bytes = encoding::encode_text(&p.text, &p.encoding, p.bom).map_err(|e| err("io", e))?;
+    if (bytes.len() as u64) > MAX_REMOTE_FILE_BYTES {
+        return Err(err("toobig", "内容超过远程写入上限"));
+    }
+    std::fs::write(path, &bytes).map_err(|e| err("io", format!("写入失败：{e}")))?;
+    Ok(bytes)
+}
+
+/// 基线对不上时的回包：一个字都没写，把桌面当前那份带回去。
+///
+/// 但**超过远程上限的那一份不带正文**（阶段 5 补的）：冲突回包要走同一帧通道，
+/// 而单帧上限 8 MB —— 桌面把一个 6 MB 的文件改到 40 MB 之后，带上正文就等于
+/// 「手机的一条待回放把整条链路撑断」，剩下所有条目一起失败。
+/// 没有正文不影响裁决：手机知道冲突存在，尺寸与哈希也照报。
+fn conflict_result(path: &Path, current: &[u8]) -> Handled {
+    let cur_hash = sha256_hex(current);
+    let fits = current.len() as u64 <= MAX_REMOTE_FILE_BYTES;
+    let d = fits.then(|| encoding::detect_and_decode(current));
+    serde_json::to_string(&WriteResult {
+        conflict: true,
+        server_hash: cur_hash.clone(),
+        server_text: d.as_ref().map(|x| x.text.clone()),
+        server_encoding: d.as_ref().map(|x| x.encoding.clone()),
+        server_bom: d.as_ref().map(|x| x.bom).unwrap_or(false),
+        server_binary: encoding::is_binary(current),
+        hash: cur_hash,
+        size: current.len() as u64,
+        mtime_ms: file_mtime(path).unwrap_or(0),
         ..Default::default()
     })
     .map_err(|e| err("io", e.to_string()))

@@ -9,7 +9,7 @@ import type { RefObject } from 'react';
 import {
   pickAndReadFile, readLocalPath, saveFileToDisk, androidPickFiles, isTauri, READ_EXTENSIONS,
   openedFromBytes,
-  type OpenedFile, type RemoteConflict,
+  type OpenedFile, type RemoteConflict, type RemoteOccupied, type SaveTarget,
 } from '../lib/fileIO';
 import {
   LARGE_FILE_CHARS, makeNewUntitled, makeLargePreviewTab, nextTabId,
@@ -59,10 +59,12 @@ export interface FileActionsOptions {
       桌面已经收下更新的那份，队列里那条就该跟着没 —— 不摘它会留下一个假的「待同步」 */
   onRemoteSaved?: (path: string) => Promise<void>;
   /**
-   * 安卓另存为/首次保存：EMUI 系统保存框会把改过的扩展名强补回 .txt，先在自己应用里问文件名，
-   * 系统框只负责选位置。返回 null = 用户取消这次保存。
+   * 安卓另存为/新建文档首次保存：一次问清「叫什么 + 存手机还是存电脑」。
+   * 名字必须自己问（EMUI 系统保存框会把改过的扩展名强补回 .txt，系统框只适合选位置），
+   * 而「存到电脑」根本没有系统框可走 —— 那是链路上一条 `create`。
+   * 桌面上那个位置被占着时（`occupied`）会再问一次：换名字，或明确覆盖。返回 null = 取消。
    */
-  askSaveName?: (defaultName: string) => Promise<string | null>;
+  askSaveName?: (defaultName: string, occupied?: RemoteOccupied) => Promise<SaveTarget | null>;
   /* 自动保存设置（App 层持有 settings 状态，只传相关字段） */
   autosaveEnabled: boolean;
   autosaveIntervalSec: number;

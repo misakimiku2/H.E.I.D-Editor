@@ -800,18 +800,27 @@ export function FileTreeSidebar({
     const isDir = !!node?.isDir;
     /* SAF 桥只覆盖新建/重命名/删除：剪切移动（需 moveDocument）与树内复制暂不提供 */
     const noSafMove = IS_ANDROID_APP;
+    /* 连着的那台电脑那棵树：协议里只有读 / 写 / 新建（create、mkdir）三条命令，
+       重命名、删除、复制、在文件管理器中显示都没有对应的那一条。摆进菜单就是给一个
+       点下去只会换来一句「SAF rename rejected」的入口（2026-10-04 手机上撞的就是这个），
+       所以这一档**不摆**而不是灰着 —— 灰着也要人猜为什么，而这回是根本没那条路。 */
+    const remote = isRemotePath(node?.path ?? rootPath);
     const items: ContextMenuItem[] = [
       { icon: <FilePlus size={13} />, label: t('menu.newFile'), onSelect: () => startCreate(selfDir, false) },
       { icon: <FolderPlus size={13} />, label: t('tree.newFolder'), onSelect: () => startCreate(selfDir, true) },
-      { separatorBefore: true, icon: <Scissors size={13} />, label: t('ctx.cut'), disabled: isRoot || noSafMove, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: true }) },
-      { icon: <Copy size={13} />, label: t('ctx.copy'), disabled: isRoot || noSafMove, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: false }) },
-      { icon: <ClipboardPaste size={13} />, label: t('ctx.paste'), disabled: !clip || noSafMove, onSelect: () => void handlePaste(parentDir) },
-      { separatorBefore: true, icon: <Pencil size={13} />, label: t('tree.rename'), disabled: isRoot || !!renaming, onSelect: () => node && setRenaming({ path: node.path, name: node.name, isDir: node.isDir }) },
-      { icon: <Trash2 size={13} />, label: t('tree.delete'), danger: true, disabled: isRoot, onSelect: () => node && void handleDelete(node) },
-      { separatorBefore: true, icon: <Link2 size={13} />, label: t('tree.copyPath'), onSelect: () => void writeClipboardText(node?.path ?? rootPath).catch(() => {}) },
-      { icon: <Link2 size={13} />, label: t('tree.copyRelPath'), onSelect: () => void writeClipboardText(relativePathUnderRoot(node?.path ?? rootPath, rootPath)).catch(() => {}) },
-      { icon: <FolderSearch size={13} />, label: t('tree.reveal'), disabled: noSafMove, onSelect: () => void fsReveal(node?.path ?? rootPath).catch(opFailed) },
     ];
+    if (!remote) {
+      items.push(
+        { separatorBefore: true, icon: <Scissors size={13} />, label: t('ctx.cut'), disabled: isRoot || noSafMove, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: true }) },
+        { icon: <Copy size={13} />, label: t('ctx.copy'), disabled: isRoot || noSafMove, onSelect: () => node && setClip({ path: node.path, name: node.name, isDir: node.isDir, cut: false }) },
+        { icon: <ClipboardPaste size={13} />, label: t('ctx.paste'), disabled: !clip || noSafMove, onSelect: () => void handlePaste(parentDir) },
+        { separatorBefore: true, icon: <Pencil size={13} />, label: t('tree.rename'), disabled: isRoot || !!renaming, onSelect: () => node && setRenaming({ path: node.path, name: node.name, isDir: node.isDir }) },
+        { icon: <Trash2 size={13} />, label: t('tree.delete'), danger: true, disabled: isRoot, onSelect: () => node && void handleDelete(node) },
+        { separatorBefore: true, icon: <Link2 size={13} />, label: t('tree.copyPath'), onSelect: () => void writeClipboardText(node?.path ?? rootPath).catch(() => {}) },
+        { icon: <Link2 size={13} />, label: t('tree.copyRelPath'), onSelect: () => void writeClipboardText(relativePathUnderRoot(node?.path ?? rootPath, rootPath)).catch(() => {}) },
+        { icon: <FolderSearch size={13} />, label: t('tree.reveal'), disabled: noSafMove, onSelect: () => void fsReveal(node?.path ?? rootPath).catch(opFailed) },
+      );
+    }
     /* 同步标记带来的几项（阶段 5）：与管理项共用同一份菜单，长按与右键看到的是同一串字。
        「查看差异」只在已经撞出冲突 / 桌面确实更新过时出现 —— 待同步那一份没有对比对象。 */
     const mark = node && !isDir ? remoteMarkers?.get(node.path) : undefined;

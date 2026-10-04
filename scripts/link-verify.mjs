@@ -616,6 +616,11 @@ async function stage2Files(invoke) {
     ['read UNC', 'read', { relPath: '\\\\server\\share\\x' }, 'absolute'],
     ['write 出根', 'write', { relPath: '../outside.md', text: 'x', encoding: 'utf-8', baseHash: 'aa' }, 'badpath'],
     ['list 出根', 'list', { relDir: '..' }, 'badpath'],
+    // 新建是这次新开的写入面，四条老判据一条都不许因为它而松动
+    ['create 出根', 'create', { relPath: '../outside.md', text: 'x', encoding: 'utf-8' }, 'badpath'],
+    ['create 借子目录上跳', 'create', { relPath: 'sub/../../base/outside.md', text: 'x', encoding: 'utf-8' }, 'badpath'],
+    ['create 绝对路径', 'create', { relPath: 'C:/Windows/x.txt', text: 'x', encoding: 'utf-8' }, 'absolute'],
+    ['mkdir 出根', 'mkdir', { relPath: '../evil' }, 'badpath'],
   ];
   for (const [name, method, params, want] of esc) {
     const r = await ask(method, params);
@@ -637,9 +642,63 @@ async function stage2Files(invoke) {
   const unknown = await ask('delete', {});
   ok('命令面之外的方法被拒', unknown.ok === false && unknown.code === 'unknown');
 
+  /* ---------------- 新建（手机上写好的东西存进这棵树）----------------
+     还不存在的路径不能沿用 read 那条 canonicalize 判据（它必然 NotFound），
+     所以服务端为它单开一条解析：父目录走完整四道，名字当单段附加。
+     这一整块都与磁盘逐字节核对 —— 判据在单测里跑过，"跑着的应用真的这么写"只有这里能证。 */
+  const mk = await ask('mkdir', { relPath: '来自手机' });
+  ok('mkdir 在那台电脑上建出真实目录',
+    mk.ok === true && fs.existsSync(path.join(root, '来自手机')), mk.error ?? '');
+  const CT = '# 从手机上写\r\n';
+  const c1 = await ask('create', { relPath: '来自手机/笔记.md', text: CT, encoding: 'utf-8', bom: false });
+  ok('create 落盘、回传基线，且不带 exists（成功时那位不进帧）',
+    c1.ok === true && c1.data?.exists === undefined
+    && fs.readFileSync(path.join(root, '来自手机/笔记.md'), 'utf8') === CT
+    && c1.data?.hash === sha(Buffer.from(CT, 'utf8')), `${c1.code ?? ''} ${c1.error ?? ''}`);
+  const list2 = await ask('list', { relDir: '来自手机' });
+  ok('新建的文件立刻能在树里列出来', (list2.data?.entries ?? []).some(e => e.name === '笔记.md'));
+  const c2 = await ask('create', { relPath: '来自手机/笔记.md', text: '覆盖我', encoding: 'utf-8', bom: false });
+  ok('同名第二次不覆盖，带回占着那一份的哈希与尺寸',
+    c2.ok === true && c2.data?.exists === true && c2.data?.hash === c1.data?.hash
+    && fs.readFileSync(path.join(root, '来自手机/笔记.md'), 'utf8') === CT, JSON.stringify(c2.data));
+  const c3 = await ask('create', {
+    relPath: '来自手机/笔记.md', text: '# 明确覆盖', encoding: 'utf-8', bom: false,
+    overwrite: true, baseHash: c2.data?.hash,
+  });
+  ok('明确覆盖（把刚回的那份基线交回去）才写得进去',
+    c3.ok === true && fs.readFileSync(path.join(root, '来自手机/笔记.md'), 'utf8') === '# 明确覆盖',
+    `${c3.code ?? ''} ${c3.error ?? ''}`);
+  const DESKTOP_AGAIN = '# 桌面在这中间又改了';
+  fs.writeFileSync(path.join(root, '来自手机/笔记.md'), DESKTOP_AGAIN);
+  const c4 = await ask('create', {
+    relPath: '来自手机/笔记.md', text: '# 手机上再覆盖', encoding: 'utf-8', bom: false,
+    overwrite: true, baseHash: c3.data?.hash,
+  });
+  ok('问过之后桌面又改过 → 判冲突而不是覆盖',
+    c4.ok === true && c4.data?.conflict === true && c4.data?.serverText === DESKTOP_AGAIN
+    && fs.readFileSync(path.join(root, '来自手机/笔记.md'), 'utf8') === DESKTOP_AGAIN, JSON.stringify(c4.data));
+  const mkDup = await ask('mkdir', { relPath: '来自手机' });
+  ok('mkdir 撞上同名报 exists 而不是顶掉它', mkDup.ok === false && mkDup.code === 'exists', `${mkDup.code}`);
+  const deep = await ask('mkdir', { relPath: 'nope/deep' });
+  ok('mkdir 只建一层：父目录不在就说不在', deep.ok === false && deep.code === 'notfound', `${deep.code}`);
+  const badName = await ask('create', { relPath: 'a*b.md', text: 'x', encoding: 'utf-8', bom: false });
+  ok('名字由服务端把关（Windows 保留字符被拒）', badName.ok === false && badName.code === 'badpath', `${badName.code}`);
+  const deviceName = await ask('create', { relPath: 'CON.md', text: 'x', encoding: 'utf-8', bom: false });
+  ok('保留设备名也拒（建出来就是颗找不到也删不掉的文件）',
+    deviceName.ok === false && deviceName.code === 'badpath', `${deviceName.code}`);
+  ok('新建之后根外依旧干净', fs.readFileSync(path.join(base, 'outside.md'), 'utf8') === '根外的文件'
+    && !fs.existsSync(path.join(base, 'evil')));
+
   await invoke('link_set_root', { label: 'main', path: null });
   const noroot = await ask('list', { relDir: '' });
   ok('清除共享范围后一律拒答（noroot）', noroot.ok === false && noroot.code === 'noroot');
+  for (const [method, params] of [
+    ['create', { relPath: 'x.md', text: 'x', encoding: 'utf-8' }],
+    ['mkdir', { relPath: 'x' }],
+  ]) {
+    const r = await ask(method, params);
+    ok(`没有共享根时 ${method} 也拒（noroot）`, r.ok === false && r.code === 'noroot', `${r.code}`);
+  }
 
   await invoke('link_server_stop');
   pair.conn.destroy();

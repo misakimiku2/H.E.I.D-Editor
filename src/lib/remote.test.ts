@@ -3,7 +3,7 @@ import {
   REMOTE_SCHEME, RemoteError, encodeRemoteSegment, isRemoteError, isRemotePath,
   isOpenRel, isLinkDown, makeRemotePath, openRelId, parseRemoteError, parseRemotePath, parseRemoteResponse,
   REMOTE_MAX_FILE_BYTES,
-  remoteList, remoteRead, remoteStat, remoteTabs, remoteWrite,
+  remoteList, remoteRead, remoteStat, remoteTabs, remoteWrite, remoteCreate, remoteMkdir,
   type RemoteListResult, type RemoteReadResult, type RemoteStatResult, type RemoteWriteResult,
 } from './remote';
 import { formatBytes } from './largeFile';
@@ -164,7 +164,10 @@ describe('parseRemoteError', () => {
     }
     // 前端自己那条（这台设备根本没有链路）也算暂时：它的行为与 nolink 一致
     expect(isLinkDown(new RemoteError('unavailable', 'x'))).toBe(true);
-    for (const code of ['outside', 'notopen', 'noroot', 'badpath', 'toobig', 'badparams', 'io', 'unknown']) {
+    for (const code of ['outside', 'notopen', 'noroot', 'badpath', 'toobig', 'badparams', 'io', 'unknown',
+      // 新建撞上的那个位置被占着（`exists`）与前端自己拦下的「协议里没这条命令」（`unsupported`）
+      // 都是**永久**失败：压在队列里每次重连重试一遍，等于拿一份没人要的内容去敲桌面的门
+      'exists', 'unsupported']) {
       expect(isLinkDown(new RemoteError(code, 'x'))).toBe(false);
     }
     // 非 RemoteError（一句裸异常）不当断连：宁可报一次错，也不悄悄把内容压进队列
@@ -269,6 +272,8 @@ describe('命令封装在非 Tauri 环境', () => {
     ['remoteWrite', () => remoteWrite({
       relPath: 'a.md', text: 'x', encoding: 'utf-8', bom: false, baseHash: 'deadbeef',
     })],
+    ['remoteCreate', () => remoteCreate({ relPath: 'sub/新文件.md', text: 'x', encoding: 'utf-8', bom: false })],
+    ['remoteMkdir', () => remoteMkdir('sub/来自手机')],
   ];
   it.each(calls)('%s 抛 unavailable', async (_label, fn) => {
     const e = await fn().then(() => null, (err: unknown) => err);

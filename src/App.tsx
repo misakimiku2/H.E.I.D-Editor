@@ -3197,10 +3197,12 @@ export default function App() {
         />
       )}
 
-      {/* 保存文件名确认抽屉（安卓另存为/首次保存；EMUI 系统框会强补 .txt，先问真名） */}
+      {/* 保存文件名与目的地确认抽屉（安卓另存为/首次保存；EMUI 系统框会强补 .txt，先问真名，
+          连着电脑时同一层里还能选「存到电脑」并进它的文件夹树） */}
       {pendingSaveName && (
         <SaveNameSheet
           defaultName={pendingSaveName.defaultName}
+          occupied={pendingSaveName.occupied}
           isDarkMode={isDarkMode}
           onResolve={pendingSaveName.resolve}
         />

@@ -716,9 +716,56 @@ fn 远程命令走完整加密链路往返() {
     let escaped = ask("read", r#"{"relPath":"../outside/secret.txt"}"#).unwrap_err();
     assert!(escaped.starts_with("badpath:"), "逃逸必须以 badpath 拒掉，实际：{escaped}");
 
+    /* 新建这一路（手机上写好的东西存进这棵树）没有为它开任何帧层特例：
+       同一套 Req/Res、同一个 id 断言、同一道 `roots` 校验。这条测的就是"它确实只是命令面的一条方法"。 */
+    let made = ask("mkdir", r#"{"relPath":"来自手机"}"#).expect("建一层文件夹应成功");
+    assert!(made.get("exists").is_none(), "建成功时不该带 exists：{made:?}");
+    let created = ask(
+        "create",
+        r##"{"relPath":"来自手机/笔记.md","text":"# 从手机上写\n","encoding":"utf-8","bom":false}"##,
+    )
+    .expect("新建应成功");
+    assert_eq!(std::fs::read(root.join("来自手机/笔记.md")).unwrap(), "# 从手机上写\n".as_bytes());
+
+    // 同名第二次：不覆盖，把占着的那一份带回来（手机上那句「换名字还是覆盖」就靠它）
+    let busy = ask(
+        "create",
+        r#"{"relPath":"来自手机/笔记.md","text":"覆盖我","encoding":"utf-8","bom":false}"#,
+    )
+    .expect("占位是一次成功应答，得带数据回来而不是一个错误码");
+    assert_eq!(busy["exists"], true);
+    assert_eq!(busy["hash"], created["hash"], "带回来的哈希必须就是刚才建出来那一份");
+    assert_eq!(std::fs::read(root.join("来自手机/笔记.md")).unwrap(), "# 从手机上写\n".as_bytes());
+
+    // 明确覆盖：把刚才那趟的哈希交回去才写得进去
+    let base = busy["hash"].as_str().unwrap().to_string();
+    let over = ask(
+        "create",
+        &serde_json::json!({
+            "relPath": "来自手机/笔记.md", "text": "# 覆盖掉", "encoding": "utf-8",
+            "bom": false, "overwrite": true, "baseHash": base
+        })
+        .to_string(),
+    )
+    .expect("用户明确覆盖应成功");
+    assert!(over.get("exists").is_none());
+    assert_eq!(std::fs::read(root.join("来自手机/笔记.md")).unwrap(), "# 覆盖掉".as_bytes());
+
+    // 根外新建同样拒：新命令不能成为逃逸的第二条门
+    let bad_new = ask(
+        "create",
+        r#"{"relPath":"../outside/x.md","text":"x","encoding":"utf-8","bom":false}"#,
+    )
+    .unwrap_err();
+    assert!(bad_new.starts_with("badpath:"), "根外新建必须以 badpath 拒掉，实际：{bad_new}");
+
     csess.send(&mut c, &Msg::Bye {}).unwrap();
     let seen = srv.join().unwrap();
-    assert_eq!(seen, vec!["list:1", "read:2", "write:3", "write:4", "read:5"], "服务端要按序收到这五笔");
+    assert_eq!(
+        seen,
+        vec!["list:1", "read:2", "write:3", "write:4", "read:5", "mkdir:6", "create:7", "create:8", "create:9", "create:10"],
+        "服务端要按序收到这十笔"
+    );
 }
 
 /* -------------------------------------------- 阶段 3：标签、白名单与推送 */
