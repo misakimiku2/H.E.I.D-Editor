@@ -110,7 +110,8 @@ import { useShowKbdHints } from './hooks/useHardwareKeyboard';
 import { useUpdater } from './hooks/useUpdater';
 import { useUpdateNotifications } from './hooks/useUpdateNotifications';
 import {
-  consumeStartupReleaseNotes, FALLBACK_APP_VERSION, fetchLatestJson, loadReleaseNotesList,
+  clearIgnoredVersion, consumeStartupReleaseNotes, FALLBACK_APP_VERSION, fetchLatestJson,
+  getIgnoredVersion, isNewerVersion, loadReleaseNotesList,
   maybeSeedCurrentVersionNotes, tauriHttpGetText,
   type StoredReleaseNotes,
 } from './lib/update';
@@ -1100,6 +1101,17 @@ export default function App() {
       .catch(() => { /* 保留兜底版本号 */ });
     return () => { cancelled = true; };
   }, []);
+
+  /* 「忽略此版本」曾是一个没有反悔入口的静默开关：点了之后左下角再不提示，界面上也看不出
+     为什么不提示，人就一直停在旧版（v1.5.3 发出去后没再发新版，正是这种静默）。只要被忽略的
+     版本比当前版本新，就在「关于」里显出来，一键清掉记录并立刻重新检查。
+     弹窗打开时也重读一遍——本会话内刚点过「忽略此版本」同样要看得见。 */
+  const [ignoredAhead, setIgnoredAhead] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isTauri) return;
+    const v = getIgnoredVersion();
+    setIgnoredAhead(v && isNewerVersion(v, appVersion) ? v : null);
+  }, [appVersion, aboutOpen, updater.latestVersion]);
 
   /* 更新重启后：打开「当前版本」的未展示文档（每个版本只自动打开一次；空说明不开，仍可在「关于」重看）。
      等会话恢复完成（hydrated）再打开，避免恢复流程抢走焦点/把标签挤到恢复标签之前。
@@ -2459,6 +2471,21 @@ export default function App() {
               <Keyboard size={14} />
               {t('menu.shortcuts')}
             </button>
+            {/* 检查更新：更新提示过去只有左下角那张卡片，卡片被「忽略此版本」压掉后就再无任何入口，
+                连"去哪儿主动检查"都只能翻到「关于」弹窗里才发现。菜单给一颗常驻的，
+                点下去打开「关于」并当场检查，结果就在同一屏（浏览器模式没有更新通道，不出现） */}
+            {isTauri && (
+              <button
+                onClick={() => { setMenuOpen(false); setAboutOpen(true); updater.checkManually(); }}
+                className={cn(
+                  MENU_ITEM_CLS,
+                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                )}
+              >
+                <RefreshCw size={14} />
+                {t('update.check')}
+              </button>
+            )}
             <button
               onClick={() => { setMenuOpen(false); setAboutOpen(true); }}
               className={cn(
@@ -2992,7 +3019,10 @@ export default function App() {
                   {updater.phase === 'downloading' && (
                     <span className="text-[10px] text-zinc-500 pointer-coarse:text-xs">{t('update.downloading')}</span>
                   )}
-                  {updater.phase === 'available' && updater.source === 'manual' && (
+                  {/* 有可用更新就在弹窗里直接给按钮，不区分手动还是自动检查：
+                      启动时自动发现的新版本若被「忽略此版本」压掉，旧版这里只在手动检查后才出现按钮，
+                      于是既不弹卡片也没有任何地方能装——打开「关于」本身就该是能操作的一屏 */}
+                  {updater.phase === 'available' && (
                     <button
                       onClick={() => { IS_ANDROID_APP ? updater.goDownload() : void updater.install(); }}
                       className="px-3 py-1 rounded-md text-[10px] font-medium text-white transition-colors bg-blue-600 hover:bg-blue-500 pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[48px] pointer-coarse:py-2"
@@ -3000,6 +3030,25 @@ export default function App() {
                       {t('update.newVersion', { v: updater.latestVersion ?? '' })} ·
                       {IS_ANDROID_APP ? t('update.goDownload') : t('update.installNow')}
                     </button>
+                  )}
+                  {/* 被忽略的那个版本还比当前版本新：把这行静默说破，并给一键反悔——
+                      清掉记录后立刻重新检查，此后每次启动会照常弹更新卡片。
+                      （v1.5.3 点了「忽略此版本」之后客户端再没提示过，就是这么静默下来的） */}
+                  {ignoredAhead && updater.phase !== 'downloading' && updater.phase !== 'installed' && (
+                    <div className="flex flex-col items-center gap-1 pointer-coarse:gap-2">
+                      <span className="text-[10px] text-amber-500 pointer-coarse:text-xs">
+                        {t('update.ignoredNote', { v: `v${ignoredAhead}` })}
+                      </span>
+                      <button
+                        onClick={() => { clearIgnoredVersion(); setIgnoredAhead(null); updater.checkManually(); }}
+                        className={cn(
+                          "px-2 py-0.5 rounded-md text-[10px] font-medium border transition-colors pointer-coarse:text-sm pointer-coarse:px-4 pointer-coarse:min-h-[48px]",
+                          isDarkMode ? "border-zinc-600 text-zinc-400 hover:bg-zinc-700" : "border-zinc-300 text-zinc-500 hover:bg-zinc-100"
+                        )}
+                      >
+                        {t('update.unignore')}
+                      </button>
+                    </div>
                   )}
                   {(updater.phase === 'idle' || updater.phase === 'error' || updater.phase === 'upToDate') && (
                     <button

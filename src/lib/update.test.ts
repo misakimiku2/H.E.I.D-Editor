@@ -3,17 +3,19 @@ import {
   apkMirrorDownloadUrl,
   compareVersions, consumeStartupReleaseNotes, downloadPageFor, fetchLatestJson,
   getIgnoredVersion, isNewerVersion, LATEST_JSON_URLS, loadReleaseNotesList,
+  clearIgnoredVersion,
   maybeSeedCurrentVersionNotes, MAX_RELEASE_NOTES, MIRROR_RELEASES_PAGE, parseLatestJson,
   RELEASES_PAGE, saveReleaseNotes, setIgnoredVersion, shouldNotifyUpdate,
   summarizeNotes, UpdateSourceUnavailableError,
 } from './update';
 
-function fakeStorage(): { store: Map<string, string>; getItem(k: string): string | null; setItem(k: string, v: string): void } {
+function fakeStorage(): { store: Map<string, string>; getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void } {
   const store = new Map<string, string>();
   return {
     store,
     getItem: k => (store.has(k) ? store.get(k)! : null),
     setItem: (k, v) => void store.set(k, v),
+    removeItem: k => void store.delete(k),
   };
 }
 const asStorage = (s: ReturnType<typeof fakeStorage>) => s as unknown as Storage;
@@ -161,6 +163,14 @@ describe('忽略版本持久化', () => {
     expect(getIgnoredVersion(asStorage(s))).toBe(null);
     setIgnoredVersion('1.2.1', asStorage(s));
     expect(getIgnoredVersion(asStorage(s))).toBe('1.2.1');
+  });
+
+  it('「恢复提示」清掉记录后回到未忽略态（忽略过的版本从此重新提示）', () => {
+    const s = fakeStorage();
+    setIgnoredVersion('1.2.1', asStorage(s));
+    clearIgnoredVersion(asStorage(s));
+    expect(getIgnoredVersion(asStorage(s))).toBe(null);
+    expect(shouldNotifyUpdate('1.2.1', getIgnoredVersion(asStorage(s)))).toBe(true);
   });
 
   it('shouldNotifyUpdate：未忽略弹；同版本不弹；比忽略版本新则弹', () => {

@@ -186,6 +186,17 @@ export function setIgnoredVersion(version: string, storage: Storage | null = def
   } catch { /* 忽略持久化失败 */ }
 }
 
+/**
+ * 撤销「忽略此版本」：删掉记录，后续启动的自动检查重新弹提示。
+ * 「忽略」是随点随生效的持久开关，没有它自己的反悔入口时用户会一直静默停在旧版，
+ * 故由「关于」里的一行提示调用这里。失败静默。
+ */
+export function clearIgnoredVersion(storage: Storage | null = defaultStorage()): void {
+  try {
+    storage?.removeItem(IGNORED_VERSION_KEY);
+  } catch { /* 忽略持久化失败 */ }
+}
+
 /* ---------- 发行说明持久化（重启后展示 + 关于里重看 / 回看过往版本） ---------- */
 
 export interface StoredReleaseNotes {
