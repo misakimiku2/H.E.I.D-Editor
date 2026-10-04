@@ -167,6 +167,14 @@ struct Envelope {
 /// 下一次调用会把它当新帧的开头 —— 从这一刻起整个流的帧边界全错。
 /// 本结构把"已读到但还不够一帧"的字节存在用户态缓冲区里，超时只是
 /// 返回 `None`，不丢任何字节。
+///
+/// **一份就是一条连接的读取进度**：从握手的第一字节到最后一次收帧，中途不能换新的。
+/// 换了不会在换的那一刻报错，而是把已经读进来的那段尾巴丢掉，下一帧从帧体中间开始解析，
+/// 报出来的是两句指向加密/网络的话 ——「帧解密失败：配对票不匹配，或链路已被截断」
+/// 或「对端帧超过 N 字节上限」（N 是密文字节被当成长度前缀读出来的那个数）。
+/// 2026-10-04 那次「手机上扫一扫转圈很久 + 桌面互联卡片闪烁」就是这个：两端日志是同一场
+/// 事故的两张脸，桌面拒掉第一帧随即断开，手机只看见「对端已关闭连接」，于是手机按 2 秒一档
+/// 退避重来，每次都撞在同一处。接线见 [`run_pump`] 的入参说明。
 #[derive(Default)]
 pub struct Framer {
     buf: Vec<u8>,
@@ -1268,9 +1276,17 @@ fn answer_req(scope: &board::Scope, id: u64, method: &str, params: &str) -> Msg 
 ///
 /// 为什么分派也在这一个线程里做、不在命令线程里各开一路：见 [`Conn`] —— socket 只有一个主人，
 /// 发送帧计数器才可能和写出顺序保持一致。
+///
+/// **收**这一侧同理，而且更隐蔽：一份 `Framer` 就是一条连接的读取进度，握手与泵必须是同一份。
+/// 握手等 `Pong` 的那一次 read 会把 socket 里已经到达的字节一口气读进来（手机在握手完成的
+/// 那一刻就连着写出 `Pong`、`Ping`、第一条请求，局域网 + NODELAY 下它们常在同一段里），
+/// 于是 `Pong` 之后的字节只存在于握手那份缓冲区中。泵另起一份等于把它们扔掉，
+/// 下一帧从中间开始解析 —— 表现见 [`Framer`] 末尾那段。
 fn run_pump(
     mut stream: TcpStream,
     mut session: Session,
+    // 握手那一段用的同一份增量读取器，整条连接只有这一份（见上方说明）
+    mut framer: Framer,
     app: &AppHandle,
     stop: &AtomicBool,
     role: Role,
@@ -1279,7 +1295,6 @@ fn run_pump(
 ) {
     let my_stop = live.map(|l| Arc::clone(&l.stop));
     let my_push = live.map(|l| Arc::clone(&l.push));
-    let mut framer = Framer::default();
     let mut last_ping = Instant::now();
     let mut misses: u32 = 0;
     /* 一进泵就发一个 Ping：它是「我开始服务你了」的第一个信号。
@@ -1803,7 +1818,7 @@ fn serve_conn(mut stream: TcpStream, addr: std::net::SocketAddr, app: AppHandle,
     *state.push.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&mine.push));
     // 从这一刻起才有"谁在看这棵树"这回事：监听随连接而建，随断开而释放
     sync_fs_watch(&app);
-    run_pump(stream, session, &app, &stop, Role::Server, Some(&mine));
+    run_pump(stream, session, framer, &app, &stop, Role::Server, Some(&mine));
     conn_log(&app, "info", "link.log.down", serde_json::json!({
         "addr": addr.to_string(), "secs": up_at.elapsed().as_secs(),
     }));
@@ -1931,7 +1946,7 @@ fn connect_and_pump(
         s.peer_device = hs.device;
         s.last_error.clear();
     });
-    run_pump(stream, hs.session, &app, &stop, Role::Client, None);
+    run_pump(stream, hs.session, framer, &app, &stop, Role::Client, None);
     conn_log(&app, "info", "link.log.down", serde_json::json!({
         "addr": target, "secs": up_at.elapsed().as_secs(),
     }));

@@ -118,6 +118,49 @@ fn 会话双向往返并保序() {
     assert_eq!(client.tx_count(), 1);
 }
 
+/// 2026-10-04 那次「手机上扫一扫转圈很久 + 桌面互联卡片闪烁」的根因钉子。
+///
+/// 手机在握手完成那一刻连着写出 `Pong`、`Ping`、第一条请求；局域网 + NODELAY 下这三段字节
+/// 常挤在同一段里到达，桌面等 `Pong` 的那一次 read 会一口气全读进来 —— 于是 `Pong` 之后的
+/// 字节**只存在于握手那份 `Framer` 的缓冲区里**。维持泵另起一份 `Framer`（修复前
+/// `run_pump` 的第一行就是这个）等于把它们扔掉，下一帧从帧体中间开始解析，报出来的是
+/// 「帧解密失败：配对票不匹配，或链路已被截断」或「对端帧超过 N 字节上限」（N 是密文被当成
+/// 长度前缀读出来的数），桌面随即断开这条连接，手机那边只看见「对端已关闭连接」——
+/// 两端各一张脸，且每次连上都撞，于是手机按 2 秒一档退避、桌面卡片跟着闪。
+#[test]
+fn 握手时读进来的余量归这条连接() {
+    let (mut client, mut server) = pair(&ticket());
+    let mut wire = Vec::new();
+    client.send(&mut wire, &Msg::Pong {}).unwrap();
+    client.send(&mut wire, &Msg::Ping {}).unwrap();
+    client
+        .send(&mut wire, &Msg::Req { id: 1, method: "tabs".into(), params: "{}".into() })
+        .unwrap();
+
+    // 一次收帧就把三帧都读了进来（真实 socket 上就是这个形状）
+    let mut sock = IdleReader { data: wire.clone(), pos: 0 };
+    let mut hs = Framer::default();
+    assert_eq!(server.recv(&mut sock, &mut hs).unwrap().unwrap(), Msg::Pong {});
+    assert!(hs.buffered() > 0, "Ping 与 Req 的字节此刻只握在握手那份缓冲区里");
+
+    // 同一份 Framer 接着收：两帧都还在，顺序也没乱
+    assert_eq!(server.recv(&mut sock, &mut hs).unwrap().unwrap(), Msg::Ping {});
+    match server.recv(&mut sock, &mut hs).unwrap().unwrap() {
+        Msg::Req { id, ref method, .. } => assert_eq!((id, method.as_str()), (1, "tabs")),
+        other => panic!("期望第三帧是请求，实际 {other:?}"),
+    }
+
+    // 反向那一半：那两帧不是"稍后还能收到"—— 字节在第一次 read 就已经离开 socket 了，
+    // 同一只读端再喂给另一份新起的 Framer，一个字也读不出来。
+    // 这一句就是泵必须接手握手那份 `Framer` 的全部理由。
+    let mut fresh = Framer::default();
+    assert!(
+        server.recv(&mut sock, &mut fresh).unwrap().is_none(),
+        "socket 已被握手那份读空：另起一份 Framer 收不到那两帧"
+    );
+    assert_eq!(fresh.buffered(), 0, "新那份手里什么都没有");
+}
+
 #[test]
 fn 篡改一字节就解不开() {
     let (mut client, mut server) = pair(&ticket());
