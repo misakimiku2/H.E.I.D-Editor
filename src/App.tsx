@@ -34,7 +34,7 @@ import { showNotification } from './lib/notifications';
 import { savePastedImage, blobToDataUrl, rgbaToPngBlob, collectManagedImages, removedManagedImages, DATA_URI_MAX_BYTES } from './lib/markdownImagePaste';
 import { localizeRemoteImages, collectRemoteImages, type LocalizeIo } from './lib/imageLocalize';
 import { buildCsvPrintHtml, buildPlainPrintHtml, printHtml } from './lib/printDoc';
-import { clampDiffEntries } from './lib/diffTimeline';
+import { clampDiffEntries, normalizeCoalesceWindow } from './lib/diffTimeline';
 import { useExternalFileWatcher } from './hooks/useExternalFileWatcher';
 import { useRemoteFileChanges } from './hooks/useRemoteFileChanges';
 import { useOfflineSync } from './hooks/useOfflineSync';
@@ -964,6 +964,8 @@ export default function App() {
   const overlayState = {
     tabSheetOpen, menuOpen, aboutOpen, pendingDiscard, saveNameOpen: !!pendingSaveName, findOpen: findState.open, settingsOpen, scanOpen,
     remoteTabsOpen, deviceLinkOpen, shortcutsOpen, tabMenuOpen: !!tabMenu, fmtMenuOpen, selBarOpen,
+    /* diff 在手机上是一整页：不挂进返回键逐层关闭链的话，从它按返回会直接掉到退出确认 */
+    diffOpen: diffModalOpen,
   };
   usePlatformIntegration({
     openPathIntoTab: file.openPathIntoTab,
@@ -981,6 +983,7 @@ export default function App() {
       closeSelBar: () => closeAllSelBars(),
       closeFind,
       closeSettings: () => setSettingsOpen(false),
+      closeDiff: () => setDiffModalOpen(false),
       closeScan: () => setScanOpen(false),
       closeRemoteTabs,
       closeDeviceLink,
@@ -2880,8 +2883,13 @@ export default function App() {
             focusPath={activeTab?.path ?? null}
             maxEntries={diff.maxDiffEntries}
             onChangeMaxEntries={(n) => diff.setMaxDiffEntries(clampDiffEntries(n))}
+            batchWindow={diff.coalesceWindow}
+            onChangeBatchWindow={(w) => diff.setCoalesceWindow(normalizeCoalesceWindow(w))}
+            externalWatch={isTauri && !IS_ANDROID_APP}
+            asPage={isPhone}
             onClose={() => setDiffModalOpen(false)}
             onAccept={(kind, path, id) => (kind === 'external' ? diff.handleAcceptDiff(path, id) : diff.handleAcceptInternalDiff(path, id))}
+            onAcceptAll={(kind) => (kind === 'external' ? diff.handleAcceptAllExternal() : diff.handleAcceptAllInternal())}
             onRevert={(kind, path, id) => (kind === 'external' ? void handleRevertDiff(path, id) : handleRevertInternalDiff(path, id))}
           />
         )}

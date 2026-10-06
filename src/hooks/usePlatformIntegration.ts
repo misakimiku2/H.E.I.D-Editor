@@ -29,6 +29,8 @@ export interface OverlayState {
   selBarOpen: boolean;
   findOpen: boolean;
   settingsOpen: boolean;
+  /** 修改对比：手机上是一整页、桌平板是弹窗；返回键两种形态都要能收掉 */
+  diffOpen: boolean;
   /** 手机顶栏那颗「扫一扫」点开的相机层 */
   scanOpen: boolean;
   /** 「电脑上正打开的文件」那一整屏（盖在设置之上，扫码连上后的落地页也是它） */
@@ -46,6 +48,7 @@ export interface OverlayActions {
   closeSelBar: () => void;
   closeFind: () => void;
   closeSettings: () => void;
+  closeDiff: () => void;
   closeScan: () => void;
   closeRemoteTabs: () => void;
   closeDeviceLink: () => void;
@@ -245,6 +248,8 @@ export function usePlatformIntegration({
       /* 相机也是 z-150：从「设备互联」那一屏里按扫一扫时，返回先收相机、留住那一屏 */
       if (o.scanOpen) { a.closeScan(); return; }
       if (o.deviceLinkOpen) { a.closeDeviceLink(); return; }
+      /* 修改对比在手机上是一整页：返回先收它，不能落到退出确认 */
+      if (o.diffOpen) { a.closeDiff(); return; }
       if (o.settingsOpen) { a.closeSettings(); return; }
       if (o.shortcutsOpen) { a.closeShortcuts(); return; }
       if (o.tabMenuOpen) { a.closeTabMenu(); return; }
