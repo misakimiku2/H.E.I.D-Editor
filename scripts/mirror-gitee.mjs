@@ -25,10 +25,14 @@
  *     --notes docs/RELEASE-NOTES-v1.4.2.md \
  *     --file H.I.D.E_1.4.2_x64-setup.exe \
  *     --file H.I.D.E_1.4.2_arm64.apk \
- *     --manifest latest-mirror.json
+ *     --manifest latest-mirror.json \
+ *     --manifest-android latest-android.json
  *
  * `--manifest` 指向已生成好的镜像版 latest.json（其 platforms.url 必须已经是 Gitee 直链），
  * 脚本把它传到固定 tag 的 release 上，并回读校验。
+ * `--file` 按这一版实际出包的那几端给（单端发版时另一端没有产物，别挂旧包冒充）。
+ * `--manifest-android` 是安卓侧载读的版本清单，两份都挂在同一个 `mirror-latest` 上；
+ * 它内部没有任何下载地址，所以镜像与 GitHub 那份内容一致，直接复用。
  */
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
@@ -38,6 +42,8 @@ const API = 'https://gitee.com/api/v5';
 /** 承载 latest.json 的固定 tag：Gitee 没有 GitHub 的 `releases/latest/download/...` 那种「永远最新」路径 */
 const LATEST_TAG = 'mirror-latest';
 const LATEST_FILE = 'latest.json';
+/** 安卓侧载读的那份清单，同挂 mirror-latest */
+const ANDROID_FILE = 'latest-android.json';
 
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
@@ -55,9 +61,13 @@ const tag = arg('tag');
 const notesPath = arg('notes');
 const files = argsAll('file');
 const manifest = arg('manifest');
+const manifestAndroid = arg('manifest-android');
+/* 单端发版时镜像清单写的不是本次 tag 的版本（被跳过的那一端沿用上一次出过包的版本），
+   校验要跟清单里的实际版本比，不能跟 tag 比 */
+const manifestVersion = arg('manifest-version') ?? version;
 
 if (!token || !version || !tag || files.length === 0 || !manifest) {
-  console.error('用法: GITEE_TOKEN=... node scripts/mirror-gitee.mjs --version X --tag vX --file <产物> [--file ...] --manifest latest.json [--notes <md>]');
+  console.error('用法: GITEE_TOKEN=... node scripts/mirror-gitee.mjs --version X --tag vX --file <产物> [--file ...] --manifest latest.json [--manifest-android latest-android.json] [--manifest-version <清单里的版本>] [--notes <md>]');
   process.exit(1);
 }
 
@@ -215,19 +225,37 @@ if (stale) {
 const latestReleaseId = await createRelease({
   tagName: LATEST_TAG,
   name: 'H.I.D.E 更新清单（勿删：updater 端点）',
-  body: '这个 release 只承载 `latest.json`，供桌面应用内更新的第二端点使用。每次发版会被删除重建，下载地址保持不变。',
+  body: '这个 release 只承载两份更新清单：`latest.json`（桌面 updater 的第二端点）与 `latest-android.json`'
+    + '（安卓侧载的版本检查）。每次发版会被删除重建，下载地址保持不变。',
 });
 const manifestAsset = await uploadFile(latestReleaseId, manifest, LATEST_FILE);
 await verifyDownload(manifestAsset.browser_download_url, readFileSync(manifest).byteLength);
 console.log(`✓ ${LATEST_FILE} → ${manifestAsset.browser_download_url}`);
 
+/* 安卓那份与 GitHub 内容一致（里面没有任何下载地址），直接复用同一次构建产出的文件 */
+let androidAsset = null;
+if (manifestAndroid) {
+  androidAsset = await uploadFile(latestReleaseId, manifestAndroid, ANDROID_FILE);
+  await verifyDownload(androidAsset.browser_download_url, readFileSync(manifestAndroid).byteLength);
+  console.log(`✓ ${ANDROID_FILE} → ${androidAsset.browser_download_url}`);
+}
+
 /* 4) 回读校验：镜像清单里的版本要对得上，且下载地址指向 Gitee 而不是 GitHub */
 const remote = await (await fetch(manifestAsset.browser_download_url)).text();
 const parsed = JSON.parse(remote);
-if (parsed.version !== version) throw new Error(`镜像清单版本不符：远端 ${parsed.version} ≠ ${version}`);
+if (parsed.version !== manifestVersion) {
+  throw new Error(`镜像清单版本不符：远端 ${parsed.version} ≠ ${manifestVersion}（tag ${tag}）`);
+}
 for (const [key, platform] of Object.entries(parsed.platforms ?? {})) {
   if (!platform.url.includes('gitee.com')) {
     throw new Error(`镜像清单的 ${key}.url 没指向 Gitee（${platform.url}）——只镜像清单等于没镜像`);
   }
+}
+if (androidAsset) {
+  const remoteAndroid = JSON.parse(await (await fetch(androidAsset.browser_download_url)).text());
+  if (typeof remoteAndroid.version !== 'string' || !remoteAndroid.version) {
+    throw new Error(`镜像的 ${ANDROID_FILE} 里没有可用的 version 字段`);
+  }
+  console.log(`✓ ${ANDROID_FILE} 版本 ${remoteAndroid.version}`);
 }
 console.log(`镜像完成：${repo} · ${tag} · 清单 ${manifestAsset.browser_download_url}`);

@@ -2,8 +2,8 @@
  * 更新检查纯逻辑：
  * - 桌面走 tauri-plugin-updater（签名校验 + 差量安装），本模块只提供版本比较、
  *   「忽略此版本」与发行说明的 localStorage 持久化；
- * - 安卓侧载无原生更新器：经既有 http_get 命令抓取 latest.json，比较版本后提示前往
- *   Releases 页面手动下载（roadmap v1.0 的「安卓只做版本检查提示」）。
+ * - 安卓侧载无原生更新器：经既有 http_get 命令抓取自己的版本清单 latest-android.json，
+ *   比较版本后提示前往 Releases 页面手动下载（roadmap v1.0 的「安卓只做版本检查提示」）。
  * 自动检查每次启动都执行（启动 4 秒后延迟，避开 I/O 高峰），无节流——
  * 节流曾导致发版后 24h 内启动的客户端完全收不到提示。
  */
@@ -39,8 +39,25 @@ export const LATEST_JSON_URLS = [
   'https://gitee.com/misakimiku2/heid-editor/releases/download/mirror-latest/latest.json',
 ];
 
+/**
+ * 安卓侧载用的版本清单，与桌面那份分开。
+ * 两端曾共用 latest.json 的 `version`：只出安装包的那一端一升版本，另一端也会被提示去更新
+ * 一个没有它产物的版本（点「前往下载」落到没有对应包的页面）。所以安卓只认这份，
+ * 它的 `version` 只在真的挂上 arm64 APK 时才推进——桌面单独发版时它原样停在上一次安卓版本，
+ * 手机上就什么都不弹。生成与接线见 scripts/gen-android-latest.mjs、release.yml 的 detect 任务。
+ */
+export const LATEST_ANDROID_JSON_URLS = [
+  'https://github.com/misakimiku2/H.E.I.D-Editor/releases/latest/download/latest-android.json',
+  'https://gitee.com/misakimiku2/heid-editor/releases/download/mirror-latest/latest-android.json',
+];
+
+/** 按端取清单地址：安卓读自己那份，桌面继续用 latest.json（tauri-plugin-updater 的协议文件） */
+export function latestJsonUrlsFor(isAndroid: boolean): string[] {
+  return isAndroid ? LATEST_ANDROID_JSON_URLS : LATEST_JSON_URLS;
+}
+
 /** 版本号兜底（浏览器模式无 getVersion API；与 package.json / tauri.conf.json 同步维护） */
-export const FALLBACK_APP_VERSION = '1.5.5';
+export const FALLBACK_APP_VERSION = '1.5.6';
 
 export interface LatestReleaseInfo {
   version: string;

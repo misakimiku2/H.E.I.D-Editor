@@ -45,7 +45,9 @@
 
 ```bash
 # 1. 准备当版发行说明文档 docs/RELEASE-NOTES-v{完整版本}.md（每版单独成文）
-#    （既是 Release 页面正文，也经 latest.json 的 notes 成为应用内更新说明）
+#    （既是 Release 页面正文，也经更新清单的 notes 成为应用内更新说明）
+#    只发一端时，在那篇开头的 `>` 信息行里写死「本版仅桌面」或「本版仅安卓」——
+#    CI 的 detect 任务按这一行决定跑哪几段（scripts/release-plan.mjs），没写就两端都发
 # 2. 更新版本号（六处，全部同步）：
 #    package.json / package-lock.json（根两处）/ src-tauri/tauri.conf.json /
 #    src-tauri/Cargo.toml / src-tauri/Cargo.lock / src/lib/update.ts 的 FALLBACK_APP_VERSION
@@ -55,35 +57,45 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
+> 单端发版会吃掉一个版本号：v1.5.6 只出了桌面包，下一版安卓就得从 v1.5.7 起，
+> 不能复用 1.5.6（两端共用同一套版本号，安卓包内的 `versionName` 由它推导）。
+
 > 💡 排查提示：Release 的 `created_at` 是标签所指向提交的时间（GitHub 惯例），
 > 不是发布对象的创建时刻；若 Release 停在草稿态（draft），`releases/tags/{tag}`
 > 对未鉴权请求会 404、`releases/latest` 也不会指向它——v1.3.1 发布时
 > softprops 创建草稿后上传失败未及发布，即为此现象（已改用 gh CLI 直接创建
 > 已发布 Release，不会再现）。
 
-推送 `v*` 标签触发 `.github/workflows/release.yml`：
+推送 `v*` 标签触发 `.github/workflows/release.yml`，任务是 `detect` → `desktop-release` /
+`android-release`（按标记只跑该跑的那几段）→ `update-channels` → `mirror-gitee`：
 
+- **detect**：跑 `scripts/release-plan.mjs`，读当版发行说明开头一行的「本版仅桌面 / 本版仅安卓」
+  决定后面跑哪几段，并查出**两端各自「上一次真出过包的版本」**——判据是 GitHub 上最新的、
+  挂了 `*_x64-setup.exe` / `*_arm64.apk` 的正式 Release，产物本身就是事实，不会和清单漂移。
 - **桌面（windows-latest）**：`npx tauri build` 带签名构建 NSIS 安装包
-  （`*-setup.exe` + `.exe.sig`）→ `scripts/gen-latest-json.mjs` 生成 `latest.json`
-  （notes 取自当版发行说明文档）→ `gh release create/upload` 发布。
-  `latest.json` 作为 Release 资产，恰为 `tauri.conf.json` 中 updater
-  endpoints 指向的 `releases/latest/download/latest.json` —— 桌面端应用内更新由此闭环。
-  （2026-09-18 起弃用 tauri-action 与 softprops/action-gh-release 的资产上传：
-  两者先后在 windows-latest 上稳定报「Error creating asset temp dir」，
-  softprops 在 ubuntu 上正常——疑似其新版上传实现在 Windows 上的缺陷，
-  改用 runner 预装的 gh CLI 规避。）
+  （`*-setup.exe` + `.exe.sig`）→ `gh release create/upload` 建正文并挂产物。
+  （2026-09-18 起弃用 tauri-action 与 softprops/action-gh-release 的资产上传：两者先后在
+  windows-latest 上稳定报「Error creating asset temp dir」，softprops 在 ubuntu 上正常——
+  疑似其新版上传实现在 Windows 上的缺陷，改用 runner 预装的 gh CLI 规避。）
 - **安卓**：v1.4 起恢复发布并升级为 **release 签名 APK**（`android-release` 任务，arm64）。
   签名密钥经 secrets `HEID_ANDROID_KEYSTORE_B64` / `HEID_ANDROID_KEYSTORE_PASSWORD` 提供，
   缺失时任务以显式报错失败；详见「一次性准备 → 安卓 release 签名」。
   产物上传前重命名为 `H.I.D.E_<版本>_arm64.apk`（gradle 原名 `app-universal-release.apk`
   在 `--target aarch64` 下名不副实），并断言包内确有 `lib/arm64-v8a/`。
-  该任务 `needs: desktop-release`：Release 正文（= 应用内更新说明）由桌面任务用
-  `--notes-file` 建立，两任务并行时安卓先跑完会抢先用自动生成的说明建 Release、把正文占掉。
-- **国内镜像**（`mirror-gitee` 任务，`needs` 上面两个）：把安装包与 APK 同步到 Gitee Release
-  （`misakimiku2/heid-editor`），并用 `scripts/gen-latest-json.mjs` 生成一份**下载地址指向 Gitee**
-  的 `latest.json`，挂到固定 tag `mirror-latest` 上——它就是 `tauri.conf.json` 里 updater 的第二
-  endpoint，也是安卓「前往下载」在 GitHub 不可达时指向的页面。为什么需要它、以及 Gitee 那几处
-  反直觉的 API 行为，记在 [update-mirror-plan.md](update-mirror-plan.md) 与 `scripts/mirror-gitee.mjs` 头部。
+  它 `needs: desktop-release` 且条件里带 `!cancelled()`：桌面被跳过时依赖的 result 是 `skipped`，
+  不加这个函数 GitHub 会连带把安卓也跳过。
+- **两端更新清单**（`update-channels`，每版都跑）：`scripts/gen-latest-json.mjs` 生成 `latest.json`
+  （版本写 detect 给的**桌面版本**，notes 取那一版的发行说明，地址指向那一版的 tag）、
+  `scripts/gen-android-latest.mjs` 生成 `latest-android.json`（只写版本号与说明，里面不放任何
+  下载地址——清单版本可能不是本次那一版，放地址就会指错），两份都挂到**本次 tag** 下。
+  两端读的都是 `releases/latest/download/...`，所以清单必须落在本次 tag 上才生效；
+  这一版本没出包的那一端在这里原样沿用上一次的值，也就不会被提示更新到一个没有自己产物的版本。
+  签名一律从「清单所写那一版」的 tag 拉：本版出了桌面包就在本次 tag 上，没出就在上一版 tag 上。
+- **国内镜像**（`mirror-gitee`，`needs` 上面几段）：只同步本版**实际出了包**的那几端产物到
+  Gitee Release（`misakimiku2/heid-editor`），并重建固定 tag `mirror-latest` 上的两份清单——
+  桌面那份把地址改写成 Gitee 直链，安卓那份与 GitHub 内容一致。它就是 `tauri.conf.json` 里
+  updater 的第二 endpoint，也是安卓版本检查的第二个源。为什么需要它、以及 Gitee 那几处反直觉的
+  API 行为，记在 [update-mirror-plan.md](update-mirror-plan.md) 与 `scripts/mirror-gitee.mjs` 头部。
   镜像失败不影响 GitHub 侧已完成的发布（该任务在最后，仅自身标红）。
 
 日常 CI（`.github/workflows/ci.yml`，push/PR 触发）运行 vitest + tsc + 前端构建、
@@ -100,8 +112,12 @@ Windows NSIS 构建（**关闭** `createUpdaterArtifacts`，无需 secrets）、
     上限 20 份）；更新重启后自动打开一次**只读更新文档标签页**（Markdown 预览视图，
     不可编辑/保存，恒为预览；瞬态标签不进会话快照，重启不保留、不重复弹出）。
     之后可在「关于」→「更新文档」重看最新一份；旁边折叠按钮展开可回看过往版本的文档。
-- **安卓（侧载）**：无原生更新器。经既有 `http_get` 命令抓取同一份 `latest.json`，
-  比较版本号；有新版弹出通知卡片，「前往下载」跳转 Releases 页面手动安装 APK。
+- **安卓（侧载）**：无原生更新器。经既有 `http_get` 命令抓取**安卓自己的**版本清单
+  `latest-android.json`（候选源同样是 GitHub → Gitee 镜像两条），比较版本号；有新版弹出通知卡片，
+  「前往下载」跳转 Releases 页面手动安装 APK。桌面单独发版时这份清单的版本不动，手机也就什么都不弹。
+  - ⚠️ 已知限制：v1.5.5 及更早装在手机上的客户端读的还是共享的 `latest.json`，所以**桌面单独发版
+    时它们仍会弹一次**「发现新版本」，点进去没有对应版本的 APK；用户点「忽略此版本」后该版不再弹。
+    这条从下一版安卓包（读 `latest-android.json` 的那版起）才彻底断掉。
 - **浏览器模式**：无更新通道，所有检查直接跳过。
 
 ## 本地验证

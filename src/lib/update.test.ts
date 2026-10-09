@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   apkMirrorDownloadUrl,
   compareVersions, consumeStartupReleaseNotes, downloadPageFor, fetchLatestJson,
-  getIgnoredVersion, isNewerVersion, LATEST_JSON_URLS, loadReleaseNotesList,
+  getIgnoredVersion, isNewerVersion, LATEST_ANDROID_JSON_URLS, LATEST_JSON_URLS, latestJsonUrlsFor, loadReleaseNotesList,
   clearIgnoredVersion,
   maybeSeedCurrentVersionNotes, MAX_RELEASE_NOTES, MIRROR_RELEASES_PAGE, parseLatestJson,
   RELEASES_PAGE, saveReleaseNotes, setIgnoredVersion, shouldNotifyUpdate,
@@ -143,6 +143,22 @@ describe('downloadPageFor（下载页跟随命中的源）', () => {
     expect(downloadPageFor(LATEST_JSON_URLS[0])).toBe(RELEASES_PAGE);
     expect(downloadPageFor(null)).toBe(RELEASES_PAGE);
     expect(downloadPageFor('不是个 URL')).toBe(RELEASES_PAGE);
+  });
+});
+
+describe('latestJsonUrlsFor（两端清单各读各的）', () => {
+  it('桌面用 latest.json，安卓用 latest-android.json——只出一端时另一端不会被提示到没有产物的版本', () => {
+    expect(latestJsonUrlsFor(false)).toBe(LATEST_JSON_URLS);
+    expect(latestJsonUrlsFor(true)).toBe(LATEST_ANDROID_JSON_URLS);
+    expect(LATEST_ANDROID_JSON_URLS).not.toEqual(LATEST_JSON_URLS);
+  });
+
+  it('安卓清单也是两源按序回退，且全是 https', () => {
+    expect(LATEST_ANDROID_JSON_URLS.length).toBe(2);
+    for (const url of LATEST_ANDROID_JSON_URLS) {
+      expect(url.startsWith('https://')).toBe(true);
+      expect(url.endsWith('latest-android.json')).toBe(true);
+    }
   });
 });
 

@@ -12,7 +12,8 @@ import { IS_ANDROID_APP } from '../lib/platform';
 import { isTauri } from '../lib/fileIO';
 import { openExternal } from '../lib/openExternal';
 import {
-  downloadPageFor, fetchLatestJson, isNewerVersion, tauriHttpGetText, UpdateSourceUnavailableError,
+  downloadPageFor, fetchLatestJson, isNewerVersion, latestJsonUrlsFor, tauriHttpGetText,
+  UpdateSourceUnavailableError,
 } from '../lib/update';
 
 export type UpdatePhase =
@@ -68,8 +69,8 @@ export function useUpdater() {
     try {
       if (IS_ANDROID_APP) {
         /* 安卓：版本检查提示（复用 http_get：原生无 CORS，超时/5MB 上限齐备）；
-           多个候选源按序回退，见 LATEST_JSON_URLS */
-        const info = await fetchLatestJson(tauriHttpGetText);
+           读的是安卓自己的清单，桌面单独发版时它不升版本，手机也就不会被提示——见 LATEST_ANDROID_JSON_URLS */
+        const info = await fetchLatestJson(tauriHttpGetText, latestJsonUrlsFor(true));
         const { getVersion } = await import('@tauri-apps/api/app');
         const current = await getVersion();
         if (isNewerVersion(info.version, current)) {

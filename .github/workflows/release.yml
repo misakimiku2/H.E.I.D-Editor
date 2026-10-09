@@ -1,14 +1,25 @@
 name: Release
 
 # 正式发布：推送 v* 标签触发。
-# 桌面：tauri build 签名构建 NSIS 安装包 → scripts/gen-latest-json.mjs 生成 latest.json
-#       （notes 取自 docs/RELEASE-NOTES-v{x.y.z}.md，每版单独成文）→ gh release create/upload 发布。
-#       latest.json 作为 Release 资产，恰为 updater endpoints 指向的地址。
-# 安卓：侧载场景构建 debug 签名 APK 附到同一 Release（无签名密钥要求）；2026-09-18 起暂缓。
+#
+# detect        读当版发行说明开头的「本版仅桌面 / 本版仅安卓」判定这一版发哪几端，并查出
+#               两端各自「上一次真出过包的版本」（scripts/release-plan.mjs）。
+# 桌面          npx tauri build 签名构建 NSIS 安装包 → gh 建 Release 正文 + 挂 exe 与 .exe.sig。
+# 安卓          tauri android build 出 arm64 release 签名 APK，挂到同一个 Release。
+# update-channels
+#               每次都把两份更新清单重挂到**本次 tag** 下：出了包的那端写本版号，被跳过的那端
+#               沿用上一次出过包的版本。这是单端发版不打扰另一端的关键——过去两端共用 latest.json
+#               的 version 字段，只挂出安装包的那一端一升版本，另一端也会提示更新到一个没有它
+#               产物的页面（现在桌面读 latest.json、安卓读 latest-android.json，见 src/lib/update.ts）。
+#               清单必须落在本次 tag 上，因为两端的端点都是 releases/latest/download/...。
+# mirror-gitee  把本版实际出的产物同步到 Gitee Release，并重建固定 tag mirror-latest 上的两份
+#               清单（国内直连的第二端点）。Gitee 的几处反直觉行为记在 scripts/mirror-gitee.mjs 头部。
 #
 # 前置 secrets（见 docs/RELEASE.md）：
 #   TAURI_SIGNING_PRIVATE_KEY           更新签名私钥（src-tauri/keys/heid.key 的内容）
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  私钥密码（无密码则留空字符串）
+#   HEID_ANDROID_KEYSTORE_B64 / HEID_ANDROID_KEYSTORE_PASSWORD  安卓 release 签名
+#   GITEE_TOKEN                         国内镜像
 
 on:
   push:
@@ -16,8 +27,39 @@ on:
       - 'v*'
 
 jobs:
+  detect:
+    name: 判定本版发哪几端
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      desktop: ${{ steps.plan.outputs.desktop }}
+      android: ${{ steps.plan.outputs.android }}
+      desktop_version: ${{ steps.plan.outputs.desktop_version }}
+      android_version: ${{ steps.plan.outputs.android_version }}
+      desktop_notes: ${{ steps.plan.outputs.desktop_notes }}
+      android_notes: ${{ steps.plan.outputs.android_notes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 缺当版发行说明、或查不到某端的历史产物都在这里当场失败，不留到后面某段静默生成错版本。
+      # 带 jobs token 查：匿名打 api.github.com 时 runner 出口 IP 共享 60 次/时的池子，会随机 403
+      - name: 读标记并查两端历史版本
+        id: plan
+        shell: bash
+        env:
+          RELEASE_API_TOKEN: ${{ github.token }}
+        run: node scripts/release-plan.mjs >> "$GITHUB_OUTPUT"
+
   desktop-release:
-    name: 桌面发布（签名安装包 + latest.json）
+    name: 桌面发布（签名安装包）
+    needs: detect
+    if: needs.detect.outputs.desktop == 'true'
     permissions:
       contents: write
     runs-on: windows-latest
@@ -40,8 +82,7 @@ jobs:
 
       # 2026-09-18 弃用 tauri-action（v1.3.0 发布时它在 Release 上传阶段
       # 稳定报「Error creating asset temp dir」，且草稿 Release 冲突时直接失败）。
-      # 改为三段式：tauri build 签名构建 → 自制脚本生成 latest.json → softprops 上传
-      # （softprops 即安卓任务所用组件，本仓库内长期验证可靠）。
+      # 改为构建 + runner 预装的 gh CLI 上传两段。
       - name: 构建签名安装包
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -49,49 +90,37 @@ jobs:
         shell: bash
         run: npx tauri build
 
-      - name: 生成 latest.json
-        shell: bash
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          MINOR=${VERSION%.*}
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "MINOR=$MINOR" >> "$GITHUB_ENV"
-          node scripts/gen-latest-json.mjs \
-            --version "$VERSION" \
-            --sig "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe.sig" \
-            --notes "docs/RELEASE-NOTES-v${VERSION}.md" \
-            --url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/H.I.D.E_${VERSION}_x64-setup.exe" \
-            --out "src-tauri/target/release/bundle/nsis/latest.json"
-
-      # 2026-09-18 弃用 tauri-action 与 softprops/action-gh-release 做资产上传：
-      # 两者先后在 windows-latest 上稳定报「Error creating asset temp dir」
-      # （softprops 在 ubuntu 上正常，桌面任务三连挂）。上传改用 runner 预装的 gh CLI。
-      - name: 发布 Release（安装包 + 签名 + latest.json）
-        shell: bash
+      - name: 发布 Release（安装包 + 签名）
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        shell: bash
         run: |
+          set -euo pipefail
           TAG="${{ github.ref_name }}"
+          BUNDLE="src-tauri/target/release/bundle/nsis"
+          EXE="H.I.D.E_${VERSION}_x64-setup.exe"
+          # gh release view || create：安卓单独发版时 Release 由安卓任务先建好，这里只补挂产物。
+          # 兜底 --draft=false：草稿形态的 Release 对外不可见（softprops 等以草稿创建、中途失败
+          # 就永远停在草稿态——v1.3.1 即如此）。注意 Release 的 created_at 是标签所指提交的时间，
+          # 排查问题时不要误读为草稿创建时刻。
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
                  --title "H.I.D.E $TAG" \
                  --notes-file "docs/RELEASE-NOTES-v${VERSION}.md"
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe" \
-            "src-tauri/target/release/bundle/nsis/H.I.D.E_${VERSION}_x64-setup.exe.sig" \
-            "src-tauri/target/release/bundle/nsis/latest.json"
-          # 兜底：草稿形态的 Release 对外不可见（softprops 等以草稿创建、中途失败
-          # 就永远停在草稿态——v1.3.1 即如此）。gh CLI 直接创建已发布 Release，
-          # 此处强制发布仅为防御未来变动。注意 Release 的 created_at 是标签所指
-          # 提交的时间，排查问题时不要误读为草稿创建时刻。
+            "$BUNDLE/$EXE" "$BUNDLE/$EXE.sig"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
   android-release:
     # v1.4 起恢复发布，改用 release 签名 APK（密钥经 secrets 提供，见 docs/RELEASE.md 安卓签名节）
-    # needs：Release 正文（= latest.json 的应用内更新说明）由桌面任务用 --notes-file 建立，
-    # 并行时安卓若先跑完会自己创建一个「自动生成说明」正文的 Release，把正文占掉
+    # needs：Release 正文（= latest.json 的应用内更新说明）优先由桌面任务用 --notes-file 建立，
+    # 并行时安卓若先跑完会自己创建一个「自动生成说明」正文的 Release，把正文占掉。
+    # 桌面被跳过时（仅安卓发版）它的 result 是 skipped，所以条件里要放 !cancelled()——
+    # 否则 GitHub 会因为「依赖被跳过」直接跳过本任务。
     name: 安卓发布（签名侧载 APK）
-    needs: desktop-release
+    needs: [detect, desktop-release]
+    if: ${{ !cancelled() && needs.detect.outputs.android == 'true' && needs.desktop-release.result != 'failure' }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -147,23 +176,84 @@ jobs:
       - name: 附到 Release（重命名为 H.I.D.E_<版本>_arm64.apk）
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.detect.outputs.version }}
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
           SRC=$(ls src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk | head -n1)
           APK="H.I.D.E_${VERSION}_arm64.apk"
           cp "$SRC" "$APK"
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/' || { echo "::error::APK 内无 arm64 库，检查 --target 构建"; exit 1; }
-          # gh release upload：只往已存在的 Release 追加资产（Release 由桌面任务建立）
-          gh release upload "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" --clobber "$APK"
+          # 仅安卓发版时没有桌面任务先建 Release，这里补一个同样的 view || create（正文用本版说明）
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --title "H.I.D.E $TAG" \
+                 --notes-file "docs/RELEASE-NOTES-v${VERSION}.md"
+          # gh release upload：只往已存在的 Release 追加资产
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "$APK"
 
-  # 国内镜像：整条更新链原本只有 GitHub 一个源，而国内不挂代理到不了 github.com，
-  # 桌面端的表现为自动检查静默失败、用户永远停在旧版。这里把安装包与 APK 同步到
-  # Gitee Release，并维护一个固定 tag 的 latest.json 作为 updater 的第二端点。
-  # Gitee 的几处反直觉行为（target_commitish 与 body 必填、token 只能放 query、
-  # 同名附件不覆盖而是各挂一份且直链固定返回第一份）记在 scripts/mirror-gitee.mjs 头部。
+  update-channels:
+    # 两份更新清单都在这个任务里出，桌面/安卓任务只管产物：清单内容只取决于「哪端出了包」，
+    # 与构建 runner 无关，放一处才不会两边各写一半逻辑对不上。
+    name: 两端更新清单（latest.json + latest-android.json）
+    needs: [detect, desktop-release, android-release]
+    if: ${{ !cancelled() && needs.detect.result == 'success' && needs.desktop-release.result != 'failure' && needs.android-release.result != 'failure' }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 生成并挂上两份清单
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_VERSION: ${{ needs.detect.outputs.desktop_version }}
+          ANDROID_VERSION: ${{ needs.detect.outputs.android_version }}
+          DESKTOP_NOTES: ${{ needs.detect.outputs.desktop_notes }}
+          ANDROID_NOTES: ${{ needs.detect.outputs.android_notes }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          EXE="H.I.D.E_${DESKTOP_VERSION}_x64-setup.exe"
+          # 签名取「桌面清单所写那一版」的 .sig：本版出了包就在本次 tag 上，没出就在上次那版 tag 上，
+          # 两种情况都只用一条下载命令覆盖。签名对不上 exe 时客户端验签会失败，所以宁可拉对的历史签名
+          gh release download "v${DESKTOP_VERSION}" --repo "$GITHUB_REPOSITORY" --pattern "${EXE}.sig" --clobber
+          node scripts/gen-latest-json.mjs \
+            --version "$DESKTOP_VERSION" \
+            --sig "${EXE}.sig" \
+            --notes "$DESKTOP_NOTES" \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${DESKTOP_VERSION}/${EXE}" \
+            --out latest.json
+          node scripts/gen-android-latest.mjs \
+            --version "$ANDROID_VERSION" \
+            --notes "$ANDROID_NOTES" \
+            --out latest-android.json
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber latest.json latest-android.json
+          # 端点地址是 releases/latest/download/...，只有本次 tag 成为 latest 才算发出去；
+          # 这里回读两份清单，版本、地址、说明任何一项对不上就红在这一步
+          node -e "
+            const fs = require('fs');
+            const dv = process.argv[1], tag = process.argv[2];
+            const j = JSON.parse(fs.readFileSync('latest.json', 'utf8'));
+            const a = JSON.parse(fs.readFileSync('latest-android.json', 'utf8'));
+            if (j.version !== dv) throw new Error('latest.json 版本 ' + j.version + ' ≠ ' + dv);
+            const url = j.platforms['windows-x86_64'] && j.platforms['windows-x86_64'].url;
+            if (!url || url.includes('gitee.com')) throw new Error('GitHub 清单的 windows 地址不对：' + url);
+            if (url.indexOf('/releases/download/' + tag + '/') < 0 && url.indexOf('/releases/download/v' + dv + '/') < 0)
+              throw new Error('清单地址既不指本次 tag 也不指 ' + dv + '：' + url);
+            if (!a.version || !a.notes || !a.notes.trim()) throw new Error('latest-android.json 缺版本或说明');
+            console.log('清单就绪：桌面 ' + j.version + '（' + url + '）、安卓 ' + a.version);
+          " "$DESKTOP_VERSION" "$TAG"
+
   mirror-gitee:
-    name: 国内镜像（Gitee Release）
-    needs: [desktop-release, android-release]
+    # 国内镜像：整条更新链原本只有 GitHub 一个源，而国内不挂代理到不了 github.com，
+    # 桌面端的表现为自动检查静默失败、用户永远停在旧版。
+    needs: [detect, desktop-release, android-release, update-channels]
+    if: ${{ !cancelled() && needs.update-channels.result == 'success' }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -179,31 +269,69 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_REPO: ${{ vars.GITEE_REPO || 'misakimiku2/heid-editor' }}
           GH_TOKEN: ${{ github.token }}
+          DESKTOP: ${{ needs.detect.outputs.desktop }}
+          ANDROID: ${{ needs.detect.outputs.android }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          DESKTOP_VERSION: ${{ needs.detect.outputs.desktop_version }}
         run: |
           set -euo pipefail
           if [ -z "$GITEE_TOKEN" ]; then
-            echo "::error::缺少仓库 secrets：GITEE_TOKEN。生成步骤与端点验证见 docs/update-mirror-plan.md。"
+            echo "::error::缺少仓库 secrets：GITEE_TOKEN。生成与端点验证见 docs/update-mirror-plan.md。"
             exit 1
           fi
-          VERSION=$(node -p "require('./package.json').version")
           TAG="${{ github.ref_name }}"
           NOTES="docs/RELEASE-NOTES-v${VERSION}.md"
-          EXE="H.I.D.E_${VERSION}_x64-setup.exe"
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "H.I.D.E_${VERSION}_*"
+          EXE="H.I.D.E_${DESKTOP_VERSION}_x64-setup.exe"
+          APK="H.I.D.E_${VERSION}_arm64.apk"
 
-          # 镜像版清单：与 GitHub 那份只差下载地址——必须指向 Gitee 自己的直链，
-          # 否则用户拿到清单仍回 GitHub 取安装包，等于只镜像了一张纸
-          node scripts/gen-latest-json.mjs \
-            --version "$VERSION" \
-            --sig "${EXE}.sig" \
-            --notes "$NOTES" \
-            --url "https://gitee.com/${GITEE_REPO}/releases/download/${TAG}/${EXE}" \
-            --out latest-mirror.json
+          # 只拉本版真出了的产物：单端发版时另一端在本次 tag 下没有资产，
+          # 拉旧包冒充新版本是错的（Gitee 上那个版本的 release 本来就有它自己的包）
+          FILES=()
+          if [ "$DESKTOP" = "true" ]; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$EXE"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "${EXE}.sig"
+            FILES+=("$EXE")
+          fi
+          if [ "$ANDROID" = "true" ]; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$APK"
+            FILES+=("$APK")
+          fi
+          # 两份清单从本次 tag 取（update-channels 刚挂上去的），镜像只改写桌面那份的地址
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "latest-android.json"
+
+          # 清单里的版本是「上一次真出过桌面包的那一版」，单端发版时不等于本次 tag——校验要跟它比
+          MANIFEST_VERSION="$DESKTOP_VERSION"
+          if [ "$DESKTOP" = "true" ]; then
+            node scripts/gen-latest-json.mjs \
+              --version "$DESKTOP_VERSION" \
+              --sig "${EXE}.sig" \
+              --notes "$NOTES" \
+              --url "https://gitee.com/${GITEE_REPO}/releases/download/${TAG}/${EXE}" \
+              --out latest-mirror.json
+          else
+            # 本版没出桌面包：GitHub 那份 latest.json 的版本与地址都是上一版的，镜像沿用，
+            # 只把地址换成 Gitee 直链（指向上一版的 Gitee release，那次镜像传过包）
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "latest.json"
+            node -e '
+              const fs = require("fs");
+              const j = JSON.parse(fs.readFileSync("latest.json", "utf8"));
+              const repo = process.argv[1];
+              for (const p of Object.values(j.platforms ?? {})) {
+                p.url = p.url.replace(
+                  /^https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\//,
+                  `https://gitee.com/${repo}/releases/download/`);
+              }
+              fs.writeFileSync("latest-mirror.json", JSON.stringify(j, null, 2));
+              console.log(`镜像清单沿用桌面 ${j.version}，地址改写为 Gitee`);
+            ' "$GITEE_REPO"
+            MANIFEST_VERSION="$DESKTOP_VERSION"
+          fi
 
           node scripts/mirror-gitee.mjs \
             --version "$VERSION" \
             --tag "$TAG" \
             --notes "$NOTES" \
-            --file "$EXE" \
-            --file "H.I.D.E_${VERSION}_arm64.apk" \
-            --manifest latest-mirror.json
+            --manifest latest-mirror.json \
+            --manifest-version "$MANIFEST_VERSION" \
+            --manifest-android latest-android.json \
+            --file "${FILES[@]}"

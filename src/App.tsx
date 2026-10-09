@@ -111,7 +111,7 @@ import { useUpdater } from './hooks/useUpdater';
 import { useUpdateNotifications } from './hooks/useUpdateNotifications';
 import {
   clearIgnoredVersion, consumeStartupReleaseNotes, FALLBACK_APP_VERSION, fetchLatestJson,
-  getIgnoredVersion, isNewerVersion, loadReleaseNotesList,
+  getIgnoredVersion, isNewerVersion, latestJsonUrlsFor, loadReleaseNotesList,
   maybeSeedCurrentVersionNotes, tauriHttpGetText,
   type StoredReleaseNotes,
 } from './lib/update';
@@ -1130,7 +1130,7 @@ export default function App() {
     notesSeedAttemptedRef.current = true;
     void (async () => {
       try {
-        const info = await fetchLatestJson(tauriHttpGetText);
+        const info = await fetchLatestJson(tauriHttpGetText, latestJsonUrlsFor(IS_ANDROID_APP));
         if (maybeSeedCurrentVersionNotes(appVersion, info)) {
           setReleaseNotesList(loadReleaseNotesList());
           const seeded = consumeStartupReleaseNotes(appVersion);
