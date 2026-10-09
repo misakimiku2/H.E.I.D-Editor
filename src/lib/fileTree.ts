@@ -109,6 +109,48 @@ export function isSvgPath(path: string): boolean {
   return p.split('.').pop()?.toLowerCase() === 'svg';
 }
 
+/* ---------- 打不开的文件类型（文件树不列出） ---------- */
+
+/**
+ * 点开只会得到一屏只读乱码的文件：视频、音频、压缩包、可执行/库、字体、办公文档等。
+ * 判据用黑名单而不是白名单——白名单会连带藏掉 LICENSE、Makefile、.log 和无扩展名文件
+ * 这些确实能编辑的东西。图片只列本软件显示不了的格式（IMAGE_EXTS 那几种照常可见）。
+ */
+export const UNSUPPORTED_EXTS: readonly string[] = [
+  /* 视频（`.mts` 不收：代码项目里它是 TypeScript 的 ES 模块源码） */
+  'mp4', 'm4v', 'mkv', 'mov', 'avi', 'wmv', 'flv', 'webm', 'mpg', 'mpeg', '3gp', '3g2',
+  'ogv', 'vob', 'rm', 'rmvb', 'm2ts', 'asf', 'f4v',
+  /* 音频 */
+  'mp3', 'wav', 'flac', 'aac', 'm4a', 'm4b', 'ogg', 'oga', 'opus', 'wma', 'aif', 'aiff', 'amr', 'ape', 'mid', 'midi',
+  /* 本软件显示不了的图片与设计稿 */
+  'heic', 'heif', 'tif', 'tiff', 'avif', 'tga', 'exr', 'icns', 'psd', 'xcf', 'sketch',
+  /* 压缩包、安装包与磁盘镜像 */
+  'zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst', 'lz4', 'iso', 'img', 'dmg', 'cab',
+  'apk', 'ipa', 'deb', 'rpm', 'jar', 'war', 'whl', 'msix', 'appx', 'vsix', 'asar', 'pak',
+  /* 可执行文件与编译产物 */
+  'exe', 'dll', 'so', 'dylib', 'msi', 'sys', 'o', 'a', 'lib', 'class', 'dex', 'pyd', 'wasm', 'elf', 'bin',
+  'dmp', 'pdb',
+  /* 字体 */
+  'ttf', 'otf', 'woff', 'woff2', 'eot',
+  /* 办公文档与电子书 */
+  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'pdf', 'epub', 'mobi', 'azw', 'azw3',
+  /* 数据库、证书、模型等二进制数据 */
+  'db', 'sqlite', 'sqlite3', 'der', 'p12', 'pfx', 'jks', 'keystore', 'glb', 'fbx', 'blend', '3mf',
+];
+
+const unsupportedExtSet = new Set(UNSUPPORTED_EXTS);
+
+/** 扩展名（最后一个点之后，小写）；无扩展名、以及 `.gitignore` 这类整名以点开头的都返回空串 */
+function extOf(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+/** 文件树要不要列出这个条目：目录一律列出（叫 `.mp4` 的文件夹也得能进），打不开的文件不列 */
+export function isTreeVisibleEntry(name: string, isDir: boolean): boolean {
+  return isDir || !unsupportedExtSet.has(extOf(name));
+}
+
 export function makeRoot(rootPath: string): TreeNode {
   /* SAF tree URI 的尾段是 URL 编码的 docId（primary%3ADownload%2Fnotes）：
      解码并去掉存储卷前缀，与 safDirLister.displayName 同规则，否则根行显示乱码 */
@@ -134,8 +176,13 @@ function updateNode(node: TreeNode, dirPath: string, fn: (n: TreeNode) => TreeNo
   return changed ? { ...node, children } : node;
 }
 
+/** 列目录结果落到树里的那一份：滤掉打不开的文件，目录优先排序。
+    三条平台实现（桌面 readDir / 安卓 SAF / 远程 fsrv）都只经这里进树 */
+const sortedVisibleEntries = (entries: DirEntry[]): DirEntry[] =>
+  sortEntries(entries.filter(e => isTreeVisibleEntry(e.name, e.isDir)));
+
 const toChildNodes = (entries: DirEntry[]): TreeNode[] =>
-  sortEntries(entries).map(e => ({
+  sortedVisibleEntries(entries).map(e => ({
     path: e.path,
     name: e.name,
     isDir: e.isDir,
@@ -181,7 +228,7 @@ export function loadedDirPaths(node: TreeNode): string[] {
 export function withRefreshedChildren(node: TreeNode, dirPath: string, entries: DirEntry[]): TreeNode {
   return updateNode(node, dirPath, n => {
     const prevDirs = new Map(n.children?.filter(c => c.isDir).map(c => [c.name, c]) ?? []);
-    const children = sortEntries(entries).map(e => {
+    const children = sortedVisibleEntries(entries).map(e => {
       const fresh: TreeNode = { path: e.path, name: e.name, isDir: e.isDir, expanded: false, children: null, error: null };
       const old = e.isDir ? prevDirs.get(e.name) : undefined;
       if (!old) return fresh;

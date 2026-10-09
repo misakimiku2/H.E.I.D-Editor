@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  clampTreeSidebarWidth, findNode, isImagePath, isSvgPath, isUnderRoot, isValidEntryName, joinPath,
+  clampTreeSidebarWidth, findNode, isImagePath, isSvgPath, isTreeVisibleEntry, isUnderRoot, isValidEntryName, joinPath,
   loadTreeSidebarWidth, loadedDirPaths, makeRoot, parentPathOf, relativePathUnderRoot,
   saveTreeSidebarWidth, sortEntries, toggleDir, uniqueEntryName,
   withChildren, withError, withRefreshedChildren,
@@ -151,6 +151,41 @@ describe('withRefreshedChildren', () => {
     root = withRefreshedChildren(root, '/r', [e('a.txt', false)]);
     expect(root.error).toBeNull();
     expect(root.children).toHaveLength(1);
+  });
+});
+
+describe('打不开的文件不进树', () => {
+  it('isTreeVisibleEntry：按扩展名隐藏，目录/无扩展名/点开头整名都保留', () => {
+    expect(isTreeVisibleEntry('movie.mp4', false)).toBe(false);
+    expect(isTreeVisibleEntry('CLIP.MKV', false)).toBe(false);
+    expect(isTreeVisibleEntry('pack.tar.gz', false)).toBe(false);
+    expect(isTreeVisibleEntry('song.mp3', false)).toBe(false);
+    expect(isTreeVisibleEntry('album.db', false)).toBe(false);
+    /* 无扩展名与「整名以点开开头」的不算扩展名：这些都是能编辑的东西 */
+    expect(isTreeVisibleEntry('LICENSE', false)).toBe(true);
+    expect(isTreeVisibleEntry('.gitignore', false)).toBe(true);
+    expect(isTreeVisibleEntry('Makefile', false)).toBe(true);
+    expect(isTreeVisibleEntry('notes.log', false)).toBe(true);
+    /* 扩展名撞车的收进来时逐个查过：.mts 在代码项目里是 TypeScript 的 ES 模块，不是视频流 */
+    expect(isTreeVisibleEntry('entry.mts', false)).toBe(true);
+    expect(isTreeVisibleEntry('clip.m2ts', false)).toBe(false);
+    /* 叫这个名字的目录仍然要能进去 */
+    expect(isTreeVisibleEntry('movie.mp4', true)).toBe(true);
+  });
+
+  it('withChildren / withRefreshedChildren 都滤掉隐藏项，能打开的一个不少', () => {
+    const all = [
+      e('sub', true), e('movie.mp4', false), e('clip.mkv', false), e('pack.zip', false),
+      e('app.exe', false), e('song.mp3', false), e('doc.pdf', false),
+      e('main.rs', false), e('LICENSE', false), e('photo.png', false),
+    ];
+    const keep = ['LICENSE', 'main.rs', 'photo.png'].sort();
+    for (const build of [withChildren, withRefreshedChildren]) {
+      const root = build(makeRoot('/r'), '/r', all);
+      const names = root.children!.map(c => c.name);
+      expect(names[0]).toBe('sub');
+      expect(names.slice(1).sort()).toEqual(keep);
+    }
   });
 });
 
