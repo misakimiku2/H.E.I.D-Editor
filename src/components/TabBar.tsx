@@ -10,7 +10,7 @@
  * 脱离语义=任意非标签条位置松手皆可。跨窗合并的落点为实心槽位剪影。
  * 纯逻辑见 lib/tabDragCore;事件与载荷协议见 lib/tabTransfer。
  */
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { FileText, Plus, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
@@ -25,6 +25,8 @@ const HEID_TAB_MIME = 'application/x-heid-tab';
 const FOREIGN_GAP_W = 96;
 /** 标签条 flex 间距(gap-0.5) */
 const STRIP_GAP = 2;
+/** 激活标签滚进视野时保留的边距(px):避免标题贴着视口边缘被裁 */
+const EDGE_PAD = 8;
 /** 1px 透明图:隐藏系统拖拽快照,重排视觉由被拖标签自身滑动呈现 */
 const TRANSPARENT_DRAG_GIF = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 let transparentDragImg: HTMLImageElement | null = null;
@@ -194,6 +196,24 @@ export function TabBar({
     const t = window.setTimeout(() => setForeign(null), 600);
     return () => window.clearTimeout(t);
   }, [foreign]);
+
+  /* 激活标签滚进视野:打开文件、点标签、Ctrl+Tab 循环都可能选中栏外(被裁或完全看不见)的标签。
+     只动本条的 scrollLeft,不用 scrollIntoView——后者会连带滚动祖先容器,把标题栏/编辑器顶出原位。
+     布局后同步执行,避免 paint 之间出现「先错位再跳回」的闪动 */
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    if (!strip || nativeDragRef.current) return;
+    const el = Array.from(strip.querySelectorAll<HTMLElement>('[data-tab-id]'))
+      .find(w => w.dataset.tabId === activeTabId);
+    if (!el) return;
+    const viewW = strip.clientWidth;
+    const max = strip.scrollWidth - viewW;
+    if (max <= 0) return;
+    const left = el.offsetLeft;
+    const right = left + el.offsetWidth;
+    if (left - EDGE_PAD < strip.scrollLeft) strip.scrollLeft = Math.max(0, left - EDGE_PAD);
+    else if (right + EDGE_PAD > strip.scrollLeft + viewW) strip.scrollLeft = Math.min(right + EDGE_PAD - viewW, max);
+  }, [activeTabId]);
 
   /* 文档级放行自家 MIME 拖拽:任何位置松手都有效(=脱离),光标不再显示🚫 */
   useEffect(() => {
