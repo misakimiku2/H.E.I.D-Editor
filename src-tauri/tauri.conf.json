@@ -53,18 +53,200 @@
     },
     "fileAssociations": [
       {
-        "ext": [
-          "txt", "log", "md", "markdown",
-          "json", "yaml", "yml", "toml", "ini", "xml", "svg",
-          "ts", "tsx", "js", "jsx", "py", "rs", "go", "java",
-          "c", "cpp", "cc", "cxx", "h", "hpp", "cs", "rb", "php",
-          "html", "htm", "css", "scss", "less",
-          "sh", "bash", "sql", "swift", "kt", "kts", "scala", "vue", "svelte"
-        ],
-        "name": "H.I.D.E Document",
-        "description": "文本与代码文档（H.I.D.E 编辑器）",
+        "ext": ["txt"],
+        "name": "com.nexus.editor.txt",
+        "description": "H.I.D.E 文本文档",
+        "role": "Editor"
+      },
+      {
+        "ext": ["log"],
+        "name": "com.nexus.editor.log",
+        "description": "H.I.D.E 日志文件",
+        "role": "Editor"
+      },
+      {
+        "ext": ["md", "markdown"],
+        "name": "com.nexus.editor.md",
+        "description": "H.I.D.E Markdown 文档",
+        "role": "Editor"
+      },
+      {
+        "ext": ["json"],
+        "name": "com.nexus.editor.json",
+        "description": "H.I.D.E JSON 文档",
+        "role": "Editor"
+      },
+      {
+        "ext": ["yaml", "yml"],
+        "name": "com.nexus.editor.yaml",
+        "description": "H.I.D.E YAML 文档",
+        "role": "Editor"
+      },
+      {
+        "ext": ["toml"],
+        "name": "com.nexus.editor.toml",
+        "description": "H.I.D.E TOML 配置",
+        "role": "Editor"
+      },
+      {
+        "ext": ["ini"],
+        "name": "com.nexus.editor.ini",
+        "description": "H.I.D.E INI 配置",
+        "role": "Editor"
+      },
+      {
+        "ext": ["xml"],
+        "name": "com.nexus.editor.xml",
+        "description": "H.I.D.E XML 文档",
+        "role": "Editor"
+      },
+      {
+        "ext": ["svg"],
+        "name": "com.nexus.editor.svg",
+        "description": "H.I.D.E SVG 矢量图",
+        "role": "Editor"
+      },
+      {
+        "ext": ["ts", "tsx"],
+        "name": "com.nexus.editor.ts",
+        "description": "H.I.D.E TypeScript 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["js", "jsx"],
+        "name": "com.nexus.editor.js",
+        "description": "H.I.D.E JavaScript 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["py"],
+        "name": "com.nexus.editor.py",
+        "description": "H.I.D.E Python 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["rs"],
+        "name": "com.nexus.editor.rs",
+        "description": "H.I.D.E Rust 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["go"],
+        "name": "com.nexus.editor.go",
+        "description": "H.I.D.E Go 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["java"],
+        "name": "com.nexus.editor.java",
+        "description": "H.I.D.E Java 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["c", "h"],
+        "name": "com.nexus.editor.c",
+        "description": "H.I.D.E C 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["cpp", "cc", "cxx", "hpp"],
+        "name": "com.nexus.editor.cpp",
+        "description": "H.I.D.E C++ 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["cs"],
+        "name": "com.nexus.editor.cs",
+        "description": "H.I.D.E C# 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["rb"],
+        "name": "com.nexus.editor.rb",
+        "description": "H.I.D.E Ruby 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["php"],
+        "name": "com.nexus.editor.php",
+        "description": "H.I.D.E PHP 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["html", "htm"],
+        "name": "com.nexus.editor.html",
+        "description": "H.I.D.E HTML 文档",
+        "role": "Editor"
+      },
+      {
+        "ext": ["css"],
+        "name": "com.nexus.editor.css",
+        "description": "H.I.D.E CSS 样式",
+        "role": "Editor"
+      },
+      {
+        "ext": ["scss"],
+        "name": "com.nexus.editor.scss",
+        "description": "H.I.D.E SCSS 样式",
+        "role": "Editor"
+      },
+      {
+        "ext": ["less"],
+        "name": "com.nexus.editor.less",
+        "description": "H.I.D.E LESS 样式",
+        "role": "Editor"
+      },
+      {
+        "ext": ["sh", "bash"],
+        "name": "com.nexus.editor.sh",
+        "description": "H.I.D.E Shell 脚本",
+        "role": "Editor"
+      },
+      {
+        "ext": ["sql"],
+        "name": "com.nexus.editor.sql",
+        "description": "H.I.D.E SQL 脚本",
+        "role": "Editor"
+      },
+      {
+        "ext": ["swift"],
+        "name": "com.nexus.editor.swift",
+        "description": "H.I.D.E Swift 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["kt", "kts"],
+        "name": "com.nexus.editor.kt",
+        "description": "H.I.D.E Kotlin 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["scala"],
+        "name": "com.nexus.editor.scala",
+        "description": "H.I.D.E Scala 源码",
+        "role": "Editor"
+      },
+      {
+        "ext": ["vue"],
+        "name": "com.nexus.editor.vue",
+        "description": "H.I.D.E Vue 组件",
+        "role": "Editor"
+      },
+      {
+        "ext": ["svelte"],
+        "name": "com.nexus.editor.svelte",
+        "description": "H.I.D.E Svelte 组件",
+        "role": "Editor"
+      },
+      {
+        "ext": ["csv"],
+        "name": "com.nexus.editor.csv",
+        "description": "H.I.D.E CSV 表格",
         "role": "Editor"
       }
+    ],
+    "resources": [
+      "icons/filetypes/*.ico"
     ],
     "icon": [
       "icons/32x32.png",
