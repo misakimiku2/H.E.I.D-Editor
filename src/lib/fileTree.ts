@@ -136,6 +136,9 @@ export const UNSUPPORTED_EXTS: readonly string[] = [
   'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'pdf', 'epub', 'mobi', 'azw', 'azw3',
   /* 数据库、证书、模型等二进制数据 */
   'db', 'sqlite', 'sqlite3', 'der', 'p12', 'pfx', 'jks', 'keystore', 'glb', 'fbx', 'blend', '3mf',
+  /* 本软件保存中途的临时文件（Rust 侧 `fsops::TMP_SUFFIX`）：原子写 rename 前只活几毫秒，
+     慢盘上被文件树重载抓到就是一行「点开已经不存在」的死条目 */
+  'heidtmp',
 ];
 
 const unsupportedExtSet = new Set(UNSUPPORTED_EXTS);

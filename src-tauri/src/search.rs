@@ -466,6 +466,11 @@ fn enumerate_files(root: &Path, skipped_dirs: &mut usize) -> Vec<PathBuf> {
                     subdirs.push(path);
                 }
             } else if ft.is_file() {
+                /* 保存中途的临时文件（fsops::write_atomic）：只活几毫秒，
+                   撞上一次全盘搜索就是一条点开已经不存在的结果 */
+                if crate::fsops::is_tmp_save_name(&entry.file_name()) {
+                    continue;
+                }
                 files.push(path);
             }
         }
@@ -781,6 +786,20 @@ mod tests {
         assert_eq!(result.matches[0].line, 1);
         assert_eq!(result.matches[1].line, 2);
         assert!(result.matches[2].path.ends_with("b.md"));
+    }
+
+    #[test]
+    fn walk_dir_skips_tmp_save_files() {
+        let dir = temp_dir("tmpskip");
+        fs::write(dir.join("a.txt"), "hello world").unwrap();
+        /* 原子写中途的临时文件（fsops::write_atomic）：内容是真的一份，但只活几毫秒，
+           报进结果就是一条点开已经不存在的死条目 */
+        fs::write(dir.join("b.txt.1234.5.heidtmp"), "hello from tmp").unwrap();
+        let result = walk_dir(&dir, &params("hello"), 100, 100, SEARCH_FILE_SIZE_CAP);
+        assert_eq!(result.files_scanned, 1);
+        assert_eq!(result.files_matched, 1);
+        assert_eq!(result.match_total, 1);
+        assert!(result.matches[0].path.ends_with("a.txt"));
     }
 
     #[test]

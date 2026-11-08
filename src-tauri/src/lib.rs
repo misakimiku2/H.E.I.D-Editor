@@ -103,11 +103,11 @@ fn read_text_file(path: String, force: Option<String>) -> Result<encoding::Decod
     })
 }
 
-/// 文本文件写入：按指定编码编码文本（UTF-8 / UTF-16 可带 BOM）
+/// 文本文件写入：按指定编码编码文本（UTF-8 / UTF-16 可带 BOM），原子写落盘（见 fsops::write_atomic）
 #[tauri::command]
 fn write_text_file(path: String, content: String, encoding: String, bom: Option<bool>) -> Result<(), String> {
     let bytes = encoding::encode_text(&content, &encoding, bom.unwrap_or(false))?;
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+    fsops::write_atomic(std::path::Path::new(&path), &bytes).map_err(|e| e.to_string())
 }
 
 /// 任务栏/窗口图标跟随系统深浅色主题（仅桌面：移动端无 set_icon / ThemeChanged API）

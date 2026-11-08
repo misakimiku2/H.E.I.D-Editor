@@ -431,7 +431,7 @@ fn write_bytes(path: &Path, p: &PathParams) -> Result<Vec<u8>, (String, String)>
     if (bytes.len() as u64) > MAX_REMOTE_FILE_BYTES {
         return Err(err("toobig", "内容超过远程写入上限"));
     }
-    std::fs::write(path, &bytes).map_err(|e| err("io", format!("写入失败：{e}")))?;
+    crate::fsops::write_atomic(path, &bytes).map_err(|e| err("io", format!("写入失败：{e}")))?;
     Ok(bytes)
 }
 

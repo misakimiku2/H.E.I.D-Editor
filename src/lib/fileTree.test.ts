@@ -161,6 +161,8 @@ describe('打不开的文件不进树', () => {
     expect(isTreeVisibleEntry('pack.tar.gz', false)).toBe(false);
     expect(isTreeVisibleEntry('song.mp3', false)).toBe(false);
     expect(isTreeVisibleEntry('album.db', false)).toBe(false);
+    /* 保存中途的临时文件（Rust 侧原子写）：rename 前的一瞬被抓到也不该占一行 */
+    expect(isTreeVisibleEntry('notes.md.4021.7.heidtmp', false)).toBe(false);
     /* 无扩展名与「整名以点开开头」的不算扩展名：这些都是能编辑的东西 */
     expect(isTreeVisibleEntry('LICENSE', false)).toBe(true);
     expect(isTreeVisibleEntry('.gitignore', false)).toBe(true);
