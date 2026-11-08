@@ -1,9 +1,10 @@
 /**
  * 未保存内容草稿（纯函数 + localStorage 持久化）：
- * 周期性把脏标签内容写入草稿，异常退出后随会话恢复；
+ * 打字期间按节流把脏标签内容写入草稿，异常退出后随会话恢复；
  * 保存成功或用户明确放弃后由调用方删除对应条目。
  * 键：file:<路径> / untitled:<标题>（见 draftKeyForTab）。
- * 单条超过 MAX_DRAFT_CHARS 跳过写入（localStorage 配额有限，大文件放弃草稿保护）。
+ * 写入只有 `syncDrafts` 一个入口（整批读一遍、最多写一遍）；
+ * 单条超过 MAX_DRAFT_CHARS 或存储写不进去时不写，随结果回报，由调用方说出来。
  */
 
 export interface DraftEntry {
@@ -57,30 +58,6 @@ export function loadDrafts(storage: Storage | null = defaultStorage()): DraftMap
   }
 }
 
-export function getDraft(key: string, storage: Storage | null = defaultStorage()): string | null {
-  return loadDrafts(storage)[key]?.content ?? null;
-}
-
-/** 写入草稿（内容超限或存储失败时静默跳过）；返回是否实际写入 */
-export function saveDraft(
-  key: string,
-  content: string,
-  storage: Storage | null = defaultStorage(),
-  maxChars: number = MAX_DRAFT_CHARS,
-): boolean {
-  if (!storage || content.length > maxChars) return false;
-  try {
-    const drafts = loadDrafts(storage);
-    const existing = drafts[key];
-    if (existing && existing.content === content) return false;
-    drafts[key] = { content, at: Date.now() };
-    storage.setItem(STORAGE_KEY, JSON.stringify(drafts));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function deleteDraft(key: string, storage: Storage | null = defaultStorage()): void {
   if (!storage) return;
   try {
@@ -98,15 +75,30 @@ export function deleteDraft(key: string, storage: Storage | null = defaultStorag
  * null = 这个键应当不再有草稿。与已存内容一致或本就不存在的条目不动，
  * 全一致时一次都不写——多标签每 3 秒对齐一次，逐个 saveDraft 会把整份 map
  * 反复 parse/stringify，大文档下就是打字时的顿挫。
- * 超限条目与 saveDraft 同一纪律：跳过（旧草稿原样留着），不冒配额风险。
- * 返回实际变更条数（配额写失败按 0 计，与 saveDraft 一样静默）。
+ * 两种「这一轮没有保护」的情况随结果回报（超限、存储写不进去），由调用方说出来：
+ * 它们过去都是静默的，用户看到的仍是一个正常的脏点，直到崩溃那天才发现什么都没有。
  */
+export interface DraftSyncResult {
+  /** 实际写入存储的变更条数；0 = 一次都没写（可能本来就不需要写） */
+  changed: number;
+  /** 超过 MAX_DRAFT_CHARS、这一份没有草稿保护的键 */
+  overCap: string[];
+  /** 存储不可用或写失败（配额 / 隐私模式）：这一轮的脏内容一份都没落下 */
+  failed: boolean;
+}
+
 export function syncDrafts(
   entries: { key: string; content: string | null }[],
   storage: Storage | null = defaultStorage(),
   maxChars: number = MAX_DRAFT_CHARS,
-): number {
-  if (!storage) return 0;
+): DraftSyncResult {
+  const overCap = entries
+    .filter(e => e.content !== null && e.content.length > maxChars)
+    .map(e => e.key);
+  const wantsWrite = entries.some(e => e.content !== null);
+  if (!storage) {
+    return { changed: 0, overCap, failed: wantsWrite };
+  }
   const drafts = loadDrafts(storage);
   const now = Date.now();
   let changed = 0;
@@ -122,11 +114,11 @@ export function syncDrafts(
     drafts[key] = { content, at: now };
     changed++;
   }
-  if (changed === 0) return 0;
+  if (changed === 0) return { changed: 0, overCap, failed: false };
   try {
     storage.setItem(STORAGE_KEY, JSON.stringify(drafts));
   } catch {
-    return 0;
+    return { changed: 0, overCap, failed: true };
   }
-  return changed;
+  return { changed, overCap, failed: false };
 }

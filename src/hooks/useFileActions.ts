@@ -26,7 +26,8 @@ import { displayNameFromPath, IS_ANDROID_APP } from '../lib/platform';
 import { applyLineEnding, type LineEnding } from '../lib/lineEndings';
 import { encodingLabel } from '../lib/encoding';
 import { addRecentFile, listRecentFiles, type RecentFile } from '../lib/recentFiles';
-import { deleteDraft, draftKeyForTab, syncDrafts } from '../lib/drafts';
+import { deleteDraft, draftKeyForTab, syncDrafts, MAX_DRAFT_CHARS, type DraftSyncResult } from '../lib/drafts';
+import { dismissNotification, showNotification } from '../lib/notifications';
 import type { OfflineInput } from '../lib/offlineQueue';
 import { appAlert } from '../lib/appAlert';
 import type { MessageKey } from '../lib/i18n';
@@ -40,6 +41,10 @@ let jumpSeq = 0;
 
 /** 草稿对齐的最小间隔（节流窗口）：打字期间最多 3 秒落一次盘，崩溃最坏就丢这么多 */
 const DRAFT_FLUSH_MS = 3000;
+
+/** 两条「这一份其实没有草稿保护」的通知（同 id 原地替换，一个窗口各说一次） */
+const DRAFT_CAP_NOTICE_ID = 'heid-draft-cap';
+const DRAFT_STORAGE_NOTICE_ID = 'heid-draft-storage';
 
 export interface FileActionsOptions {
   editor: EditorState;
@@ -533,14 +538,74 @@ export function useFileActions({
   /** 上一次真正落盘的时刻；0 = 从没落过，于是首笔编辑立刻写 */
   const draftLastAtRef = useRef(0);
 
+  /* ---- 没有草稿保护时要说出来 ----
+     超限与「本地存储写不进去」过去都是静默的：界面上仍是一个正常的脏点，
+     用户直到崩溃那天才发现这一份从来没有过副本。同一段持续期间只说一次
+     （否则每 3 秒对齐一次就刷屏），条件消失时顺手把卡片收掉，不留一条已经不对的提示。 */
+  const draftGapSaidRef = useRef<{ cap: boolean; storage: boolean }>({ cap: false, storage: false });
+
+  const announceDraftGaps = useCallback((result: DraftSyncResult, tabs: FileTab[]) => {
+    const byKey = new Map(tabs.map(tab => [draftKeyForTab(tab), tab]));
+    const capped = result.overCap.map(key => byKey.get(key)).filter((tab): tab is FileTab => !!tab);
+    if (capped.length > 0) {
+      if (!draftGapSaidRef.current.cap) {
+        draftGapSaidRef.current.cap = true;
+        const worst = capped.reduce((a, b) => (b.content.length > a.content.length ? b : a));
+        showNotification({
+          id: DRAFT_CAP_NOTICE_ID,
+          kind: 'error',
+          title: t('draft.capTitle'),
+          message: t('draft.capMessage', {
+            name: worst.title,
+            size: worst.content.length.toLocaleString(),
+            max: MAX_DRAFT_CHARS.toLocaleString(),
+          }),
+          actions: [{
+            id: 'save',
+            label: t('draft.capSaveNow'),
+            emphasis: 'primary',
+            /* 按 id 取当下那一份再存：卡片能浮 20 秒，直接用弹卡片时抓到的 tab，
+               期间用户又敲了些字的话，点下去存的是旧快照 */
+            onSelect: () => {
+              const current = editor.tabsRef.current.find(tb => tb.id === worst.id);
+              if (current) void persistTab(current, false);
+            },
+          }],
+          timeoutMs: 20_000,
+        });
+      }
+    } else if (draftGapSaidRef.current.cap) {
+      dismissNotification(DRAFT_CAP_NOTICE_ID);
+      draftGapSaidRef.current.cap = false;
+    }
+
+    if (result.failed) {
+      if (!draftGapSaidRef.current.storage) {
+        draftGapSaidRef.current.storage = true;
+        showNotification({
+          id: DRAFT_STORAGE_NOTICE_ID,
+          kind: 'error',
+          title: t('draft.storageTitle'),
+          message: t('draft.storageMessage'),
+          timeoutMs: 20_000,
+        });
+      }
+    } else if (draftGapSaidRef.current.storage) {
+      dismissNotification(DRAFT_STORAGE_NOTICE_ID);
+      draftGapSaidRef.current.storage = false;
+    }
+  }, [t, persistTab, editor.tabsRef]);
+
   const flushDrafts = useCallback(() => {
     draftTimerRef.current = null;
     draftLastAtRef.current = Date.now();
-    syncDrafts(editor.tabsRef.current.map(tab => ({
+    const tabs = editor.tabsRef.current;
+    const result = syncDrafts(tabs.map(tab => ({
       key: draftKeyForTab(tab),
       content: tab.isDirty && !tab.readOnly ? tab.content : null,
     })));
-  }, [editor.tabsRef]);
+    announceDraftGaps(result, tabs);
+  }, [editor.tabsRef, announceDraftGaps]);
 
   useEffect(() => {
     if (draftTimerRef.current) return; /* 已排上：等尾沿那一次读到的一定是最新 tabs */
