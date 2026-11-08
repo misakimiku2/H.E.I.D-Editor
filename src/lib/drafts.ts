@@ -92,3 +92,41 @@ export function deleteDraft(key: string, storage: Storage | null = defaultStorag
     /* 忽略 */
   }
 }
+
+/**
+ * 批量对齐草稿（读一遍、最多写一遍）：`content` 是字符串 = 这份草稿应当存在，
+ * null = 这个键应当不再有草稿。与已存内容一致或本就不存在的条目不动，
+ * 全一致时一次都不写——多标签每 3 秒对齐一次，逐个 saveDraft 会把整份 map
+ * 反复 parse/stringify，大文档下就是打字时的顿挫。
+ * 超限条目与 saveDraft 同一纪律：跳过（旧草稿原样留着），不冒配额风险。
+ * 返回实际变更条数（配额写失败按 0 计，与 saveDraft 一样静默）。
+ */
+export function syncDrafts(
+  entries: { key: string; content: string | null }[],
+  storage: Storage | null = defaultStorage(),
+  maxChars: number = MAX_DRAFT_CHARS,
+): number {
+  if (!storage) return 0;
+  const drafts = loadDrafts(storage);
+  const now = Date.now();
+  let changed = 0;
+  for (const { key, content } of entries) {
+    if (content === null) {
+      if (key in drafts) {
+        delete drafts[key];
+        changed++;
+      }
+      continue;
+    }
+    if (content.length > maxChars || drafts[key]?.content === content) continue;
+    drafts[key] = { content, at: now };
+    changed++;
+  }
+  if (changed === 0) return 0;
+  try {
+    storage.setItem(STORAGE_KEY, JSON.stringify(drafts));
+  } catch {
+    return 0;
+  }
+  return changed;
+}

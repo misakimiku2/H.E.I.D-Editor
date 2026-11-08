@@ -26,7 +26,7 @@ import { displayNameFromPath, IS_ANDROID_APP } from '../lib/platform';
 import { applyLineEnding, type LineEnding } from '../lib/lineEndings';
 import { encodingLabel } from '../lib/encoding';
 import { addRecentFile, listRecentFiles, type RecentFile } from '../lib/recentFiles';
-import { deleteDraft, draftKeyForTab, saveDraft, getDraft } from '../lib/drafts';
+import { deleteDraft, draftKeyForTab, syncDrafts } from '../lib/drafts';
 import type { OfflineInput } from '../lib/offlineQueue';
 import { appAlert } from '../lib/appAlert';
 import type { MessageKey } from '../lib/i18n';
@@ -37,6 +37,9 @@ type Translate = (key: MessageKey, vars?: Record<string, string | number>) => st
 
 /** 跳转请求序号：区分同一标签的连续跳转（同位置二连跳也能触发 effect） */
 let jumpSeq = 0;
+
+/** 草稿对齐的最小间隔（节流窗口）：打字期间最多 3 秒落一次盘，崩溃最坏就丢这么多 */
+const DRAFT_FLUSH_MS = 3000;
 
 export interface FileActionsOptions {
   editor: EditorState;
@@ -520,21 +523,36 @@ export function useFileActions({
     return () => clearInterval(id);
   }, [autosaveEnabled, autosaveIntervalSec, pendingDiscardRef, persistTab, exitingRef, tabsRef]);
 
-  /* ---- 草稿捕获（崩溃保护，始终开启）：脏标签内容防抖 3s 写入本地草稿；
-     干净标签的既有草稿即时清除。保存成功后 isDirty 变 false，同机制自动清草稿 ---- */
+  /* ---- 草稿捕获（崩溃保护，始终开启）----
+     节流而不是尾沿防抖：防抖下连续打字期间一次都不落盘，崩溃就丢掉整段本次编辑。
+     距上次落盘满 DRAFT_FLUSH_MS 当场写（首笔编辑立刻有副本），窗口内的后续改动
+     只排一次尾随定时器，到点写 tabsRef 里最新那份 —— 最坏只丢 3 秒。
+     一次对齐只读只写一遍存储（syncDrafts），多标签大文档下不会每 3 秒卡一下主线程。
+     干净标签的既有草稿同批清除；保存成功后 isDirty 变 false，同机制自动清草稿。 */
+  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 上一次真正落盘的时刻；0 = 从没落过，于是首笔编辑立刻写 */
+  const draftLastAtRef = useRef(0);
+
+  const flushDrafts = useCallback(() => {
+    draftTimerRef.current = null;
+    draftLastAtRef.current = Date.now();
+    syncDrafts(editor.tabsRef.current.map(tab => ({
+      key: draftKeyForTab(tab),
+      content: tab.isDirty && !tab.readOnly ? tab.content : null,
+    })));
+  }, [editor.tabsRef]);
+
   useEffect(() => {
-    const timer = setTimeout(() => {
-      for (const tab of editor.tabs) {
-        const key = draftKeyForTab(tab);
-        if (tab.isDirty && !tab.readOnly) {
-          saveDraft(key, tab.content);
-        } else if (getDraft(key) !== null) {
-          deleteDraft(key);
-        }
-      }
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, [editor.tabs]);
+    if (draftTimerRef.current) return; /* 已排上：等尾沿那一次读到的一定是最新 tabs */
+    const wait = DRAFT_FLUSH_MS - (Date.now() - draftLastAtRef.current);
+    if (wait <= 0) flushDrafts();
+    else draftTimerRef.current = setTimeout(flushDrafts, wait);
+  }, [editor.tabs, flushDrafts]);
+
+  useEffect(() => () => {
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = null;
+  }, []);
 
   return {
     saving, savingRef,

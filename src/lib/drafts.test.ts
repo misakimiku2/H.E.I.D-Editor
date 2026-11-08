@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { deleteDraft, draftKeyForTab, getDraft, loadDrafts, saveDraft, MAX_DRAFT_CHARS } from './drafts';
+import { deleteDraft, draftKeyForTab, getDraft, loadDrafts, saveDraft, syncDrafts, MAX_DRAFT_CHARS } from './drafts';
 
 function memoryStorage() {
   const map = new Map<string, string>();
+  const state = { writes: 0 };
   return {
     get length() { return map.size; },
+    /** setItem 次数：批量对齐的「只写一遍」就靠它钉住 */
+    get writes() { return state.writes; },
     clear: () => map.clear(),
     getItem: (k: string) => (map.has(k) ? map.get(k)! : null),
     key: (i: number) => Array.from(map.keys())[i] ?? null,
     removeItem: (k: string) => { map.delete(k); },
-    setItem: (k: string, v: string) => { map.set(k, String(v)); },
+    setItem: (k: string, v: string) => { state.writes++; map.set(k, String(v)); },
   };
 }
 
@@ -63,5 +66,44 @@ describe('drafts 存取', () => {
       worse: 'str',
     }));
     expect(loadDrafts(s)).toEqual({ ok: { content: 'hello', at: 1 } });
+  });
+});
+
+describe('syncDrafts 批量对齐', () => {
+  it('多个键只写一遍存储', () => {
+    const s = memoryStorage();
+    const n = syncDrafts([
+      { key: 'file:a.md', content: 'A' },
+      { key: 'file:b.md', content: 'B' },
+      { key: 'untitled:c.txt', content: 'C' },
+    ], s);
+    expect(n).toBe(3);
+    expect(s.writes).toBe(1);
+    expect(getDraft('file:b.md', s)).toBe('B');
+  });
+
+  it('内容一致不动、null 清除既有、全一致时一次都不写', () => {
+    const s = memoryStorage();
+    syncDrafts([{ key: 'k1', content: 'v1' }, { key: 'k2', content: 'v2' }], s);
+    const base = s.writes;
+    expect(syncDrafts([{ key: 'k1', content: 'v1' }, { key: 'k2', content: null }], s)).toBe(1);
+    expect(s.writes).toBe(base + 1);
+    expect(getDraft('k2', s)).toBeNull();
+    /* 再对一次：k1 已一致、k2 本就没有 → 零写 */
+    expect(syncDrafts([{ key: 'k1', content: 'v1' }, { key: 'k2', content: null }], s)).toBe(0);
+    expect(s.writes).toBe(base + 1);
+  });
+
+  it('超限条目跳过并留着旧草稿（与 saveDraft 同一纪律）', () => {
+    const s = memoryStorage();
+    syncDrafts([{ key: 'big', content: 'old' }], s);
+    const tooBig = 'x'.repeat(MAX_DRAFT_CHARS + 1);
+    expect(syncDrafts([{ key: 'big', content: tooBig }], s)).toBe(0);
+    expect(getDraft('big', s)).toBe('old');
+  });
+
+  it('存储不可用时安全空操作', () => {
+    expect(syncDrafts([{ key: 'k', content: 'v' }], null)).toBe(0);
+    expect(syncDrafts([{ key: 'k', content: null }], null)).toBe(0);
   });
 });
