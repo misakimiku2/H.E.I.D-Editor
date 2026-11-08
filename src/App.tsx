@@ -353,6 +353,7 @@ export default function App() {
     activeTabIdRef: editor.activeTabIdRef,
     setTabs: editor.setTabs,
     setActiveTabId: editor.setActiveTabId,
+    t,
   });
   /* 会话恢复期间不画 welcome.ts 占位编辑器：主区域显示「恢复中」，完成后直接落到上次激活的文档 */
   const restoringSession = !hydrated && hadSession;

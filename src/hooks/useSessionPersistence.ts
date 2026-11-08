@@ -20,7 +20,42 @@ import { restoreSessionTabs } from '../lib/sessionRestore';
 import { isTauri } from '../lib/fileIO';
 import { createDocumentWindow } from '../lib/windows';
 import { IS_ANDROID_APP } from '../lib/platform';
+import { showNotification } from '../lib/notifications';
+import type { MessageKey } from '../lib/i18n';
 import { INITIAL_WELCOME_ID, LINK_LOG_TAB_ID, RELEASE_NOTES_TAB_ID, type FileTab } from '../lib/tabModel';
+
+type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string;
+
+/** 草稿时刻 → 「刚刚 / N 分钟前 / N 小时前 / 具体日期」 */
+function draftAgeText(at: number, now: number, t: Translate): string {
+  const min = Math.floor((now - at) / 60_000);
+  if (!at || min < 1) return t('draft.ageNow');
+  if (min < 60) return t('draft.ageMin', { n: min });
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return t('draft.ageHour', { n: hour });
+  return new Date(at).toLocaleDateString();
+}
+
+/**
+ * 恢复通知的文案（纯函数，便于按数量与时刻断言）。
+ * 时刻要说出来有一个原因：草稿盖在磁盘那份之上时，界面上只有一个小脏点，
+ * 看不出「这是上次没保存的」还是「磁盘后来又被谁改过」。
+ */
+export function draftRestoreNotice(
+  drafted: { title: string; at: number }[],
+  t: Translate,
+  now: number = Date.now(),
+): { title: string; message: string } {
+  const newest = drafted.reduce((max, d) => Math.max(max, d.at), 0);
+  const names = drafted.slice(0, 3).map(d => d.title).join(' / ');
+  return {
+    title: t('draft.restoredTitle', { n: drafted.length }),
+    message: t('draft.restoredHint', {
+      names: drafted.length > 3 ? `${names} …` : names,
+      age: draftAgeText(newest, now, t),
+    }),
+  };
+}
 
 export interface SessionPersistenceOptions {
   /** 本窗口 label（main / win-N）：决定快照键与多窗口拉起职责 */
@@ -33,10 +68,12 @@ export interface SessionPersistenceOptions {
   activeTabIdRef: RefObject<string>;
   setTabs: React.Dispatch<React.SetStateAction<FileTab[]>>;
   setActiveTabId: React.Dispatch<React.SetStateAction<string>>;
+  /** 恢复出草稿内容时那条通知的文案来源 */
+  t: Translate;
 }
 
 export function useSessionPersistence({
-  windowLabel, startupSession, startupReady, tabsRef, activeTabIdRef, setTabs, setActiveTabId,
+  windowLabel, startupSession, startupReady, tabsRef, activeTabIdRef, setTabs, setActiveTabId, t,
 }: SessionPersistenceOptions) {
   const canMultiWindow = isTauri && !IS_ANDROID_APP;
   /* 恢复尝试完成前不写入会话快照，避免启动瞬间把上次会话覆盖为空。
@@ -77,11 +114,17 @@ export function useSessionPersistence({
       setTabs(prev => {
         // 快照完整描述上次会话：移除未被编辑过的初始 welcome 标签（若快照含 welcome 会随之重建）；
         // 恢复期间用户新建/编辑过的标签保留
-        const kept = prev.filter(t => !(t.id === INITIAL_WELCOME_ID && !t.isDirty));
+        const kept = prev.filter(tab => !(tab.id === INITIAL_WELCOME_ID && !tab.isDirty));
         return [...kept, ...result.tabs];
       });
       setActiveTabId(result.activeId);
       markHydrated();
+      /* 从草稿回来的内容只活在草稿里，界面上只剩标签上一个小脏点，看不出是「上次没保存的」
+         还是「磁盘这份后来又被谁改过」——把数量、文件名和这份草稿的时刻说出来 */
+      if (result.drafted.length > 0) {
+        const notice = draftRestoreNotice(result.drafted, t);
+        showNotification({ id: 'heid-draft-restore', kind: 'info', ...notice, timeoutMs: 12_000 });
+      }
     })();
     return () => {
       disposed = true;
