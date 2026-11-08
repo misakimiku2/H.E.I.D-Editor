@@ -3,6 +3,7 @@
  * - 拖拽文件入窗口打开（Tauri drag-drop 事件）
  * - 外部应用交来的文件（桌面 argv / 二次实例转发，安卓「打开方式」/「分享」）
  * - 渲染内容 <a> 导航守卫（http(s) 交系统浏览器，其余拦截）
+ * - 桌面 WebView2 原生右键菜单兜底屏蔽（未接管右键的面板不再漏出浏览器菜单）
  * - 窗口关闭统一拦截（自定义按钮 / Alt+F4 / 任务栏关闭都走未保存确认）
  * - 安卓系统返回键逐层关闭弹层 + 安全区 insets 注入
  * - 浏览器模式的 beforeunload 兜底
@@ -194,6 +195,24 @@ export function usePlatformIntegration({
       document.removeEventListener('click', guard, true);
       document.removeEventListener('auxclick', guard, true);
     };
+  }, []);
+
+  /* ---- 桌面 WebView2 原生右键菜单兜底屏蔽 ----
+     有自有右键菜单的区域（编辑器、文件树、标签栏、预览）各自 preventDefault，
+     但欢迎页、状态栏、侧栏空白这些没接管右键的地方会漏出 WebView2 的页面菜单
+     （刷新 / 另存为 / 打印），在编辑器应用里既突兀又危险。这里在 document 冒泡
+     阶段统一压掉：应用自己的菜单先一步已经弹出来了，不受影响。
+     放行 input / textarea——那里的原生菜单是剪切/复制/粘贴，地址与搜索框靠它粘贴。
+     安卓不在范围内：那里的长按菜单与选区弹窗已由 useLongPress / CodeEditor 接管。 */
+  useEffect(() => {
+    if (!isTauri || IS_ANDROID_APP) return;
+    const onContextMenu = (e: MouseEvent) => {
+      const el = e.target;
+      if (el instanceof Element && el.closest('input, textarea')) return;
+      e.preventDefault();
+    };
+    document.addEventListener('contextmenu', onContextMenu);
+    return () => document.removeEventListener('contextmenu', onContextMenu);
   }, []);
 
   /* ---- 窗口关闭统一拦截（仅 Tauri）----

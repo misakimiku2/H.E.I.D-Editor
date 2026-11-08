@@ -169,7 +169,7 @@ const MarkdownImage = React.memo<{
       {...bindMenu({
         onClick: (e) => { if (!onOpen) return; e.stopPropagation(); e.preventDefault(); onOpen(imgSrc, altName); },
         onLongPress: (pos) => onMenu?.(pos, { resolvedSrc: imgSrc, alt: altName, srcStart, srcEnd }),
-        onContextMenu: (e) => { if (!onMenu) return; e.stopPropagation(); onMenu({ x: e.clientX, y: e.clientY }, { resolvedSrc: imgSrc, alt: altName, srcStart, srcEnd }); },
+        onContextMenu: (e) => { if (!onMenu) return; e.preventDefault(); e.stopPropagation(); onMenu({ x: e.clientX, y: e.clientY }, { resolvedSrc: imgSrc, alt: altName, srcStart, srcEnd }); },
       })}
       style={{ maxWidth: '100%', height: 'auto', borderRadius: '0.5rem', display: 'block', marginLeft: 'auto', marginRight: 'auto', margin: '1.5rem 0', cursor: onOpen ? 'zoom-in' : undefined }}
     />
@@ -1315,7 +1315,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       e.preventDefault();
       return;
     }
-    /* 空白处（无选区）：插入锚点 = 点中块的最外层末尾；未点中块（空隙/空白）→ 按指针 Y 就近取块边界 */
+    /* 空白处（无选区）：插入锚点 = 点中块的最外层末尾；未点中块（空隙/空白）→ 按指针 Y 就近取块边界。
+       这条分支必定弹出应用内的插入菜单，右键事件到此已经用完，不放行 WebView 的页面菜单 */
+    e.preventDefault();
     openBlankMenuAt(e.clientX, e.clientY, e.target as HTMLElement);
   }, [onChange, openFormatMenuForSelection, openBlankMenuAt]);
 
@@ -1702,7 +1704,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         onContextMenu: handleContextMenu,
       })}
     >
-      <div className="mx-auto p-6 text-left max-w-[900px]">
+      <div className="mx-auto p-6 text-left max-w-[1280px]">
         <div className={proseClassName}>
           <MarkdownStyles isDarkMode={isDarkMode} />
           {processedBlocks && langBlocks ? (
