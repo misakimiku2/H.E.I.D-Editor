@@ -559,8 +559,11 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
           <button
             onClick={onClose}
             className={cn(
-              "rounded-lg font-medium bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-300/80 transition-colors shadow-sm",
-              IS_TOUCH_PRIMARY ? "min-h-[48px] px-6 text-sm" : "px-4 py-1.5 text-xs"
+              "rounded-lg font-medium border transition-colors shadow-sm",
+              IS_TOUCH_PRIMARY ? "min-h-[48px] px-6 text-sm" : "px-4 py-1.5 text-xs",
+              dark
+                ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-100 border-zinc-600/80"
+                : "bg-white hover:bg-zinc-100 text-zinc-900 border-zinc-300/80"
             )}
           >
             {t('common.done')}
