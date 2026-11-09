@@ -57,7 +57,7 @@ export function latestJsonUrlsFor(isAndroid: boolean): string[] {
 }
 
 /** 版本号兜底（浏览器模式无 getVersion API；与 package.json / tauri.conf.json 同步维护） */
-export const FALLBACK_APP_VERSION = '1.6.1';
+export const FALLBACK_APP_VERSION = '1.6.2';
 
 export interface LatestReleaseInfo {
   version: string;
