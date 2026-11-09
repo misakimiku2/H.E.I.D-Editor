@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
 import {
   X, RotateCcw, Settings, Palette, Sparkles, Type, LayoutGrid, Save,
-  Check, Moon, Sun, ArrowLeft, Minus, Plus,
+  Check, Moon, Sun, ArrowLeft, Minus, Plus, LayoutTemplate,
 } from 'lucide-react';
 import { PANEL_LABEL_CLS, panelRowCls } from './panelRows';
 import { cn } from '../lib/utils';
 import { IS_TOUCH_PRIMARY } from '../lib/platform';
+import { isTauri } from '../lib/fileIO';
 import {
   DEFAULT_SETTINGS, FONT_OPTIONS,
   type EditorSettings, type LanguagePref, type LineWrapMode,
@@ -22,6 +23,8 @@ interface SettingsDialogProps {
   /** 手机端整页形态：铺满窗口，顶栏返回、底栏操作，不用遮罩关闭；
       平板与桌面仍是居中弹窗（平板屏幕够大，弹窗的信息密度更合适） */
   asPage?: boolean;
+  /** 打开文档模板管理（仅桌面入口渲染）；由 App 接管弹窗开关 */
+  onManageTemplates: () => void;
 }
 
 /**
@@ -169,7 +172,7 @@ function ThemeCard({ theme, selected, isDarkMode, onSelect }: {
   );
 }
 
-export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage }: SettingsDialogProps) {
+export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage, onManageTemplates }: SettingsDialogProps) {
   const t = useT();
 
   useEffect(() => {
@@ -515,6 +518,22 @@ export function SettingsDialog({ isDarkMode, settings, onChange, onClose, asPage
                 {t('settings.draftNote')}
               </p>
             </>
+          ))}
+
+          {isTauri && !IS_TOUCH_PRIMARY && sectionNode(LayoutTemplate, t('template.settingsRow'), (
+            <div className={rowCls}>
+              <span className={labelCls}>{t('template.count', { n: settings.templates.length })}</span>
+              <button
+                onClick={onManageTemplates}
+                className={cn(
+                  "rounded-lg font-medium transition-colors shrink-0",
+                  IS_TOUCH_PRIMARY ? "min-h-[48px] px-4 text-sm" : "px-3 py-1.5 text-xs",
+                  dark ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-200" : "bg-zinc-100 hover:bg-zinc-200 text-zinc-700"
+                )}
+              >
+                {t('template.manage')}
+              </button>
+            </div>
           ))}
 
         </div>

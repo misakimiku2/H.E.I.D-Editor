@@ -4,7 +4,7 @@ import {
   FileText, X, Plus, FolderOpen, Save, SaveAll, RotateCcw,
   Sun, Moon, SunMoon, Menu, Info, Eye, Pencil, Undo2, Redo2, Search,
   GitCompare, Columns2, History, ChevronRight, ChevronLeft, ChevronDown, Trash2, Settings, Keyboard, FileDown, Link2, PanelLeft, FolderX,
-  Table, Code, Braces, Wand2, Printer, RefreshCw, AppWindow, Share2,
+  Table, Code, Braces, Wand2, Printer, RefreshCw, AppWindow, Share2, LayoutTemplate,
 } from 'lucide-react';
 import heidIconLight from './assets/heid-icon-light.svg';
 import heidIconDark from './assets/heid-icon-dark.svg';
@@ -60,6 +60,8 @@ import { RemoteTabsSheet } from './components/RemoteTabsSheet';
 import { DeviceLinkPage } from './components/DeviceLinkPage';
 import type { LinkOfflineInfo } from './components/DeviceLinkSection';
 import { UrlImportModal } from './components/UrlImportModal';
+import { TemplatePickerDialog, type TemplateCreateArgs } from './components/TemplatePickerDialog';
+import { TemplateManagerDialog } from './components/TemplateManagerDialog';
 import { FileTreeSidebar, type TreeSyncMark } from './components/FileTreeSidebar';
 import { getDirLister, isSvgPath, loadTreeRoot, saveTreeRoot } from './lib/fileTree';
 import { resolveCodeTheme } from './lib/editorThemes';
@@ -768,6 +770,9 @@ export default function App() {
   }, [editor.setTabs, editor.setActiveTabId, t]);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [urlImportOpen, setUrlImportOpen] = useState(false);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
+  const [templateManagerFrom, setTemplateManagerFrom] = useState<'picker' | 'settings'>('picker');
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   const [treeOpen, setTreeOpen] = useState(false);
   const [treeRootPath, setTreeRootPath] = useState<string | null>(() => loadTreeRoot());
@@ -1198,6 +1203,19 @@ export default function App() {
     editor.setTabs(prev => [...prev, newTab]);
     editor.setActiveTabId(newTab.id);
   }, [editor.setActiveTabId, editor.setTabs]);
+
+  /* ---- 从模板新建：开一个带模板内容的未保存标签页（与网址导入同源），按保存时才真正落盘 ---- */
+  const handleCreateFromTemplate = useCallback(({ fileName, content }: TemplateCreateArgs) => {
+    const newTab: FileTab = {
+      ...makeUntitledTab(fileName, content),
+      language: 'markdown',
+      isDirty: true,
+      mdView: 'split',
+    };
+    setTemplatePickerOpen(false);
+    editor.setTabs(prev => [...prev, newTab]);
+    editor.setActiveTabId(newTab.id);
+  }, [editor.setTabs, editor.setActiveTabId]);
 
   /* ---- Markdown 导出为单文件 HTML（桌面另存对话框 / 安卓 SAF 新建文档 / 浏览器 Blob 下载） ---- */
   const handleExportHtml = useCallback(async () => {
@@ -2357,6 +2375,18 @@ export default function App() {
                 document.body
               )}
             </div>
+            {!IS_TOUCH_PRIMARY && isTauri && (
+              <button
+                onClick={() => { setMenuOpen(false); setTemplatePickerOpen(true); }}
+                className={cn(
+                  MENU_ITEM_CLS,
+                  isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+                )}
+              >
+                <LayoutTemplate size={14} />
+                {t('menu.newFromTemplate')}
+              </button>
+            )}
             <div className={cn("h-px mx-2 my-1", isDarkMode ? "bg-zinc-700" : "bg-zinc-200")} />
             {!IS_TOUCH_PRIMARY && (
             <button
@@ -2930,6 +2960,7 @@ export default function App() {
             onChange={setSettings}
             onClose={() => setSettingsOpen(false)}
             asPage={isPhone}
+            onManageTemplates={() => { setTemplateManagerFrom('settings'); setSettingsOpen(false); setTemplateManagerOpen(true); }}
           />
         )}
 
@@ -3149,6 +3180,29 @@ export default function App() {
           isDarkMode={isDarkMode}
           onImported={handleUrlImported}
           onClose={() => setUrlImportOpen(false)}
+        />
+      )}
+
+      {templatePickerOpen && (
+        <TemplatePickerDialog
+          isDarkMode={isDarkMode}
+          templates={settings.templates}
+          onCreate={handleCreateFromTemplate}
+          onManage={() => { setTemplateManagerFrom('picker'); setTemplatePickerOpen(false); setTemplateManagerOpen(true); }}
+          onClose={() => setTemplatePickerOpen(false)}
+        />
+      )}
+
+      {templateManagerOpen && (
+        <TemplateManagerDialog
+          isDarkMode={isDarkMode}
+          templates={settings.templates}
+          onChange={next => setSettings({ ...settings, templates: next })}
+          onClose={() => setTemplateManagerOpen(false)}
+          onBack={() => {
+            setTemplateManagerOpen(false);
+            if (templateManagerFrom === 'picker') setTemplatePickerOpen(true); else setSettingsOpen(true);
+          }}
         />
       )}
 

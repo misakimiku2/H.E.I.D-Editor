@@ -4,6 +4,9 @@
  * 损坏或缺失的字段逐项回退默认值，设置损坏不影响编辑功能。
  */
 import { CODE_THEME_IDS } from './editorThemes';
+import {
+  NIKKE_SAMPLE, TEMPLATE_CONTENT_MAX, TEMPLATE_COUNT_MAX, TEMPLATE_NAME_MAX, type DocTemplate,
+} from './docTemplates';
 
 /** 可选等宽字体栈（value 即 CSS font-family，直接内联） */
 export const FONT_OPTIONS: Array<{ id: string; label: string; stack: string }> = [
@@ -42,6 +45,8 @@ export interface EditorSettings {
   /** 代码高亮主题 id（深/浅界面各一份），注册表见 lib/editorThemes */
   codeThemeDark: string;
   codeThemeLight: string;
+  /** 文档模板（从模板新建）；空数组 = 用户删光，不再注入内置示例 */
+  templates: DocTemplate[];
 }
 
 export const DEFAULT_SETTINGS: EditorSettings = {
@@ -60,6 +65,7 @@ export const DEFAULT_SETTINGS: EditorSettings = {
   language: 'system',
   codeThemeDark: 'vs-dark',
   codeThemeLight: 'vs-light',
+  templates: [NIKKE_SAMPLE],
 };
 
 const STORAGE_KEY = 'heid-settings';
@@ -87,6 +93,25 @@ function pickEnum<T extends string>(value: unknown, allowed: readonly T[], fallb
   return allowed.includes(value as T) ? (value as T) : fallback;
 }
 
+/** 模板数组校验：非数组→注入内置示例（老版本升级）；空数组原样保留（删光不复活）；
+    逐项校验（id/name/content 字符串、name trim 非空且 ≤60、content ≤20000），坏项丢弃，上限 50。 */
+function normalizeTemplates(value: unknown): DocTemplate[] {
+  if (!Array.isArray(value)) return [NIKKE_SAMPLE];
+  const out: DocTemplate[] = [];
+  for (const item of value) {
+    if (out.length >= TEMPLATE_COUNT_MAX) break;
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.id !== 'string' || !rec.id) continue;
+    if (typeof rec.name !== 'string' || typeof rec.content !== 'string') continue;
+    const name = rec.name.trim();
+    if (!name || name.length > TEMPLATE_NAME_MAX) continue;
+    if (rec.content.length > TEMPLATE_CONTENT_MAX) continue;
+    out.push({ id: rec.id, name, content: rec.content });
+  }
+  return out;
+}
+
 /** 任意输入 → 合法设置：逐字段校验回退（未知字段忽略） */
 export function normalizeSettings(input: unknown): EditorSettings {
   const rec = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
@@ -106,6 +131,7 @@ export function normalizeSettings(input: unknown): EditorSettings {
     language: pickEnum(rec.language, ['system', 'zh', 'en'] as const, DEFAULT_SETTINGS.language),
     codeThemeDark: pickEnum(rec.codeThemeDark, CODE_THEME_IDS, DEFAULT_SETTINGS.codeThemeDark),
     codeThemeLight: pickEnum(rec.codeThemeLight, CODE_THEME_IDS, DEFAULT_SETTINGS.codeThemeLight),
+    templates: normalizeTemplates(rec.templates),
   };
 }
 
