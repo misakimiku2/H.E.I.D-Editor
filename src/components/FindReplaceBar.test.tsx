@@ -174,3 +174,65 @@ describe('FindReplaceBar 三端形态', () => {
     expect(document.activeElement).not.toBe(document.querySelectorAll('input')[1]);
   });
 });
+
+describe('FindReplaceBar 桌面拖拽', () => {
+  const pev = (type: string, x: number, y: number) => {
+    const ev = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y });
+    Object.defineProperty(ev, 'pointerId', { value: 1 });
+    return ev;
+  };
+
+  it('按住栏面任意非输入区都能拖，且钳制在视口内', () => {
+    render(<FindReplaceBar {...baseProps} />);
+    const panel = document.body.querySelector('[role=search]') as HTMLElement;
+    /* 指针未移动过：落在视口右上（1024 - 0 - 16 = 1008, 12） */
+    expect(panel.style.left).toBe('1008px');
+    expect(panel.style.top).toBe('12px');
+
+    /* 从「区分大小写」按钮上按下，拖起来也算拖动（不是只有把手能拖） */
+    const caseBtn = panel.querySelector('button[aria-label="find.caseSensitive"]') as HTMLElement;
+    act(() => { caseBtn.dispatchEvent(pev('pointerdown', 100, 100)); });
+    act(() => { caseBtn.dispatchEvent(pev('pointermove', 40, 60)); });
+    /* 位移 (-60, -40)：top 到 8px 边距就停住 */
+    expect(panel.style.left).toBe('948px');
+    expect(panel.style.top).toBe('8px');
+    act(() => { caseBtn.dispatchEvent(pev('pointerup', 40, 60)); });
+
+    /* 拖动之后浏览器补的那次 click 被吞掉：拖一下不会误触按钮 */
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    act(() => { caseBtn.dispatchEvent(click); });
+    expect(click.defaultPrevented).toBe(true);
+    expect(caseBtn.className).not.toContain('bg-zinc-300');
+
+    /* 松手后再动鼠标不再跟随 */
+    act(() => { caseBtn.dispatchEvent(pev('pointermove', 300, 300)); });
+    expect(panel.style.left).toBe('948px');
+    expect(panel.style.top).toBe('8px');
+  });
+
+  it('位移不到阈值只是点按：按钮照常响应', () => {
+    render(<FindReplaceBar {...baseProps} />);
+    const panel = document.body.querySelector('[role=search]') as HTMLElement;
+    const caseBtn = panel.querySelector('button[aria-label="find.caseSensitive"]') as HTMLButtonElement;
+    act(() => { caseBtn.dispatchEvent(pev('pointerdown', 100, 100)); });
+    act(() => { caseBtn.dispatchEvent(pev('pointermove', 102, 101)); });
+    act(() => { caseBtn.dispatchEvent(pev('pointerup', 102, 101)); });
+    /* 没被判定为拖动：位置不动，click 不被吞 */
+    expect(panel.style.left).toBe('1008px');
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    act(() => { caseBtn.dispatchEvent(click); });
+    expect(click.defaultPrevented).toBe(false);
+    expect(caseBtn.className).toContain('bg-zinc-300');
+  });
+
+  it('输入框内按下不触发拖动', () => {
+    render(<FindReplaceBar {...baseProps} />);
+    const panel = document.body.querySelector('[role=search]') as HTMLElement;
+    const input = panel.querySelector('input') as HTMLInputElement;
+    act(() => { input.dispatchEvent(pev('pointerdown', 100, 100)); });
+    act(() => { input.dispatchEvent(pev('pointermove', 20, 300)); });
+    act(() => { input.dispatchEvent(pev('pointerup', 20, 300)); });
+    expect(panel.style.left).toBe('1008px');
+    expect(panel.style.top).toBe('12px');
+  });
+});

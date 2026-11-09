@@ -27,3 +27,22 @@ export function clampBarPosition(
   if (top < margin) top = margin;
   return { left, top };
 }
+
+/**
+ * 浮层拖拽后的位置钳制：整体留在视口内（与弹出定位同一圈 8px 边距）。
+ * 与 clampBarPosition 的区别是不再「优先右下方」，单纯把跟手位移收敛回可视区。
+ */
+export function clampBarToViewport(
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): { left: number; top: number } {
+  const margin = 8;
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+  return {
+    left: Math.min(Math.max(margin, left), Math.max(margin, vw - width - margin)),
+    top: Math.min(Math.max(margin, top), Math.max(margin, vh - height - margin)),
+  };
+}

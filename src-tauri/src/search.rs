@@ -1,4 +1,6 @@
 //! 跨文件搜索（桌面）：按需递归扫描用户选定的根目录，逐文件解码后按行匹配。
+//! 同一查询同时匹配**文件名**与**文件内容**：文件名命中的文件单独成组返回
+//! （点击直接打开，不带行列），内容命中照旧逐行返回片段。
 //! 无索引、无常驻后台：一次命令调用完成一次全量扫描（async 命令 + rayon 并行
 //! 扫描，不占主线程）。护栏：黑名单目录（依赖/构建产物/VCS）与隐藏目录跳过、
 //! symlink 跳过、单文件 >32MB 跳过（与编辑层一致）、二进制（头部 8KB 采样，
@@ -37,6 +39,8 @@ pub const SEARCH_FILE_SIZE_CAP: u64 = 32 * 1024 * 1024;
 pub const SEARCH_FILE_COUNT_CAP: usize = 20_000;
 /// 结果收集上限（matchTotal 仍统计全量；前端分页展示）
 pub const SEARCH_RESULT_CAP: usize = 20_000;
+/// 文件名命中收集上限（总数仍完整计数；前端只列这么多条，避免一次「a」把整棵树刷屏）
+pub const SEARCH_NAME_RESULT_CAP: usize = 200;
 /// 二进制判定的头部采样字节数（与 encoding.rs is_binary 的 8KB 一致）
 const BINARY_PROBE_BYTES: u64 = 8192;
 /// 行片段长度上限（字符）
@@ -175,10 +179,24 @@ pub struct FileHit {
     pub offset: u32,
 }
 
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileNameHit {
+    pub path: String,
+    /// 文件名内匹配区间起点（1-based 字符列，与 FileHit 同语义）
+    pub col: u32,
+    /// 匹配字符数
+    pub len: u32,
+}
+
 #[derive(Serialize, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DirSearchResult {
     pub matches: Vec<FileHit>,
+    /// 文件名命中的文件（最多 SEARCH_NAME_RESULT_CAP 条，按枚举顺序）
+    pub name_matches: Vec<FileNameHit>,
+    /// 文件名命中的文件总数（可能 > name_matches.len()）
+    pub name_match_total: usize,
     /// 实际解码并参与匹配的文本文件数
     pub files_scanned: usize,
     pub files_matched: usize,
@@ -519,6 +537,23 @@ pub fn walk_dir_scanning(
     let files = enumerate_files(root, &mut skipped_dirs);
     result.skipped_dirs = skipped_dirs;
 
+    /* 1.5) 文件名匹配：与内容同一查询/选项，只匹配枚举到的文件名（黑名单目录与
+       临时保存文件已在枚举时排除）。收集有上限，总数完整计数。 */
+    let mut name_matches = Vec::new();
+    for path in &files {
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy()) else { continue };
+        let Some((start, end)) = line_hits(name.as_ref(), &matcher).into_iter().next() else { continue };
+        result.name_match_total += 1;
+        if name_matches.len() < SEARCH_NAME_RESULT_CAP {
+            name_matches.push(FileNameHit {
+                path: path.to_string_lossy().into_owned(),
+                col: name[..start].chars().count() as u32 + 1,
+                len: name[start..end].chars().count() as u32,
+            });
+        }
+    }
+    result.name_matches = name_matches;
+
     /* 2) 第一遍并行扫描：只统计命中数，内存与命中总量解耦 */
     if let Some(c) = control {
         c.files_total.store(files.len(), Ordering::Relaxed);
@@ -786,6 +821,52 @@ mod tests {
         assert_eq!(result.matches[0].line, 1);
         assert_eq!(result.matches[1].line, 2);
         assert!(result.matches[2].path.ends_with("b.md"));
+    }
+
+    #[test]
+    fn walk_dir_matches_file_names_as_well_as_content() {
+        let dir = temp_dir("names");
+        fs::write(dir.join("needle-notes.txt"), "no content hit").unwrap();
+        fs::write(dir.join("plain.txt"), "needle in content").unwrap();
+        fs::create_dir(dir.join("node_modules")).unwrap();
+        fs::write(dir.join("node_modules").join("needle.md"), "needle").unwrap();
+        let result = walk_dir(&dir, &params("needle"), 100, 100, SEARCH_FILE_SIZE_CAP);
+        /* 文件名一组：黑名单目录里的不算，列的列/长按文件名内的字符算 */
+        assert_eq!(result.name_match_total, 1);
+        assert_eq!(result.name_matches.len(), 1);
+        let hit = &result.name_matches[0];
+        assert!(hit.path.ends_with("needle-notes.txt"));
+        assert_eq!((hit.col, hit.len), (1, 6));
+        /* 内容一组不受文件名匹配影响 */
+        assert_eq!(result.files_matched, 1);
+        assert_eq!(result.match_total, 1);
+        assert!(result.matches[0].path.ends_with("plain.txt"));
+    }
+
+    #[test]
+    fn walk_dir_name_match_respects_search_options() {
+        let dir = temp_dir("namemodes");
+        fs::write(dir.join("Needle.txt"), "x").unwrap();
+        fs::write(dir.join("notes.md"), "x").unwrap();
+        let cs = SearchParams { case_sensitive: true, ..params("needle") };
+        assert_eq!(walk_dir(&dir, &cs, 100, 100, SEARCH_FILE_SIZE_CAP).name_match_total, 0);
+        let re = SearchParams { regexp: true, ..params("notes\\.md$") };
+        let r = walk_dir(&dir, &re, 100, 100, SEARCH_FILE_SIZE_CAP);
+        assert_eq!(r.name_match_total, 1);
+        assert!(r.name_matches[0].path.ends_with("notes.md"));
+        /* 默认大小写不敏感：Needle.txt 命中 */
+        assert_eq!(walk_dir(&dir, &params("needle"), 100, 100, SEARCH_FILE_SIZE_CAP).name_match_total, 1);
+    }
+
+    #[test]
+    fn walk_dir_name_matches_capped_but_total_counted() {
+        let dir = temp_dir("namecap");
+        for i in 0..(SEARCH_NAME_RESULT_CAP + 3) {
+            fs::write(dir.join(format!("hit-{i}.txt")), "x").unwrap();
+        }
+        let r = walk_dir(&dir, &params("hit"), 100, 100, SEARCH_FILE_SIZE_CAP);
+        assert_eq!(r.name_match_total, SEARCH_NAME_RESULT_CAP + 3);
+        assert_eq!(r.name_matches.len(), SEARCH_NAME_RESULT_CAP);
     }
 
     #[test]

@@ -6,6 +6,7 @@ import {
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY } from '../lib/platform';
 import { useMediaQuery } from '../hooks/useMediaQuery';
+import { useFloatingDrag } from '../hooks/useFloatingDrag';
 import { clampBarPosition } from '../lib/position';
 import { findMatches, type MatchRange, type SearchOptions } from '../lib/searchCore';
 import type { PointerPos } from '../hooks/useLastPointer';
@@ -133,6 +134,7 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
   const getPointerRef = useRef(getPointer);
   getPointerRef.current = getPointer;
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const { dragging, panelDragProps, onClickCapture } = useFloatingDrag(rootRef, pos, setPos);
   useLayoutEffect(() => {
     if (docked) return;
     const el = rootRef.current;
@@ -318,8 +320,11 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
   const panel = (
     <div
       ref={rootRef}
+      {...(!docked ? panelDragProps : {})}
+      onClickCapture={!docked ? onClickCapture : undefined}
       className={cn(
         'border shadow-xl',
+        dragging && 'select-none cursor-grabbing',
         isDarkMode ? 'border-zinc-600 bg-zinc-800/95 backdrop-blur-sm' : 'border-zinc-300 bg-white/95 backdrop-blur-sm',
         docked
           ? cn(

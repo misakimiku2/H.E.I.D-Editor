@@ -21,7 +21,8 @@ import {
 } from '../lib/fileTree';
 import {
   hitDisplay, pageGroups, searchInDir, searchProgress, cancelInDirSearch, HITS_PER_PAGE,
-  type DirSearchOptions, type DirSearchResult, type FileHit, type SearchProgress,
+  fileNameHitDisplay,
+  type DirSearchOptions, type DirSearchResult, type FileHit, type FileNameHit, type SearchProgress,
 } from '../lib/dirSearch';
 import { fsMkdir, fsRename, fsCreateEmptyFile, fsCopy, fsDelete, fsReveal, writeClipboardText } from '../lib/fileOps';
 import { appAlert } from '../lib/appAlert';
@@ -505,7 +506,7 @@ export function FileTreeSidebar({
       if (searchSeqRef.current === seq) { setResult(r.cancelled ? null : r); setPage(0); }
     } catch (e) {
       if (searchSeqRef.current === seq) {
-        setResult({ matches: [], filesScanned: 0, filesMatched: 0, matchTotal: 0, truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: false, error: String(e) });
+        setResult({ matches: [], nameMatches: [], nameMatchTotal: 0, filesScanned: 0, filesMatched: 0, matchTotal: 0, truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: false, error: String(e) });
         setPage(0);
       }
     } finally {
@@ -1021,11 +1022,52 @@ export function FileTreeSidebar({
               style={{
                 backgroundColor: 'var(--heid-search-match-bg, rgba(251, 191, 36, 0.5))',
                 outline: '1px solid var(--heid-search-match-outline, transparent)',
+                /* mark 的浏览器默认色是黑板：深色主题下会和背景糊在一起，跟随行文字色 */
+                color: 'inherit',
               }}
             >
               {d.text.slice(d.from, d.to)}
             </mark>
             {d.text.slice(d.to)}
+          </span>
+        </span>
+      </button>
+    );
+  };
+
+  /* 文件名命中行：左侧淡色目录 + 右侧文件名（高亮窗口在窄栏内可见），点击直接打开文件 */
+  const renderNameHitRow = (hit: FileNameHit) => {
+    const rel = relativePathUnderRoot(hit.path, rootPath);
+    const d = fileNameHitDisplay(hit);
+    const dir = rel.length > d.name.length ? rel.slice(0, rel.length - d.name.length) : '';
+    return (
+      <button
+        key={`name:${hit.path}`}
+        onClick={() => onOpenFile(hit.path)}
+        title={rel}
+        className={cn(
+          `heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 ${metrics.cls} ${metrics.label} rounded-lg flex items-center gap-1.5 transition-colors text-left`,
+          isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700',
+        )}
+      >
+        <FileText size={metrics.icon} className="shrink-0 opacity-60" />
+        <span className="flex-1 min-w-0 flex items-baseline">
+          {dir && <span className="max-w-[45%] shrink truncate opacity-50">{dir}</span>}
+          <span className="min-w-0 truncate">
+            {d.display.prefix}
+            {d.display.text.slice(0, d.display.from)}
+            <mark
+              className="rounded-sm"
+              style={{
+                backgroundColor: 'var(--heid-search-match-bg, rgba(251, 191, 36, 0.5))',
+                outline: '1px solid var(--heid-search-match-outline, transparent)',
+                /* 同上：名字命中也要跟随主题文字色，深色下不能是黑板字 */
+                color: 'inherit',
+              }}
+            >
+              {d.display.text.slice(d.display.from, d.display.to)}
+            </mark>
+            {d.display.text.slice(d.display.to)}
           </span>
         </span>
       </button>
@@ -1059,40 +1101,60 @@ export function FileTreeSidebar({
     if (result.error) {
       return <div className="px-3 py-4 text-[11px] text-red-500 break-all">{result.error}</div>;
     }
-    if (result.matches.length === 0) {
+    /* 旧版/异常返回可能没有文件名字段：按空组处理 */
+    const nameHits = result.nameMatches ?? [];
+    const nameTotal = result.nameMatchTotal ?? nameHits.length;
+    if (result.matches.length === 0 && nameHits.length === 0) {
       return <div className="px-3 py-6 text-center text-[11px] opacity-50">{t('tree.searchNoResults')}</div>;
     }
     return (
       <>
-        <div className="px-3 pt-1.5 pb-1 text-[10px] opacity-50 shrink-0">
-          {t('tree.searchSummary', { files: result.filesMatched, total: result.matchTotal, scanned: result.filesScanned })}
-          {result.truncated && ` · ${t('tree.searchCapped', { shown: result.matches.length, total: result.matchTotal })}`}
-        </div>
-        {paged?.groups.map(g => (
-          <div key={g.path}>
-            <button
-              onClick={() => onOpenFile(g.path)}
-              title={g.path}
-              className={cn(
-                `heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 ${metrics.cls} ${metrics.label} rounded-lg flex items-center gap-1.5 transition-colors text-left`,
-                isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700',
-              )}
-            >
-              <FileText size={metrics.icon} className="shrink-0 opacity-60" />
-              <span className="heid-name-clip truncate flex-1 min-w-0 font-medium">
-                <span className="heid-name-text inline-block whitespace-nowrap">{relativePathUnderRoot(g.path, rootPath)}</span>
-              </span>
-              <span className="text-[10px] opacity-50 shrink-0">{g.hits.length}</span>
-            </button>
-            {g.hits.map(renderHitRow)}
-          </div>
-        ))}
+        {nameHits.length > 0 && (
+          <>
+            <div className="px-3 pt-1.5 pb-1 text-[10px] opacity-50 shrink-0">
+              {t('tree.nameMatchSection', { total: nameTotal })}
+              {nameTotal > nameHits.length && ` · ${t('tree.nameMatchCapped', { shown: nameHits.length })}`}
+            </div>
+            {nameHits.map(renderNameHitRow)}
+          </>
+        )}
+        {result.matches.length > 0 && (
+          <>
+            {nameHits.length > 0 && (
+              <div className="px-3 pt-2 pb-1 text-[10px] opacity-50 shrink-0">{t('tree.contentMatchSection')}</div>
+            )}
+            <div className="px-3 pt-1.5 pb-1 text-[10px] opacity-50 shrink-0">
+              {t('tree.searchSummary', { files: result.filesMatched, total: result.matchTotal, scanned: result.filesScanned })}
+              {result.truncated && ` · ${t('tree.searchCapped', { shown: result.matches.length, total: result.matchTotal })}`}
+            </div>
+            {paged?.groups.map(g => (
+              <div key={g.path}>
+                <button
+                  onClick={() => onOpenFile(g.path)}
+                  title={g.path}
+                  className={cn(
+                    `heid-tree-row mx-1.5 w-[calc(100%-12px)] pr-2 ${metrics.cls} ${metrics.label} rounded-lg flex items-center gap-1.5 transition-colors text-left`,
+                    isDarkMode ? 'hover:bg-zinc-600/70 text-zinc-200' : 'hover:bg-zinc-200/70 text-zinc-700',
+                  )}
+                >
+                  <FileText size={metrics.icon} className="shrink-0 opacity-60" />
+                  <span className="heid-name-clip truncate flex-1 min-w-0 font-medium">
+                    <span className="heid-name-text inline-block whitespace-nowrap">{relativePathUnderRoot(g.path, rootPath)}</span>
+                  </span>
+                  <span className="text-[10px] opacity-50 shrink-0">{g.hits.length}</span>
+                </button>
+                {g.hits.map(renderHitRow)}
+              </div>
+            ))}
+          </>
+        )}
       </>
     );
   };
 
+  /* 底色只由 isDarkMode 决定：dark: 变体跟的是系统深色，应用内切浅色时会把面板留成深底 */
   const panel = cn(
-    'flex flex-col bg-white/95 dark:bg-zinc-800/95',
+    'flex flex-col',
     isDarkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-white',
   );
 

@@ -82,6 +82,8 @@ describe('FileTreeSidebar 跨文件搜索', () => {
             { path: 'C:/proj/src/a.ts', line: 8, col: 1, len: 6, text: 'needle here', offset: 0 },
             { path: 'C:/proj/docs/b.md', line: 1, col: 2, len: 6, text: '# needle doc', offset: 0 },
           ],
+          nameMatches: [{ path: 'C:/proj/docs/needle-guide.md', col: 1, len: 6 }],
+          nameMatchTotal: 1,
           filesScanned: 12, filesMatched: 2, matchTotal: 3,
           truncated: false, skippedLarge: 0, skippedBinary: 1, skippedDirs: 2, filesCapped: false, cancelled: false,
           error: null,
@@ -112,12 +114,59 @@ describe('FileTreeSidebar 跨文件搜索', () => {
     expect(text).toContain('src/a.ts');
     expect(text).toContain('docs/b.md');
     expect(text).toContain('needle here');
+    /* 文件名匹配分组（点击直接打开，不带行列）与内容匹配分段标题 */
+    expect(text).toContain('tree.nameMatchSection1');
+    expect(text).toContain('tree.contentMatchSection');
+    expect(text).toContain('needle-guide.md');
+    const nameBtn = Array.from(container!.querySelectorAll('button'))
+      .find(b => b.textContent?.includes('needle-guide.md')) as HTMLButtonElement;
+    act(() => { nameBtn.click(); });
+    expect(onOpenFile).toHaveBeenCalledWith('C:/proj/docs/needle-guide.md');
 
-    /* 点击第二个命中：行列随路径传给 onOpenFile */
-    const hitBtns = Array.from(container!.querySelectorAll('button'))
-      .filter(b => b.textContent?.includes('needle')) as HTMLButtonElement[];
-    act(() => { hitBtns[1].click(); });
+    /* 点击内容命中（带行列）：按片段文本定位，避开文件名匹配行 */
+    const hitBtn = Array.from(container!.querySelectorAll('button'))
+      .find(b => b.textContent?.includes('needle here')) as HTMLButtonElement;
+    act(() => { hitBtn.click(); });
     expect(onOpenFile).toHaveBeenCalledWith('C:/proj/src/a.ts', { line: 8, col: 1 });
+  });
+
+  it('只有文件名命中时也出结果，目录前缀与高亮同时可见', async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'search_in_dir') {
+        return Promise.resolve({
+          matches: [],
+          nameMatches: [
+            { path: 'C:/proj/src/utils/my-needle.ts', col: 4, len: 6 },
+            { path: 'C:/proj/a/needle.md', col: 1, len: 6 },
+          ],
+          nameMatchTotal: 2,
+          filesScanned: 5, filesMatched: 0, matchTotal: 0,
+          truncated: false, skippedLarge: 0, skippedBinary: 0, skippedDirs: 0, filesCapped: false, cancelled: false,
+          error: null,
+        });
+      }
+      return Promise.reject(new Error(`unexpected cmd: ${cmd}`));
+    });
+
+    render(<FileTreeSidebar {...props()} />);
+    act(() => { (container!.querySelector('button[title="tree.searchInFiles"]') as HTMLButtonElement).click(); });
+    const input = container!.querySelector('input') as HTMLInputElement;
+    act(() => { setInputValue(input, 'needle'); });
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await act(async () => { await new Promise(r => setTimeout(r, 20)); });
+
+    const text = container!.textContent ?? '';
+    expect(text).not.toContain('tree.searchNoResults');
+    expect(text).toContain('tree.nameMatchSection2');
+    expect(text).toContain('src/utils/');
+    expect(text).toContain('needle.ts');
+    /* 文件名内命中区间被 mark 高亮 */
+    const marks = Array.from(container!.querySelectorAll('mark')).map(m => m.textContent);
+    expect(marks).toEqual(['needle', 'needle']);
+    /* 深色下 mark 不再用浏览器默认黑板字，跟随行文字色 */
+    expect((container!.querySelector('mark') as HTMLElement).style.color).toBe('inherit');
   });
 
   it('空查询 Enter 不发请求；正则编译错误经 error 字段展示', async () => {
@@ -192,6 +241,24 @@ describe('FileTreeSidebar 跨文件搜索', () => {
       await new Promise(r => setTimeout(r, 20));
     });
     expect((container!.textContent ?? '').includes('src/a.ts')).toBe(false);
+  });
+});
+
+describe('FileTreeSidebar 主题配色', () => {
+  const panel = () => container!.firstElementChild as HTMLElement;
+
+  /* 回归：面板底色曾用 dark: 变体，而它跟的是系统深色、不是应用主题 ——
+     系统深色 + 应用浅色时树底变深、行文字仍是浅色主题的深灰，整棵树看不清 */
+  it('浅色模式面板为浅色底，不跟随系统深色', () => {
+    render(<FileTreeSidebar {...props()} isDarkMode={false} />);
+    expect(panel().className).toContain('bg-white');
+    expect(panel().className).not.toContain('dark:');
+  });
+
+  it('深色模式面板为深色底', () => {
+    render(<FileTreeSidebar {...props()} isDarkMode />);
+    expect(panel().className).toContain('bg-zinc-800');
+    expect(panel().className).not.toContain('dark:');
   });
 });
 

@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   groupByFile, hitDisplay, hitRangeInSnippet, pageGroups, HITS_PER_PAGE,
+  fileNameOf, fileNameHitDisplay,
   type FileHit,
 } from './dirSearch';
 
@@ -90,6 +91,28 @@ describe('hitDisplay：命中行显示窗口（按显示宽度，CJK 记 2）', 
     const d = hitDisplay(hit('a', 1, 41, 6, text, 0), 10);
     expect(d.text).toBe(text.slice(30));
     expect(d.text.slice(d.from, d.to)).toBe('NEEDLE');
+  });
+});
+
+describe('fileNameHitDisplay：文件名命中的显示', () => {
+  it('取末段文件名，短名原样显示并给出高亮区间', () => {
+    const d = fileNameHitDisplay({ path: 'C:/proj/src/needle.ts', col: 1, len: 6 });
+    expect(d.name).toBe('needle.ts');
+    expect(d.display).toEqual({ prefix: '', text: 'needle.ts', from: 0, to: 6 });
+  });
+
+  it('超长文件名在窄栏里窗口前移，高亮仍可见', () => {
+    const long = 'x'.repeat(60) + 'needle' + 'y'.repeat(60);
+    const d = fileNameHitDisplay({ path: `C:/proj/${long}.ts`, col: 61, len: 6 });
+    expect(d.name).toBe(`${long}.ts`);
+    expect(d.display.prefix).toBe('…');
+    expect(d.display.text.slice(d.display.from, d.display.to)).toBe('needle');
+    expect(d.display.from).toBeLessThanOrEqual(18);
+  });
+
+  it('fileNameOf 兼容反斜杠路径与无目录路径', () => {
+    expect(fileNameOf('C:\\proj\\a\\b.md')).toBe('b.md');
+    expect(fileNameOf('plain.txt')).toBe('plain.txt');
   });
 });
 

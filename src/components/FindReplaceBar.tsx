@@ -8,6 +8,7 @@ import {
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY, NARROW_QUERY } from '../lib/platform';
 import { useMediaQuery } from '../hooks/useMediaQuery';
+import { useFloatingDrag } from '../hooks/useFloatingDrag';
 import { clampBarPosition } from '../lib/position';
 import { setFindMatchesEffect } from '../lib/editorSearch';
 import {
@@ -46,6 +47,7 @@ interface MatchState {
  * - 导航在匹配列表上循环回绕，替换支持正则 $1 引用；
  * - 安卓两端不用「指针位置浮层」：改成贴窗口底缘的停靠条（.heid-find-dock，见 index.css），
  *   键盘弹出时按 --heid-kb 上移，控件触控目标 48dp。窄屏（手机）再把控件按两行重排。
+ * - 桌面浮层可拖动：除输入框外按住栏面任何地方都能把栏挪走（按钮轻点仍是点按，拖起来才算拖动）。
  */
 export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, canReplace, getPointer, subscribeViewUpdate, onClose }: FindReplaceBarProps) {
   const t = useT();
@@ -76,6 +78,7 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   const getPointerRef = useRef(getPointer);
   getPointerRef.current = getPointer;
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const { dragging, panelDragProps, onClickCapture } = useFloatingDrag(rootRef, pos, setPos);
   useLayoutEffect(() => {
     if (docked) return;
     const el = rootRef.current;
@@ -417,8 +420,11 @@ export function FindReplaceBar({ getView, isDarkMode, showReplace, gotoMode, can
   const panel = (
     <div
       ref={rootRef}
+      {...(!docked ? panelDragProps : {})}
+      onClickCapture={!docked ? onClickCapture : undefined}
       className={cn(
         'border shadow-xl flex flex-col',
+        dragging && 'select-none cursor-grabbing',
         IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5',
         isDarkMode ? 'border-zinc-600 bg-zinc-800/95 backdrop-blur-sm' : 'border-zinc-300 bg-white/95 backdrop-blur-sm',
         docked

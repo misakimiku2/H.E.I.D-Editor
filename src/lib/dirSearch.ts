@@ -20,8 +20,20 @@ export interface FileHit {
   offset: number;
 }
 
+/** 文件名命中：与内容命中是两套结果（点击直接打开文件，不带跳转行列） */
+export interface FileNameHit {
+  path: string;
+  /** 文件名内 1-based 字符列 */
+  col: number;
+  /** 匹配字符数 */
+  len: number;
+}
+
 export interface DirSearchResult {
   matches: FileHit[];
+  /** 文件名命中的文件（最多 200 条；总数见 nameMatchTotal） */
+  nameMatches: FileNameHit[];
+  nameMatchTotal: number;
   filesScanned: number;
   filesMatched: number;
   matchTotal: number;
@@ -107,6 +119,21 @@ export function groupByFile(matches: readonly FileHit[]): FileGroup[] {
 export function hitRangeInSnippet(hit: FileHit): { from: number; to: number } {
   const from = Math.max(0, hit.col - 1 - hit.offset);
   return { from, to: Math.min(hit.text.length, from + hit.len) };
+}
+
+/** 路径末段文件名（本地路径按 / 与 \ 切） */
+export function fileNameOf(path: string): string {
+  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return idx >= 0 ? path.slice(idx + 1) : path;
+}
+
+/** 文件名命中的显示模型：高亮在 basename 内，窄栏下窗口前移保证命中可见 */
+export function fileNameHitDisplay(hit: FileNameHit): { name: string; display: HitDisplayText } {
+  const name = fileNameOf(hit.path);
+  return {
+    name,
+    display: hitDisplay({ path: hit.path, line: 0, col: hit.col, len: hit.len, text: name, offset: 0 }),
+  };
 }
 
 /** 窗口内命中前保留的显示宽度单位数（CJK 记 2），保证高亮落入窄侧栏可见区 */
