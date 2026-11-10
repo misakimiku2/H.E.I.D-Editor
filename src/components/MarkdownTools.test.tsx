@@ -4,7 +4,7 @@
  * tabStart / tabEnd / tabClear 转换（选区→页签的变换见 lib/markdownTabs）。
  */
 import { describe, expect, it } from 'vitest';
-import { transformSlice, footnoteEdit } from './MarkdownTools';
+import { transformSlice, footnoteEdit, MENU_SECTIONS } from './MarkdownTools';
 
 describe('transformSlice：扩展行内包裹', () => {
   it('mark / sup / sub / math 走 INLINE_WRAPS 包裹', () => {
@@ -40,6 +40,13 @@ describe('transformSlice：扩展行内包裹', () => {
     const fe = footnoteEdit(content, { start: content.indexOf('后'), end: content.length }, '后一段落');
     expect(fe.marker).toBe('[^2]');
     expect(fe.def).toBe('\n\n[^2]: ');
+  });
+});
+
+describe('菜单分区', () => {
+  it('页签组置顶：选中内容右键后「包成页签」第一眼可见', () => {
+    expect(MENU_SECTIONS[0].labelKey).toBe('md.sectionTabs');
+    expect(MENU_SECTIONS[0].ops.map(o => o.op.kind)).toEqual(['tabGroup', 'tabClear']);
   });
 });
 

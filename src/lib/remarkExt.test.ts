@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
-import { remarkGfmStrict, remarkInlineExt } from './remarkExt';
+import { remarkGfmStrict, remarkInlineExt, remarkStripHtmlComments } from './remarkExt';
 
 const proc = (plugins: unknown[]) => unified().use(remarkParse).use(plugins as never);
 
@@ -54,6 +54,13 @@ describe('remarkInlineExt', () => {
     const tree = await run('~~删除~~ 与 ~下标~', [remarkGfmStrict, remarkInlineExt]);
     expect(findType(tree, 'delete')).not.toBeNull();
     expect(findType(tree, 'subscript')).not.toBeNull();
+  });
+
+  it('remarkStripHtmlComments：纯注释节点隐藏，代码里的注释保留', async () => {
+    const tree = await run('前文 <!-- group: x --> 后文\n\n```\n<!-- 代码里的 -->\n```', [remarkStripHtmlComments]);
+    expect(findType(tree, 'html')).toBeNull();
+    const code = findType(tree, 'code');
+    expect(code?.value).toContain('<!-- 代码里的 -->');
   });
 
   it('==red:文字== 携带色板类名，未知前缀按普通文本默认高亮', async () => {

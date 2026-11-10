@@ -4,7 +4,7 @@ import {
   Bold, Italic, Strikethrough, Code, TextQuote,
   List, ListOrdered, ListTodo, Braces, Link2,
   Minus, Undo2, Redo2,
-  Layers, PanelTop, PanelBottom, Eraser,
+  Layers, Eraser,
   Highlighter, Superscript, Subscript, Sigma, Footprints, Workflow,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -212,6 +212,14 @@ export interface MdMenuOp {
 }
 
 export const MENU_SECTIONS: Array<{ labelKey: MessageKey; ops: MdMenuOp[] }> = [
+  /* 页签组置顶：编辑器里选中一段内容 → 右键第一眼就能看到「包成页签」 */
+  {
+    labelKey: 'md.sectionTabs',
+    ops: [
+      { op: { kind: 'tabGroup' }, icon: Layers, textKey: 'md.tabGroup', nameKey: 'md.tabGroupName' },
+      { op: { kind: 'tabClear' }, icon: Eraser, textKey: 'md.tabClear', nameKey: 'md.tabClearName' },
+    ],
+  },
   {
     labelKey: 'md.sectionHeading',
     ops: [
@@ -264,15 +272,6 @@ export const MENU_SECTIONS: Array<{ labelKey: MessageKey; ops: MdMenuOp[] }> = [
       { op: { kind: 'math' }, icon: Sigma, textKey: 'md.math', nameKey: 'md.mathName', syntax: '$' },
       { op: { kind: 'footnote' }, icon: Footprints, textKey: 'md.footnote', nameKey: 'md.footnoteName' },
       { op: { kind: 'mermaid' }, icon: Workflow, textKey: 'md.mermaid', nameKey: 'md.mermaidName', syntax: '```mermaid' },
-    ],
-  },
-  {
-    labelKey: 'md.sectionTabs',
-    ops: [
-      { op: { kind: 'tabGroup' }, icon: Layers, textKey: 'md.tabGroup', nameKey: 'md.tabGroupName' },
-      { op: { kind: 'tabStart' }, icon: PanelTop, textKey: 'md.tabStart', nameKey: 'md.tabStartName', syntax: '<!-- tab: -->' },
-      { op: { kind: 'tabEnd' }, icon: PanelBottom, textKey: 'md.tabEnd', nameKey: 'md.tabEndName', syntax: '<!-- /tab -->' },
-      { op: { kind: 'tabClear' }, icon: Eraser, textKey: 'md.tabClear', nameKey: 'md.tabClearName' },
     ],
   },
 ];

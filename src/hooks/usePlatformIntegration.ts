@@ -13,6 +13,7 @@ import type { RefObject } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { IS_ANDROID_APP } from '../lib/platform';
 import { openExternal } from '../lib/openExternal';
+import { resolveMarkdownLinkPath } from '../lib/markdownLinks';
 import { READ_EXTENSIONS, isTauri } from '../lib/fileIO';
 import type { PendingDiscardConfirm } from './useDiscardConfirm';
 
@@ -86,6 +87,8 @@ export function usePlatformIntegration({
   openExternalPathRef.current = openPathFromExternal;
   const openSharedTextRef = useRef(openSharedText);
   openSharedTextRef.current = openSharedText;
+  const openPathIntoTabRef = useRef(openPathIntoTab);
+  openPathIntoTabRef.current = openPathIntoTab;
 
   /* ---- 文件关联与单实例（桌面）：首实例启动路径经 take_launch_paths 取走；
      二次实例启动由 Rust 侧聚焦窗口并转发 heid-open-paths 事件 ---- */
@@ -170,7 +173,9 @@ export function usePlatformIntegration({
   }, []);
 
   /* ---- 全局链接导航守卫：渲染内容里的 <a>（预览正文、导入的来源链接等）不允许让应用 WebView 真实导航 ----
-     http(s) 交给系统浏览器打开，其余非锚点协议（javascript: / 相对路径 / 空链接）直接拦截。
+     http(s) 交给系统浏览器打开；预览正文里的本地 Markdown 链接按当前文档目录解析后
+     在新标签页打开（剧情目录这类 [第01章.md](第01章.md) 链接）；
+     其余非锚点协议（javascript: / 网页相对路径 / 空链接）直接拦截。
      放行两类：# 开头的文档内锚点跳转、带 download / blob: / data: 的下载链接（导出 HTML 走这里）。
      否则点击链接会把整个应用导航成网页，WebView2 的鼠标侧键（历史前进/后退）随之在应用与网页间切换。 */
   useEffect(() => {
@@ -187,7 +192,11 @@ export function usePlatformIntegration({
       if (a.hasAttribute('download') || /^(blob:|data:)/i.test(href)) return;
       e.preventDefault();
       e.stopPropagation();
-      if (/^https?:\/\//i.test(href)) void openExternal(href);
+      if (/^https?:\/\//i.test(href)) { void openExternal(href); return; }
+      const preview = a.closest('[data-md-preview]');
+      if (!preview) return;
+      const target = resolveMarkdownLinkPath(href, preview.getAttribute('data-md-base-dir') ?? undefined);
+      if (target) void openPathIntoTabRef.current(target);
     };
     document.addEventListener('click', guard, true);
     document.addEventListener('auxclick', guard, true);

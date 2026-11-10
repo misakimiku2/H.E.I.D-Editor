@@ -17,6 +17,9 @@ export interface PreviewFindBarProps {
   getContainer: () => HTMLElement | null;
   /** markdown 源内容：内容变化时触发重扫 */
   content: string;
+  /** 超大文档正在加载全文：加载完成前不做局部扫描（结果会不完整），显示进度 */
+  loading?: boolean;
+  loadPercent?: number;
   isDarkMode: boolean;
   /** 弹出定位：打开瞬间的指针位置（不跟随） */
   getPointer?: () => PointerPos;
@@ -111,7 +114,7 @@ function rangeForMatch(spans: TextSpan[], m: MatchRange): Range | null {
  * 安卓两端为贴窗口底缘的停靠条（指针定位在触屏上不可靠，见 FindReplaceBar 的同款注释）；
  * 窄屏（手机）再把控件按两行重排，平板沿用桌面的一行布局。桌面仍是指针定位浮层。
  */
-export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, onClose }: PreviewFindBarProps) {
+export function PreviewFindBar({ getContainer, content, loading = false, loadPercent = 0, isDarkMode, getPointer, onClose }: PreviewFindBarProps) {
   const t = useT();
   /* 停靠（贴窗口底缘、整幅宽度、按 --heid-kb 让位键盘）与两行重排分开看，定位见 index.css 的 .heid-find-dock */
   const narrow = useMediaQuery(NARROW_QUERY);
@@ -193,10 +196,19 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
     applyHighlights(-1);
   }, [applyHighlights, clearHighlights, getContainer]);
 
-  /* 查询 / 内容 / 选项变化 → 重扫（effect 在 DOM 提交后运行，渲染树已是最新） */
+  /* 查询 / 内容 / 选项变化 → 重扫（effect 在 DOM 提交后运行，渲染树已是最新）。
+     超大文档全文尚未加载完时不做局部扫描：只搜已渲染部分会漏结果，等加载完再一次性扫 */
   useEffect(() => {
+    if (loading) {
+      rangesRef.current = [];
+      spansRef.current = [];
+      clearHighlights();
+      setCount({ total: 0, capped: false });
+      setCurrent(-1);
+      return;
+    }
     rescan();
-  }, [rescan, query, caseSensitive, regexp, wholeWord, content]);
+  }, [rescan, clearHighlights, query, caseSensitive, regexp, wholeWord, content, loading]);
 
   /* 卸载清理高亮 */
   useEffect(() => clearHighlights, [clearHighlights]);
@@ -259,9 +271,11 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
       : 'border-zinc-300 bg-white text-zinc-800 focus:border-blue-500 placeholder:text-zinc-400'
   );
 
-  const countLabel = count.total === 0
-    ? (query ? t('find.noResults') : '')
-    : current < 0 ? `${count.total}${count.capped ? '+' : ''}` : `${current + 1}/${count.total}${count.capped ? '+' : ''}`;
+  const countLabel = loading
+    ? `${loadPercent}%`
+    : count.total === 0
+      ? (query ? t('find.noResults') : '')
+      : current < 0 ? `${count.total}${count.capped ? '+' : ''}` : `${current + 1}/${count.total}${count.capped ? '+' : ''}`;
 
   /* 行容器：触屏相邻按钮之间留足 8dp，避免命中区互相偷走 */
   const row = cn('flex items-center', IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5');
@@ -282,10 +296,10 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
 
   const navButtons = (
     <>
-      <button onClick={() => step(-1)} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
+      <button onClick={() => step(-1)} disabled={loading || !count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
         <ArrowUp size={14} />
       </button>
-      <button onClick={() => step(1)} disabled={!count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.nextTip')} aria-label={t('find.nextMatch')}>
+      <button onClick={() => step(1)} disabled={loading || !count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.nextTip')} aria-label={t('find.nextMatch')}>
         <ArrowDown size={14} />
       </button>
       <button onClick={onClose} className={navBtn} title={t('find.closeTip')} aria-label={t('find.closeFind')}>
@@ -306,6 +320,7 @@ export function PreviewFindBar({ getContainer, content, isDarkMode, getPointer, 
       />
       {countInside && (
         <span
+          title={loading ? t('find.loadingAll') : undefined}
           className={cn(
             'absolute right-2 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none tabular-nums',
             isDarkMode ? 'text-zinc-500' : 'text-zinc-400'

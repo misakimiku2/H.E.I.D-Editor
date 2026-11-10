@@ -115,3 +115,20 @@ function transformInlineExt(node: any): void {
 export function remarkInlineExt(this: any) {
   return (tree: unknown) => transformInlineExt(tree);
 }
+
+/* 纯 HTML 注释节点（<!-- group: ... --> 这类导入残留）：预览按规范应当隐藏。
+   提前在 mdast 阶段移除，让没有原始标签的大文档可以跳过 rehype-raw ——
+   否则整篇 300k 节点过一遍 raw 解析要十秒级 */
+const ONLY_COMMENTS_RE = /^(?:\s*<!--[\s\S]*?-->)+\s*$/;
+
+function stripHtmlComments(node: any): void {
+  if (!Array.isArray(node.children)) return;
+  node.children = node.children.filter(
+    (child: any) => !(child.type === 'html' && ONLY_COMMENTS_RE.test(child.value)),
+  );
+  for (const child of node.children) stripHtmlComments(child);
+}
+
+export function remarkStripHtmlComments(this: any) {
+  return (tree: unknown) => stripHtmlComments(tree);
+}

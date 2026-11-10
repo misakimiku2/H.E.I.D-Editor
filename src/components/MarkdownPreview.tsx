@@ -1,15 +1,20 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, createContext, useContext } from 'react';
 import ReactMarkdown from 'react-markdown';
+import type { PluggableList } from 'unified';
 import { ImageViewer } from './ImageViewer';
 import { resolveImageSrc, joinRelativeSrc, normalizeLocalSrc, ImageForbiddenError } from '../lib/imageSrc';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import remarkEmoji from 'remark-emoji';
-import { remarkGfmStrict, remarkInlineExt } from '../lib/remarkExt';
+import { remarkGfmStrict, remarkInlineExt, remarkStripHtmlComments } from '../lib/remarkExt';
+import { rawHtmlSanitizeSchema, hasRawHtml } from '../lib/markdownRawHtml';
+import { buildLargePreviewBlocks } from '../lib/markdownChunks';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, ghcolors } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { Table, Image as ImageIcon, Plus, Minus, Copy, Scissors, Trash2, Layers, Workflow, Pencil, Maximize2, Minimize2, ImageDown } from 'lucide-react';
+import { Table, Image as ImageIcon, Plus, Minus, Copy, Check, Scissors, Trash2, Layers, Workflow, Pencil, Maximize2, Minimize2, ImageDown } from 'lucide-react';
 import { renderMermaidSvg } from '../lib/mermaid';
 import { cn } from '../lib/utils';
 import { IS_ANDROID_APP, IS_TOUCH_PRIMARY } from '../lib/platform';
@@ -25,7 +30,11 @@ import type { PointerPos } from '../hooks/useLastPointer';
 import { useDragScroll } from '../hooks/useDragScroll';
 import { useT } from '../lib/i18nContext';
 import { parseLangBlocks } from '../lib/markdownLangs';
+import { codeLangLabel } from '../lib/codeLangLabel';
 import { applyImageTab, applySelectionTab } from '../lib/markdownTabs';
+import { deleteTabSection, insertTabSection, makeTabGroup, sanitizeTabLabel, updateTabSection } from '../lib/markdownTabEdit';
+import { TabEditModal, type TabEditValues } from './TabEditModal';
+import { ConfirmDialog } from './ConfirmDialog';
 import { collectRemoteImages } from '../lib/imageLocalize';
 import { toggleTaskAtOffset } from '../lib/markdownSmartEdit';
 import { notifyFmtMenuClosed, notifyFmtMenuOpen, registerFmtMenuClose,
@@ -37,26 +46,130 @@ const BlockBaseContext = createContext(0);
 /** li 行首的全文偏移：checkbox 回写定位用（react-markdown 的 input 节点无 position） */
 const TaskLineContext = createContext<number | null>(null);
 
+/** 是否位于 <pre> 内：结构上区分围栏代码块与行内代码（单行围栏块没有换行） */
+const BlockCodeContext = createContext(false);
+
 /* markdown 渲染插件管线：组装版 GFM(~~删除线~~/表格/任务列表/脚注，单 ~ 让给下标)
-   + 公式($…$/$$…$$，KaTeX) + emoji 短代码 + ==高亮==/^上标^/~下标~ 行内扩展 */
-const remarkPlugins = [remarkGfmStrict, remarkMath, remarkEmoji, remarkInlineExt];
-const rehypePlugins = [rehypeKatex];
+   + 公式($…$/$$…$$，KaTeX) + emoji 短代码 + ==高亮==/^上标^/~下标~ 行内扩展
+   + 原始 HTML（<br>/<u>/<details> 等，先解析后按白名单清洗）。
+   sanitize 放在 katex 之前：公式输出是插件自己生成的可信 DOM，不参与清洗；
+   清洗若在 katex 之后会把公式的类名与内联样式剥掉。
+   HTML 注释（导入残留的 <!-- group:... -->）在 remark 阶段就移除；没有原始标签的
+   文档跳过 rehype-raw —— 它对整棵树做 HTML 重解析，超长文档单这一步就要十秒级 */
+const remarkPlugins = [remarkGfmStrict, remarkMath, remarkEmoji, remarkInlineExt, remarkStripHtmlComments];
+const rehypePluginsFull: PluggableList = [
+  rehypeRaw,
+  [rehypeSanitize, rawHtmlSanitizeSchema],
+  rehypeKatex,
+];
+const rehypePluginsPlain: PluggableList = [
+  [rehypeSanitize, rawHtmlSanitizeSchema],
+  rehypeKatex,
+];
+
+/* sanitize 已按协议白名单过滤过 href/src，这里原样放行；
+   react-markdown 默认只认 http/https 等，会把本地图片的 file:///、data: 清空 */
+const keepSanitizedUrl = (url: string) => url;
+
+/* 超大文档预览分块懒加载：超过该字符数就按标题切块，先渲染首屏、滚动再续。
+   整篇一次解析 + 建 DOM 在百万字符级会把主线程锁死数十秒 */
+const LARGE_PREVIEW_CHARS = 150_000;
+const PREVIEW_INITIAL_BLOCKS = 8;
+const PREVIEW_LOAD_STEP = 8;
+/** 查找时一次补渲染的块数：全文加载完才做扫描，结果必须覆盖未滚动到的部分 */
+const PREVIEW_FIND_LOAD_STEP = 32;
 
 /* 单块渲染记忆化：md 源串与 components 都不变就跳过 ReactMarkdown 重建。
    react-markdown v10 的 Markdown 组件内部无任何缓存，每次渲染都完整重跑
    remark/rehype 管道（含代码高亮）；而上层 App 任意 setState（光标、大纲高亮等）
    都会以内联闭包 props 击穿本组件的外层 memo——没有这层，分屏滚动/打字期间
    每次重渲染都等于全篇重新解析，是同步滚动掉帧的大头 */
-const MdBlock = React.memo(function MdBlock({ md, components }: {
+const MdBlock = React.memo(function MdBlock({ md, components, richHtml }: {
   md: string;
   components: Record<string, any>;
+  /** 片段含原始 HTML 标签时才启用 rehype-raw（大文档纯 Markdown 占多数） */
+  richHtml: boolean;
 }) {
   return (
-    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components as any}>
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={richHtml ? rehypePluginsFull : rehypePluginsPlain}
+      urlTransform={keepSanitizedUrl}
+      components={components as any}
+    >
       {md}
     </ReactMarkdown>
   );
 });
+
+/* 代码块复制按钮：点击把代码原文写进剪贴板，短暂显示对勾反馈 */
+const CodeCopyButton = React.memo(function CodeCopyButton({ code, isDarkMode }: {
+  code: string;
+  isDarkMode: boolean;
+}) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  const handleCopy = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    void writeClipboardText(code).then(() => {
+      setCopied(true);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopied(false), 1600);
+    }).catch(() => { /* 剪贴板不可用时保持原样，不打扰阅读 */ });
+  }, [code]);
+
+  const label = copied ? t('md.codeCopied') : t('md.copyCode');
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      title={label}
+      aria-label={label}
+      className={cn(
+        'flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors',
+        isDarkMode
+          ? 'text-zinc-400 hover:bg-zinc-700/60 hover:text-zinc-100'
+          : 'text-zinc-500 hover:bg-zinc-200/70 hover:text-zinc-800',
+      )}
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+    </button>
+  );
+});
+
+CodeCopyButton.displayName = 'CodeCopyButton';
+
+/* 代码块头部栏：左侧语言标题，右侧图标复制按钮 */
+const CodeBlockHeader = React.memo(function CodeBlockHeader({ lang, code, isDarkMode }: {
+  lang: string;
+  code: string;
+  isDarkMode: boolean;
+}) {
+  const t = useT();
+  const label = codeLangLabel(lang) || t('md.codePlain');
+  return (
+    <div
+      data-md-code-bar
+      className={cn(
+        'flex h-8 items-center justify-between gap-3 border-b px-3 select-none',
+        isDarkMode
+          ? 'border-zinc-800 bg-zinc-900/40 text-zinc-400'
+          : 'border-zinc-200 bg-white/60 text-zinc-500',
+      )}
+    >
+      <span className="truncate text-[11px] font-medium tracking-wide">{label}</span>
+      <CodeCopyButton code={code} isDarkMode={isDarkMode} />
+    </div>
+  );
+});
+
+CodeBlockHeader.displayName = 'CodeBlockHeader';
 
 /* 把源码偏移量写到 DOM 上，供右键时把选区映射回源码。
    页签文档按块渲染，remark 的偏移相对块字符串——用 context 注入块的
@@ -639,11 +752,13 @@ const InsertMenu = React.memo<{
   onTable: () => void;
   onImage: () => void;
   onDiagram: () => void;
+  /** 新建页签组（弹窗填标签与内容） */
+  onTabs: () => void;
   /** 图片本地化入口（桌面端才传入；无远程图片时按钮置灰） */
   onLocalize?: () => void;
   canLocalize: boolean;
   onClose: () => void;
-}>(({ x, y, isDarkMode, onTable, onImage, onDiagram, onLocalize, canLocalize, onClose }) => {
+}>(({ x, y, isDarkMode, onTable, onImage, onDiagram, onTabs, onLocalize, canLocalize, onClose }) => {
   const t = useT();
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -670,7 +785,7 @@ const InsertMenu = React.memo<{
   }, [onClose]);
 
   const left = Math.max(4, Math.min(x, window.innerWidth - (IS_TOUCH_PRIMARY ? 224 : 176)));
-  const top = Math.max(4, Math.min(y, window.innerHeight - (IS_TOUCH_PRIMARY ? 244 : 182)));
+  const top = Math.max(4, Math.min(y, window.innerHeight - (IS_TOUCH_PRIMARY ? 300 : 216)));
 
   return (
     <div
@@ -723,6 +838,18 @@ const InsertMenu = React.memo<{
       >
         <Workflow size={13} />
         {t('md.mermaid')}
+      </button>
+      <button
+        onClick={onTabs}
+        className={cn(
+          IS_TOUCH_PRIMARY
+            ? "mx-1 w-[calc(100%-8px)] min-h-[48px] px-3 text-sm font-medium flex items-center gap-2.5 rounded-lg transition-colors"
+            : "mx-1 w-[calc(100%-8px)] px-2.5 py-1.5 text-xs font-medium flex items-center gap-2 rounded-lg transition-colors",
+          isDarkMode ? "hover:bg-zinc-600/70 text-zinc-200" : "hover:bg-zinc-200/70 text-zinc-700"
+        )}
+      >
+        <Layers size={13} />
+        {t('md.tabNewGroup')}
       </button>
       {onLocalize && (
         <>
@@ -808,6 +935,19 @@ interface CellEdit {
   height: number;
 }
 
+/** 页签弹窗：新建组 / 组内追加 / 编辑现有页签 */
+type TabDialogState =
+  | { mode: 'newGroup'; insertAt: number; label: string; body: string }
+  | { mode: 'add'; groupIdx: number; label: string; body: string }
+  | { mode: 'edit'; groupIdx: number; sectionIdx: number; label: string; body: string };
+
+interface TabDeleteState {
+  groupIdx: number;
+  sectionIdx: number;
+  label: string;
+  isLast: boolean;
+}
+
 const BORDER_TOLERANCE = 5;
 
 /** 移动端顶栏触发的插入动作（插入点 = 文末）；大纲点击滚动到源码偏移处 */
@@ -835,6 +975,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const [imageModal, setImageModal] = useState<SourceSnippet | null>(null);
   const [tableAction, setTableAction] = useState<TableAction | null>(null);
   const [cellEdit, setCellEdit] = useState<CellEdit | null>(null);
+  const [tabDialog, setTabDialog] = useState<TabDialogState | null>(null);
+  const [tabDelete, setTabDelete] = useState<TabDeleteState | null>(null);
   /* 插入菜单的「图片本地化」仅在文档含远程图源时可用 */
   const canLocalizeImages = useMemo(() => collectRemoteImages(content).length > 0, [content]);
 
@@ -842,13 +984,25 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   React.useImperativeHandle(ref, () => ({
     insertTable: () => { if (onChange) onChange(insertBlockAt(content, content.length, BLANK_TABLE)); },
     openImageModal: () => { setImageModal(buildSourceSnippet(content, content.length)); },
-    /* 大纲导航：块元素按 data-md-start 全文坐标定位，取 ≥offset 的最近一块滚过去 */
+    /* 大纲导航：块元素按 data-md-start 全文坐标定位，取 ≥offset 的最近一块滚过去。
+       大文档目标块可能还没渲染：先扩到目标块，再在渲染后滚动 */
     scrollToOffset: (offset: number) => {
       const root = contentRef.current;
       if (!root) return;
-      const blocks = Array.from(root.querySelectorAll<HTMLElement>('[data-md-start]'));
-      const target = blocks.find(el => Number(el.dataset.mdStart) >= offset)
-        ?? blocks[blocks.length - 1];
+      const blocks = renderBlocksRef.current;
+      if (chunkedRef.current && blocks && blocks.length) {
+        const starts = blocks.map(b => (b.type === 'md' ? b.start : (b.sections[0]?.start ?? 0)));
+        const found = starts.findIndex(s => s >= offset);
+        const idx = found < 0 ? blocks.length - 1 : found;
+        if (idx >= shownBlockCountRef.current) {
+          pendingOutlineScrollRef.current = offset;
+          setVisibleBlockCount(Math.min(idx + 2, blocks.length));
+          return;
+        }
+      }
+      const rendered = Array.from(root.querySelectorAll<HTMLElement>('[data-md-start]'));
+      const target = rendered.find(el => Number(el.dataset.mdStart) >= offset)
+        ?? rendered[rendered.length - 1];
       if (target) root.scrollTo({ top: Math.max(0, target.offsetTop - 12), behavior: 'smooth' });
       else root.scrollTo({ top: 0 });
     },
@@ -883,10 +1037,13 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const codeComponent = useMemo(() => {
     return function CodeBlock({ node, className, children, ...props }: { node?: any; className?: string; children?: React.ReactNode; [key: string]: any }) {
       const srcData = useSrcData();
-      const match = /language-(\w+)/.exec(className || '');
+      const inBlock = useContext(BlockCodeContext);
+      const match = /language-([^\s]+)/.exec(className || '');
       const codeContent = String(children).replace(/\n$/, '');
       const hasNewlines = codeContent.includes('\n');
-      const isCodeBlock = hasNewlines && (match || codeContent.trim().length > 0);
+      /* 围栏块由 pre 的结构判定（单行围栏块没有换行）；换行兜底保留给非 pre 的
+         多行代码节点，行内代码据此仍走行内样式 */
+      const isCodeBlock = inBlock || (hasNewlines && codeContent.trim().length > 0);
 
       if (isCodeBlock) {
         const lang = match ? match[1] : 'text';
@@ -915,12 +1072,14 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         }
         return (
           <div
-            className="my-4 rounded-lg overflow-hidden"
+            className={cn(
+              'my-4 rounded-lg overflow-hidden border',
+              isDarkMode ? 'border-zinc-800' : 'border-zinc-200/80',
+            )}
             {...srcData(node)}
             style={{
               background: isDarkMode ? '#1e1e1e' : '#f3f4f6',
               boxShadow: 'none',
-              border: 'none',
               outline: 'none'
             }}
           >
@@ -933,6 +1092,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
               .md-code-block div,
               .md-code-block pre { border: none !important; outline: none !important; box-shadow: none !important; }
             `}</style>
+            <CodeBlockHeader lang={match ? match[1] : ''} code={codeContent} isDarkMode={isDarkMode} />
             <div className="md-code-block">
               <SyntaxHighlighter
                 style={cleanTheme}
@@ -980,7 +1140,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     return {
     code: codeComponent,
     pre({ children }: { children?: React.ReactNode }) {
-      return <>{children}</>;
+      return <BlockCodeContext.Provider value={true}>{children}</BlockCodeContext.Provider>;
     },
     img({ src, alt, node, ...props }: any) {
       const srcData = useSrcData();
@@ -1051,15 +1211,26 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     );
   }, [isDarkMode]);
 
+  /* 页签条上的增删改按钮（触屏 48dp，桌面 28px） */
+  const tabIconBtnCls = cn(
+    'flex items-center justify-center rounded-md transition-colors',
+    IS_TOUCH_PRIMARY ? 'h-12 w-12' : 'h-7 w-7',
+    isDarkMode
+      ? 'text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100'
+      : 'text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800',
+  );
+
   /* ---- 预览解析防抖 ----
      渲染管线只读 renderedContent（滞后镜像）：连续内容变化（打字）停顿 180ms 后才整篇重解析；
      docKey 变化（打开/切换文档）在 render 期立即跟上，不引入切换延迟。
      编辑类操作（表格/图片/插入）仍读写实时 content */
   const [renderedContent, setRenderedContent] = useState(content);
+  const [visibleBlockCount, setVisibleBlockCount] = useState(PREVIEW_INITIAL_BLOCKS);
   const docKeyRef = useRef(docKey);
   if (docKeyRef.current !== docKey) {
     docKeyRef.current = docKey;
     setRenderedContent(content);
+    setVisibleBlockCount(PREVIEW_INITIAL_BLOCKS);
   }
   useEffect(() => {
     if (content === renderedContent) return;
@@ -1068,8 +1239,87 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   }, [content, renderedContent]);
 
   /* 页签/多语言块：文档含 `<!-- lang|tab:标签 -->` 标记时解析为块序列，
-     每个页签组在文档原位渲染切换标签、独立切换（去 sticky，跟随内容位置） */
-  const langBlocks = useMemo(() => parseLangBlocks(renderedContent), [renderedContent]);
+     每个页签组在文档原位渲染切换标签、独立切换（去 sticky，跟随内容位置）。
+     超大文档（万字级段落）改走分块懒加载：先按标题切块，滚动到哪渲染到哪，
+     避免整篇 remark/rehype 解析 + 一次性建 30 万节点 DOM 把主线程锁死 */
+  const chunkedPreview = renderedContent.length > LARGE_PREVIEW_CHARS;
+  const langBlocks = useMemo(
+    () => (chunkedPreview ? null : parseLangBlocks(renderedContent)),
+    [chunkedPreview, renderedContent],
+  );
+  const chunkBlocks = useMemo(
+    () => (chunkedPreview ? buildLargePreviewBlocks(renderedContent) : null),
+    [chunkedPreview, renderedContent],
+  );
+  const renderBlocks = chunkBlocks ?? langBlocks;
+  const totalBlocks = renderBlocks?.length ?? 0;
+  const shownBlockCount = chunkedPreview ? Math.min(visibleBlockCount, totalBlocks) : totalBlocks;
+  const docHasRawHtml = useMemo(() => hasRawHtml(renderedContent), [renderedContent]);
+
+  /* 大纲跳转/分块观察器跨闭包读取的最新值 */
+  const renderBlocksRef = useRef(renderBlocks);
+  renderBlocksRef.current = renderBlocks;
+  const chunkedRef = useRef(chunkedPreview);
+  chunkedRef.current = chunkedPreview;
+  const shownBlockCountRef = useRef(shownBlockCount);
+  shownBlockCountRef.current = shownBlockCount;
+  const visibleBlockCountRef = useRef(visibleBlockCount);
+  visibleBlockCountRef.current = visibleBlockCount;
+  const totalBlocksRef = useRef(totalBlocks);
+  totalBlocksRef.current = totalBlocks;
+  const pendingOutlineScrollRef = useRef<number | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+
+  /* 滚动接近底部时追加渲染下一批块；IntersectionObserver 不可用则一次性全渲染 */
+  useEffect(() => {
+    if (!chunkedPreview || shownBlockCount >= totalBlocks) return;
+    const el = loadMoreRef.current;
+    const root = contentRef.current;
+    if (!el || !root) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisibleBlockCount(totalBlocks);
+      return;
+    }
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) {
+        setVisibleBlockCount(v => Math.min(v + PREVIEW_LOAD_STEP, totalBlocks));
+      }
+    }, { root, rootMargin: '1200px 0px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [chunkedPreview, shownBlockCount, totalBlocks]);
+
+  /* 预览查找必须搜全文：打开查找时把剩余块分批补渲染（每次让出一帧），
+     加载完成前查找栏只显示进度、不做局部扫描，避免「后面的章节搜不到」 */
+  useEffect(() => {
+    if (!findOpen || !chunkedPreview) return;
+    let cancelled = false;
+    let timer = 0;
+    const pump = () => {
+      if (cancelled) return;
+      const total = totalBlocksRef.current;
+      const cur = visibleBlockCountRef.current;
+      if (cur >= total) return;
+      setVisibleBlockCount(Math.min(cur + PREVIEW_FIND_LOAD_STEP, total));
+      timer = window.setTimeout(pump, 24);
+    };
+    timer = window.setTimeout(pump, 0);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [findOpen, chunkedPreview, totalBlocks]);
+
+  /* 大纲跳到了尚未渲染的远块：先补渲染，再滚动 */
+  useEffect(() => {
+    const pending = pendingOutlineScrollRef.current;
+    if (pending == null) return;
+    pendingOutlineScrollRef.current = null;
+    const root = contentRef.current;
+    if (!root) return;
+    requestAnimationFrame(() => {
+      const blocks = Array.from(root.querySelectorAll<HTMLElement>('[data-md-start]'));
+      const target = blocks.find(el => Number(el.dataset.mdStart) >= pending) ?? blocks[blocks.length - 1];
+      if (target) root.scrollTo({ top: Math.max(0, target.offsetTop - 12), behavior: 'smooth' });
+    });
+  }, [shownBlockCount]);
   const [tabSelections, setTabSelections] = useState<Record<number, number>>({});
   const selectTab = useCallback((blockIdx: number, sectionIdx: number) => {
     setTabSelections(prev => ({ ...prev, [blockIdx]: sectionIdx }));
@@ -1181,17 +1431,87 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     });
   }, [withScrollRestore]);
 
+  /* ---- 页签组可视化编辑：标签与正文用弹窗填写，写回落在标记区间的精确位置 ---- */
+  const tabCount = (renderBlocks ?? []).reduce((n, b) => n + (b.type === 'tabs' ? b.sections.length : 0), 0);
+
+  const openNewTabGroup = useCallback((insertAt: number) => {
+    if (!onChangeRef.current) return;
+    setTabDialog({
+      mode: 'newGroup',
+      insertAt,
+      label: t('md.tabFallbackLabel', { n: tabCount + 1 }),
+      body: '',
+    });
+  }, [t, tabCount]);
+
+  const openAddTab = useCallback((groupIdx: number) => {
+    const g = renderBlocks?.[groupIdx];
+    if (!onChangeRef.current || !g || g.type !== 'tabs') return;
+    setTabDialog({
+      mode: 'add',
+      groupIdx,
+      label: t('md.tabFallbackLabel', { n: g.sections.length + 1 }),
+      body: '',
+    });
+  }, [renderBlocks, t]);
+
+  const openEditTab = useCallback((groupIdx: number, sectionIdx: number) => {
+    const g = renderBlocks?.[groupIdx];
+    if (!onChangeRef.current || !g || g.type !== 'tabs') return;
+    const s = g.sections[sectionIdx];
+    if (!s) return;
+    setTabDialog({ mode: 'edit', groupIdx, sectionIdx, label: s.label, body: s.md });
+  }, [renderBlocks]);
+
+  const handleTabSave = useCallback((values: TabEditValues) => {
+    const dlg = tabDialog;
+    const apply = onChangeRef.current;
+    setTabDialog(null);
+    if (!dlg || !apply) return;
+    const cur = contentStrRef.current;
+    let next: string;
+    if (dlg.mode === 'newGroup') {
+      const label = sanitizeTabLabel(values.label, t('md.tabFallbackLabel', { n: tabCount + 1 }));
+      next = insertBlockAt(cur, Math.min(dlg.insertAt, cur.length), makeTabGroup(label, values.body));
+    } else {
+      const g = renderBlocks?.[dlg.groupIdx];
+      if (!g || g.type !== 'tabs') return;
+      if (dlg.mode === 'add') {
+        const label = sanitizeTabLabel(values.label, t('md.tabFallbackLabel', { n: g.sections.length + 1 }));
+        next = insertTabSection(cur, g, label, values.body);
+        selectTab(dlg.groupIdx, g.sections.length);
+      } else {
+        const s = g.sections[dlg.sectionIdx];
+        if (!s) return;
+        const label = sanitizeTabLabel(values.label, s.label || t('md.tabFallbackLabel', { n: dlg.sectionIdx + 1 }));
+        next = updateTabSection(cur, s, label, values.body);
+      }
+    }
+    withScrollRestore(() => apply(next));
+  }, [tabDialog, renderBlocks, tabCount, selectTab, t, withScrollRestore]);
+
+  /* 删除当前页签；最后一个页签删除时解散组，正文保留为普通内容 */
+  const handleTabDelete = useCallback(() => {
+    const del = tabDelete;
+    setTabDelete(null);
+    const apply = onChangeRef.current;
+    if (!del || !apply) return;
+    const g = renderBlocks?.[del.groupIdx];
+    if (!g || g.type !== 'tabs') return;
+    withScrollRestore(() => apply(deleteTabSection(contentStrRef.current, g, del.sectionIdx)));
+  }, [tabDelete, renderBlocks, withScrollRestore]);
+
   /* 页签文档的渲染块：md 块与当前选中页签面板各自携带其全文起始偏移（base）。
      注意不得在此改写 md 字符串（如本地图片 URL 重写）——data-md 偏移基于这里的
      字符串计算，长度一变就与 content 原文错位，右键格式化会把标记插到错误位置 */
   const processedBlocks = useMemo(() => {
-    if (!langBlocks) return null;
-    return langBlocks.map((b, i) => {
+    if (!renderBlocks) return null;
+    return renderBlocks.map((b, i) => {
       if (b.type === 'md') return { md: b.md, base: b.start };
       const sel = Math.min(tabSelections[i] ?? 0, b.sections.length - 1);
       return { md: b.sections[sel].md, base: b.sections[sel].start };
     });
-  }, [langBlocks, tabSelections]);
+  }, [renderBlocks, tabSelections]);
 
   /* ---- 表格行/列尺寸：只由表格源码内容决定（每次全量重算，不依赖 DOM 上的
      历史内联样式——React 复用表格 DOM 时历史状态会让同源表格渲染不一致）。
@@ -1258,9 +1578,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         cs.forEach(c => { c.style.minWidth = `${w}px`; });
       });
     });
-    /* content 必须入依赖：普通文档（无页签标记）下 processedBlocks/langBlocks
+    /* content 必须入依赖：普通文档（无页签标记）下 processedBlocks/renderBlocks
        恒为 null，仅靠它们内容变化后不会重新测量（加行/列、输入后尺寸不更新） */
-  }, [content, processedBlocks, langBlocks, tabSelections, isDarkMode]);
+  }, [content, processedBlocks, renderBlocks, tabSelections, isDarkMode]);
 
   /* 选区快照与某块 DOM 的交集文本：跨块选区按块拆分后映射回源码用 */
   const selectedTextWithin = (el: HTMLElement, range: Range | null): string => {
@@ -1726,6 +2046,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         contentRef.current = el;
         onScroller?.(el);
       }}
+      /* 全局链接守卫据此识别「预览正文」并用当前文档目录解析本地 .md 链接 */
+      data-md-preview
+      data-md-base-dir={baseDir ?? ''}
       className="relative h-full overflow-auto heid-scroll"
       onMouseMove={handleMouseMove}
       {...bindMenu({
@@ -1737,11 +2060,12 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       <div className="mx-auto p-6 text-left max-w-[1280px]">
         <div className={proseClassName}>
           <MarkdownStyles isDarkMode={isDarkMode} />
-          {processedBlocks && langBlocks ? (
-            processedBlocks.map((processed, i) => {
-              const block = langBlocks[i];
+          {processedBlocks && renderBlocks ? (
+            <>
+            {processedBlocks.slice(0, shownBlockCount).map((processed, i) => {
+              const block = renderBlocks[i];
               const content = (
-                <MdBlock md={processed.md} components={mdComponents} />
+                <MdBlock md={processed.md} components={mdComponents} richHtml={hasRawHtml(processed.md)} />
               );
               if (block.type !== 'tabs') {
                 return (
@@ -1759,7 +2083,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                         key={s.label + j}
                         onClick={(e) => { e.stopPropagation(); selectTab(i, j); }}
                         className={cn(
-                          'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                          'max-w-[240px] truncate px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
                           j === selIdx
                             ? 'border-transparent bg-[#96A5EB] text-white'
                             : isDarkMode
@@ -1770,15 +2094,77 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                         {s.label}
                       </button>
                     ))}
+                    {onChange && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); openAddTab(i); }}
+                          title={t('md.tabAdd')}
+                          aria-label={t('md.tabAdd')}
+                          className={cn(
+                            'flex items-center justify-center rounded-full border border-dashed transition-colors',
+                            IS_TOUCH_PRIMARY ? 'h-12 w-12' : 'h-6 w-6',
+                            isDarkMode
+                              ? 'border-zinc-600 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                              : 'border-zinc-300 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700',
+                          )}
+                        >
+                          <Plus size={13} />
+                        </button>
+                        <span className="flex items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); openEditTab(i, selIdx); }}
+                            title={t('md.tabEdit')}
+                            aria-label={t('md.tabEdit')}
+                            className={tabIconBtnCls}
+                          >
+                            <Pencil size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const s = block.sections[selIdx];
+                              if (s) setTabDelete({ groupIdx: i, sectionIdx: selIdx, label: s.label, isLast: block.sections.length === 1 });
+                            }}
+                            title={t('md.tabDelete')}
+                            aria-label={t('md.tabDelete')}
+                            className={cn(tabIconBtnCls, 'hover:text-red-500')}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </span>
+                      </>
+                    )}
                   </div>
                   <BlockBaseContext.Provider value={processed.base}>
-                    {content}
+                    {onChange && !processed.md.trim() ? (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); openEditTab(i, selIdx); }}
+                        className={cn(
+                          'mb-4 w-full rounded-lg border border-dashed px-4 py-6 text-center text-xs transition-colors',
+                          isDarkMode
+                            ? 'border-zinc-700 text-zinc-500 hover:border-zinc-500 hover:text-zinc-300'
+                            : 'border-zinc-300 text-zinc-400 hover:border-zinc-400 hover:text-zinc-600',
+                        )}
+                      >
+                        {t('md.tabEmptyHint')}
+                      </button>
+                    ) : content}
                   </BlockBaseContext.Provider>
                 </div>
               );
-            })
+            })}
+            {chunkedPreview && shownBlockCount < totalBlocks && (
+              <div ref={loadMoreRef} className={cn('py-6 text-center text-[11px]', isDarkMode ? 'text-zinc-600' : 'text-zinc-400')}>
+                {t('md.loadMore')}
+              </div>
+            )}
+            </>
           ) : (
-            <MdBlock md={renderedContent} components={mdComponents} />
+            <MdBlock md={renderedContent} components={mdComponents} richHtml={docHasRawHtml} />
           )}
         </div>
       </div>
@@ -1895,6 +2281,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           onTable={handleInsertTable}
           onImage={() => { setImageModal(buildSourceSnippet(content, blankMenu.insertAt)); setBlankMenu(null); }}
           onDiagram={handleInsertDiagram}
+          onTabs={() => { const at = blankMenu.insertAt; setBlankMenu(null); openNewTabGroup(at); }}
           onLocalize={onLocalizeImages ? () => { setBlankMenu(null); onLocalizeImages(); } : undefined}
           canLocalize={canLocalizeImages}
           onClose={closeBlankMenu}
@@ -1907,6 +2294,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         <PreviewFindBar
           getContainer={() => contentRef.current}
           content={content}
+          loading={chunkedPreview && shownBlockCount < totalBlocks}
+          loadPercent={totalBlocks > 0 ? Math.round((shownBlockCount / totalBlocks) * 100) : 0}
           isDarkMode={isDarkMode}
           getPointer={getPointer}
           onClose={() => onFindClose?.()}
@@ -1920,6 +2309,37 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
           snippet={imageModal}
           onConfirm={handleInsertImages}
           onClose={() => setImageModal(null)}
+        />
+      )}
+
+      {/* 页签新建/编辑弹窗 */}
+      {tabDialog && onChange && (
+        <TabEditModal
+          title={
+            tabDialog.mode === 'newGroup' ? t('md.tabNewGroupTitle')
+              : tabDialog.mode === 'add' ? t('md.tabAddTitle')
+                : t('md.tabEditTitle')
+          }
+          initialLabel={tabDialog.label}
+          initialBody={tabDialog.body}
+          isDarkMode={isDarkMode}
+          onSave={handleTabSave}
+          onClose={() => setTabDialog(null)}
+        />
+      )}
+
+      {/* 页签删除确认 */}
+      {tabDelete && (
+        <ConfirmDialog
+          title={t('md.tabDeleteTitle')}
+          message={tabDelete.isLast
+            ? t('md.tabDeleteLastMsg')
+            : t('md.tabDeleteMsg', { label: tabDelete.label })}
+          isDarkMode={isDarkMode}
+          confirmText={t('md.tabDelete')}
+          danger
+          onConfirm={handleTabDelete}
+          onCancel={() => setTabDelete(null)}
         />
       )}
 
@@ -2026,6 +2446,10 @@ const MarkdownStyles = React.memo<{ isDarkMode: boolean }>(({ isDarkMode }) => {
         border-radius: 0.25rem;
         font-weight: normal;
       }
+      /* 代码块的 pre 被组件拆掉后，prose 会把块级 code 当行内代码加反引号装饰 */
+      .prose .md-code-block code { padding: 0; }
+      .prose .md-code-block code::before,
+      .prose .md-code-block code::after { content: none; }
       /* 扩展语法：==高亮== 与块级公式（KaTeX 输出沿用文字色，超宽横向滚动） */
       .prose mark {
         background-color: ${isDarkMode ? 'rgba(250, 204, 21, 0.30)' : '#fef08a'};

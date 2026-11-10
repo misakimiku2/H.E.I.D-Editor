@@ -124,7 +124,7 @@ describe('parseLangBlocks', () => {
     expect(startsRoundTrip(md, blocks)).toBe(true);
   });
 
-  it('无标记返回 null；单区块组按页签渲染（转换首个选区后有可见反馈），空区块组丢弃', () => {
+  it('无标记返回 null；单区块组按页签渲染（新建的空页签也要可见可编辑）', () => {
     expect(parseLangBlocks('普通文档')).toBeNull();
     expect(parseLangBlocks('只有结束标记 <!-- /tab -->')).toBeNull();
     const md = '<!-- lang:中文 -->\n只有一个标记';
@@ -133,6 +133,24 @@ describe('parseLangBlocks', () => {
       { type: 'tabs', sections: [{ label: '中文', md: '只有一个标记' }] },
     ]);
     expect(startsRoundTrip(md, blocks)).toBe(true);
-    expect(parseLangBlocks('<!-- tab:空 -->\n\n<!-- /tab -->')).toEqual([]);
+    const empty = parseLangBlocks('<!-- tab:空 -->\n\n<!-- /tab -->')!;
+    expect(plain(empty)).toEqual([{ type: 'tabs', sections: [{ label: '空', md: '' }] }]);
+  });
+
+  it('区块携带可精确编辑的标记/正文区间', () => {
+    const md = '前言\n\n<!-- tab:甲 -->\n\n甲内容\n\n<!-- /tab -->';
+    const block = parseLangBlocks(md)![1];
+    if (block.type !== 'tabs') throw new Error('expected tabs');
+    const s = block.sections[0];
+    expect(md.slice(s.markerStart, s.markerEnd)).toBe('<!-- tab:甲 -->');
+    expect(md.slice(s.bodyStart, s.bodyEnd).trim()).toBe('甲内容');
+    expect(md.slice(block.closeStart, block.closeEnd)).toBe('<!-- /tab -->');
+  });
+
+  it('未闭合的页签组 close 区间为 -1', () => {
+    const block = parseLangBlocks('<!-- tab:甲 -->\n\n甲内容')![0];
+    if (block.type !== 'tabs') throw new Error('expected tabs');
+    expect(block.closeStart).toBe(-1);
+    expect(block.closeEnd).toBe(-1);
   });
 });

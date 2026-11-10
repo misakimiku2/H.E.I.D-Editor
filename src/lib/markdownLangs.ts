@@ -12,11 +12,23 @@ export interface LangSection {
   md: string;
   /** 区块 md 在原文中的起始偏移（预览右键把选区映射回源码用） */
   start: number;
+  /** 开标记 <!-- tab:... --> 的源码区间（改名/删除用） */
+  markerStart: number;
+  markerEnd: number;
+  /** 正文完整源码区间（不含标记，含首尾空白；改内容/删除用） */
+  bodyStart: number;
+  bodyEnd: number;
 }
 
 export type LangBlock =
   | { type: 'md'; md: string; start: number }
-  | { type: 'tabs'; sections: LangSection[] };
+  | {
+    type: 'tabs';
+    sections: LangSection[];
+    /** 组尾 <!-- /tab --> 的区间；未闭合组为 -1 */
+    closeStart: number;
+    closeEnd: number;
+  };
 
 const LANG_MARKER = /<!--\s*(?:lang|tab)\s*:\s*(.+?)\s*-->/gi;
 const LANG_END_MARKER = /<!--\s*\/\s*(?:lang|tab)\s*-->/gi;
@@ -57,16 +69,26 @@ export function parseLangBlocks(content: string): LangBlock[] | null {
   let group: LangSection[] | null = null;
   let label = '';
   let segStart = 0;
+  let markerStart = 0;
+  let markerEnd = 0;
   const flushSection = (to: number) => {
     if (!group) return;
     const raw = content.slice(segStart, to);
     const md = raw.trim();
-    group.push({ label, md, start: segStart + (raw.length - raw.trimStart().length) });
+    group.push({
+      label,
+      md,
+      start: segStart + (raw.length - raw.trimStart().length),
+      markerStart,
+      markerEnd,
+      bodyStart: segStart,
+      bodyEnd: to,
+    });
   };
-  const closeGroup = (to: number) => {
-    flushSection(to);
-    /* 单区块组也按页签渲染（预览转页签的中间态要有可见反馈）；空内容区块丢弃 */
-    if (group && (group.length >= 2 || group[0].md)) blocks.push({ type: 'tabs', sections: group });
+  const closeGroup = (bodyEnd: number, closeStart: number, closeEnd: number) => {
+    flushSection(bodyEnd);
+    /* 单区块组也按页签渲染（编辑器里新建的空页签要可见、可继续编辑） */
+    if (group && group.length > 0) blocks.push({ type: 'tabs', sections: group, closeStart, closeEnd });
     group = null;
   };
 
@@ -80,12 +102,14 @@ export function parseLangBlocks(content: string): LangBlock[] | null {
       }
       label = ev.label;
       segStart = ev.end;
+      markerStart = ev.start;
+      markerEnd = ev.end;
     } else if (group) {
-      closeGroup(ev.start);
+      closeGroup(ev.start, ev.start, ev.end);
       cursor = segStart = ev.end;
     }
   }
-  if (group) closeGroup(content.length);
+  if (group) closeGroup(content.length, -1, -1);
   else pushMd(content.length);
   return blocks;
 }
