@@ -82,6 +82,9 @@
     "allow-fs-reveal",
     "allow-search-in-dir",
     "allow-search-in-dir-cancel",
-    "allow-search-in-dir-progress"
+    "allow-search-in-dir-progress",
+    "allow-md-index-build",
+    "allow-md-search",
+    "allow-md-index-release"
   ]
 }

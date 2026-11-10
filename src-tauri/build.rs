@@ -28,6 +28,10 @@ fn main() {
             "search_in_dir",
             "search_in_dir_cancel",
             "search_in_dir_progress",
+            // 大文档 Markdown 检索索引（Phase 1）
+            "md_index_build",
+            "md_search",
+            "md_index_release",
             "create_document_window",
             "take_window_bootstrap",
             "begin_tab_drag",

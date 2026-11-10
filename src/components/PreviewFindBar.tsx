@@ -12,6 +12,17 @@ import { findMatches, type MatchRange, type SearchOptions } from '../lib/searchC
 import type { PointerPos } from '../hooks/useLastPointer';
 import { useT } from '../lib/i18nContext';
 
+/** 外部搜索引擎（大文档走 Rust 全文检索索引；不把整篇渲染进 DOM） */
+export interface PreviewFindExternal {
+  /** building：索引构建中；ready：可搜索；failed：不可用，查找栏回退 DOM 扫描 */
+  status: 'building' | 'ready' | 'failed';
+  /** 查询/选项变化后调用；null 表示被更新的请求取代或引擎不可用；
+      正则编译错误经 error 回传，查找栏显示「正则无效」 */
+  search: (opts: SearchOptions) => Promise<{ total: number; capped: boolean; error?: string | null } | null>;
+  /** 导航到下/上一条；返回当前序号（0-based）与计数 */
+  step: (dir: 1 | -1) => Promise<{ current: number; total: number; capped: boolean } | null>;
+}
+
 export interface PreviewFindBarProps {
   /** 取预览渲染容器（搜索范围 = 容器内渲染后的文本） */
   getContainer: () => HTMLElement | null;
@@ -23,6 +34,8 @@ export interface PreviewFindBarProps {
   isDarkMode: boolean;
   /** 弹出定位：打开瞬间的指针位置（不跟随） */
   getPointer?: () => PointerPos;
+  /** 外部搜索引擎；提供且可用时不再走 DOM 扫描 */
+  external?: PreviewFindExternal;
   onClose: () => void;
 }
 
@@ -114,7 +127,7 @@ function rangeForMatch(spans: TextSpan[], m: MatchRange): Range | null {
  * 安卓两端为贴窗口底缘的停靠条（指针定位在触屏上不可靠，见 FindReplaceBar 的同款注释）；
  * 窄屏（手机）再把控件按两行重排，平板沿用桌面的一行布局。桌面仍是指针定位浮层。
  */
-export function PreviewFindBar({ getContainer, content, loading = false, loadPercent = 0, isDarkMode, getPointer, onClose }: PreviewFindBarProps) {
+export function PreviewFindBar({ getContainer, content, loading = false, loadPercent = 0, isDarkMode, getPointer, external, onClose }: PreviewFindBarProps) {
   const t = useT();
   /* 停靠（贴窗口底缘、整幅宽度、按 --heid-kb 让位键盘）与两行重排分开看，定位见 index.css 的 .heid-find-dock */
   const narrow = useMediaQuery(NARROW_QUERY);
@@ -126,11 +139,21 @@ export function PreviewFindBar({ getContainer, content, loading = false, loadPer
   const [wholeWord, setWholeWord] = useState(false);
   const [count, setCount] = useState({ total: 0, capped: false });
   const [current, setCurrent] = useState(-1);
+  /* 外部引擎（Rust 索引）的计数与当前项；与 DOM 扫描结果分开存 */
+  const [extCount, setExtCount] = useState({ total: 0, capped: false });
+  const [extCurrent, setExtCurrent] = useState(-1);
+  const [extError, setExtError] = useState<string | null>(null);
   const optionsRef = useRef<SearchOptions>({ query: '', caseSensitive: false, regexp: false, wholeWord: false });
   optionsRef.current = { query, caseSensitive, regexp, wholeWord };
   const rangesRef = useRef<Range[]>([]);
   const spansRef = useRef<TextSpan[]>([]);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const externalRef = useRef(external);
+  externalRef.current = external;
+  const externalActive = !!external && external.status !== 'failed';
+  const extStatus = external?.status;
+  const extSearch = external?.search;
+  const extSearchSeq = useRef(0);
 
   /* 弹出定位：与编辑器查找栏一致（指针位置，不跟随） */
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -197,8 +220,15 @@ export function PreviewFindBar({ getContainer, content, loading = false, loadPer
   }, [applyHighlights, clearHighlights, getContainer]);
 
   /* 查询 / 内容 / 选项变化 → 重扫（effect 在 DOM 提交后运行，渲染树已是最新）。
-     超大文档全文尚未加载完时不做局部扫描：只搜已渲染部分会漏结果，等加载完再一次性扫 */
+     超大文档全文尚未加载完时不做局部扫描：只搜已渲染部分会漏结果，等加载完再一次性扫。
+     外部引擎可用时不碰 DOM 扫描，由下面的外部搜索 effect 驱动计数 */
   useEffect(() => {
+    if (externalActive) {
+      rangesRef.current = [];
+      spansRef.current = [];
+      clearHighlights();
+      return;
+    }
     if (loading) {
       rangesRef.current = [];
       spansRef.current = [];
@@ -208,7 +238,36 @@ export function PreviewFindBar({ getContainer, content, loading = false, loadPer
       return;
     }
     rescan();
-  }, [rescan, clearHighlights, query, caseSensitive, regexp, wholeWord, content, loading]);
+  }, [rescan, clearHighlights, query, caseSensitive, regexp, wholeWord, content, loading, externalActive]);
+
+  /* 外部搜索：索引就绪后按查询/选项重新检索；构建中或空查询显示 0 并禁用导航 */
+  useEffect(() => {
+    if (!externalActive || extStatus !== 'ready') {
+      setExtCount({ total: 0, capped: false });
+      setExtCurrent(-1);
+      setExtError(null);
+      return;
+    }
+    if (!query) {
+      setExtCount({ total: 0, capped: false });
+      setExtCurrent(-1);
+      setExtError(null);
+      return;
+    }
+    const seq = ++extSearchSeq.current;
+    let cancelled = false;
+    setExtCount({ total: 0, capped: false });
+    setExtCurrent(-1);
+    setExtError(null);
+    extSearch?.({ query, caseSensitive, regexp, wholeWord })
+      .then((result) => {
+        if (cancelled || seq !== extSearchSeq.current || !result) return;
+        setExtCount({ total: result.total, capped: result.capped });
+        setExtError(result.error ?? null);
+      })
+      .catch(() => { /* 单次检索失败保持 0，下一次输入重试 */ });
+    return () => { cancelled = true; };
+  }, [externalActive, extStatus, extSearch, query, caseSensitive, regexp, wholeWord]);
 
   /* 卸载清理高亮 */
   useEffect(() => clearHighlights, [clearHighlights]);
@@ -230,13 +289,25 @@ export function PreviewFindBar({ getContainer, content, loading = false, loadPer
   }, [applyHighlights]);
 
   const step = useCallback((dir: 1 | -1) => {
+    if (externalActive) {
+      const ext = externalRef.current;
+      if (!ext || ext.status !== 'ready') return;
+      void ext.step(dir)
+        .then((result) => {
+          if (!result) return;
+          setExtCount({ total: result.total, capped: result.capped });
+          setExtCurrent(result.current);
+        })
+        .catch(() => { /* 导航失败保持原状 */ });
+      return;
+    }
     const total = rangesRef.current.length;
     if (total === 0) return;
     const next = current < 0
       ? (dir > 0 ? 0 : total - 1)
       : (current + dir + total) % total;
     goTo(next);
-  }, [current, goTo]);
+  }, [current, goTo, externalActive]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -271,11 +342,23 @@ export function PreviewFindBar({ getContainer, content, loading = false, loadPer
       : 'border-zinc-300 bg-white text-zinc-800 focus:border-blue-500 placeholder:text-zinc-400'
   );
 
-  const countLabel = loading
-    ? `${loadPercent}%`
-    : count.total === 0
-      ? (query ? t('find.noResults') : '')
-      : current < 0 ? `${count.total}${count.capped ? '+' : ''}` : `${current + 1}/${count.total}${count.capped ? '+' : ''}`;
+  const activeCount = externalActive ? extCount : count;
+  const activeCurrent = externalActive ? extCurrent : current;
+  const buildingIndex = externalActive && extStatus === 'building';
+  const navDisabled = externalActive
+    ? extStatus !== 'ready' || activeCount.total === 0
+    : loading || activeCount.total === 0;
+  const countLabel = buildingIndex
+    ? t('find.indexing')
+    : (!externalActive && loading)
+      ? `${loadPercent}%`
+      : externalActive && extError
+        ? t('find.invalidRegex')
+        : activeCount.total === 0
+          ? (query ? t('find.noResults') : '')
+          : activeCurrent < 0
+            ? `${activeCount.total}${activeCount.capped ? '+' : ''}`
+            : `${activeCurrent + 1}/${activeCount.total}${activeCount.capped ? '+' : ''}`;
 
   /* 行容器：触屏相邻按钮之间留足 8dp，避免命中区互相偷走 */
   const row = cn('flex items-center', IS_TOUCH_PRIMARY ? 'gap-2' : 'gap-1.5');
@@ -296,10 +379,10 @@ export function PreviewFindBar({ getContainer, content, loading = false, loadPer
 
   const navButtons = (
     <>
-      <button onClick={() => step(-1)} disabled={loading || !count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
+      <button onClick={() => step(-1)} disabled={navDisabled} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.prevTip')} aria-label={t('find.prevMatch')}>
         <ArrowUp size={14} />
       </button>
-      <button onClick={() => step(1)} disabled={loading || !count.total} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.nextTip')} aria-label={t('find.nextMatch')}>
+      <button onClick={() => step(1)} disabled={navDisabled} className={cn(navBtn, 'disabled:opacity-40')} title={t('find.nextTip')} aria-label={t('find.nextMatch')}>
         <ArrowDown size={14} />
       </button>
       <button onClick={onClose} className={navBtn} title={t('find.closeTip')} aria-label={t('find.closeFind')}>
@@ -320,7 +403,7 @@ export function PreviewFindBar({ getContainer, content, loading = false, loadPer
       />
       {countInside && (
         <span
-          title={loading ? t('find.loadingAll') : undefined}
+          title={buildingIndex ? t('find.indexing') : (!externalActive && loading ? t('find.loadingAll') : undefined)}
           className={cn(
             'absolute right-2 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none tabular-nums',
             isDarkMode ? 'text-zinc-500' : 'text-zinc-400'

@@ -6,6 +6,8 @@ mod http;
 mod link;
 #[cfg(desktop)]
 mod large_file;
+/// 大文档 Markdown 检索索引：纯 Rust，桌面与安卓共用（正则可用的差异在模块内处理）
+mod md_index;
 mod render;
 #[cfg(desktop)]
 mod search;
@@ -205,6 +207,9 @@ pub fn run() {
             fsops::fs_copy,
             fsops::fs_delete,
             fsops::fs_reveal,
+            md_index::md_index_build,
+            md_index::md_search,
+            md_index::md_index_release,
             #[cfg(desktop)]
             take_launch_paths,
             #[cfg(desktop)]

@@ -25,7 +25,9 @@ import { loadLastMdOp, recordMdOp } from '../lib/mdRecentOps';
 import { writeClipboardText } from '../lib/fileOps';
 import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { MermaidEditModal } from './MermaidEditModal';
-import { PreviewFindBar } from './PreviewFindBar';
+import { PreviewFindBar, type PreviewFindExternal } from './PreviewFindBar';
+import { isTauri } from '../lib/fileIO';
+import { buildMdIndex, releaseMdIndex, searchMdIndex, type MdSearchMatch } from '../lib/mdSearchBridge';
 import type { PointerPos } from '../hooks/useLastPointer';
 import { useDragScroll } from '../hooks/useDragScroll';
 import { useT } from '../lib/i18nContext';
@@ -78,6 +80,57 @@ const PREVIEW_INITIAL_BLOCKS = 8;
 const PREVIEW_LOAD_STEP = 8;
 /** 查找时一次补渲染的块数：全文加载完才做扫描，结果必须覆盖未滚动到的部分 */
 const PREVIEW_FIND_LOAD_STEP = 32;
+
+/* 外部查找（Rust 索引）的当前匹配高亮：与 PreviewFindBar 共用 CSS Highlight 名 */
+const clearExternalFindHighlight = () => {
+  try {
+    (CSS as any)?.highlights?.delete?.('heid-find-current');
+  } catch {
+    /* 旧 WebView 没有 CSS Custom Highlight API */
+  }
+};
+
+/** 在目标块 DOM 内高亮当前命中（找不到或文本被截断时静默跳过） */
+function highlightExternalMatch(el: HTMLElement, match: MdSearchMatch) {
+  if (match.textTruncated || !match.text || match.text.includes('\n')) return;
+  if (typeof (globalThis as any).Highlight !== 'function') return;
+  if (typeof (CSS as any)?.highlights?.set !== 'function') return;
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+    acceptNode(node: Node) {
+      const parent = (node as Text).parentElement;
+      if (!parent || parent.closest('script, style')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes: Text[] = [];
+  let text = '';
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const t = n as Text;
+    nodes.push(t);
+    text += t.data;
+  }
+  const idx = text.indexOf(match.text);
+  if (idx < 0) return;
+  const locate = (pos: number) => {
+    let acc = 0;
+    for (const node of nodes) {
+      if (pos <= acc + node.data.length) return { node, offset: pos - acc };
+      acc += node.data.length;
+    }
+    return null;
+  };
+  const start = locate(idx);
+  const end = locate(idx + match.text.length);
+  if (!start || !end) return;
+  try {
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    (CSS as any).highlights.set('heid-find-current', new (globalThis as any).Highlight(range));
+  } catch {
+    /* 高亮失败不影响滚动定位 */
+  }
+}
 
 /* 单块渲染记忆化：md 源串与 components 都不变就跳过 ReactMarkdown 重建。
    react-markdown v10 的 Markdown 组件内部无任何缓存，每次渲染都完整重跑
@@ -1256,6 +1309,24 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const shownBlockCount = chunkedPreview ? Math.min(visibleBlockCount, totalBlocks) : totalBlocks;
   const docHasRawHtml = useMemo(() => hasRawHtml(renderedContent), [renderedContent]);
 
+  /* ---- 大文档查找：Rust 全文检索索引（Phase 1） ----
+     仅 Tauri 桌面端启用（安卓保持现有补载 + DOM 扫描，正则依赖留待评估，见计划 §4.5）。
+     索引常驻 Rust，前端只拿 indexId；内容变化/文档切换时释放旧索引重建 */
+  const rustFindEligible = chunkedPreview && isTauri && !IS_ANDROID_APP;
+  const [mdIndexState, setMdIndexState] = useState<{
+    id: number | null;
+    status: 'idle' | 'building' | 'ready' | 'failed';
+  }>({ id: null, status: 'idle' });
+  const mdIndexStateRef = useRef(mdIndexState);
+  mdIndexStateRef.current = mdIndexState;
+  const mdIndexContentRef = useRef<string | null>(null);
+  const mdBuildSeqRef = useRef(0);
+  const findMatchesRef = useRef<MdSearchMatch[]>([]);
+  const findTotalRef = useRef(0);
+  const findNavRef = useRef(-1);
+  const findSearchSeqRef = useRef(0);
+  const pendingFindScrollRef = useRef<{ match: MdSearchMatch; blockIdx: number } | null>(null);
+
   /* 大纲跳转/分块观察器跨闭包读取的最新值 */
   const renderBlocksRef = useRef(renderBlocks);
   renderBlocksRef.current = renderBlocks;
@@ -1269,6 +1340,176 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   totalBlocksRef.current = totalBlocks;
   const pendingOutlineScrollRef = useRef<number | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+
+  /* Rust 索引可用（未失败）时，查找不再补载全文；构建失败才回退 DOM 路径 */
+  const rustFindActive = rustFindEligible && mdIndexState.status !== 'failed';
+
+  /* 打开查找时为当前渲染内容后台建索引；同一份内容复用已有索引 */
+  useEffect(() => {
+    if (!findOpen || !rustFindEligible) return;
+    const current = mdIndexStateRef.current;
+    if ((current.status === 'ready' || current.status === 'building')
+      && mdIndexContentRef.current === renderedContent) {
+      return;
+    }
+    if (current.id != null) void releaseMdIndex(current.id);
+    mdIndexContentRef.current = renderedContent;
+    findMatchesRef.current = [];
+    findTotalRef.current = 0;
+    findNavRef.current = -1;
+    findSearchSeqRef.current += 1;
+    clearExternalFindHighlight();
+    setMdIndexState({ id: null, status: 'building' });
+    const seq = ++mdBuildSeqRef.current;
+    void buildMdIndex(renderedContent, `${docKey ?? ''}:${renderedContent.length}`).then((info) => {
+      if (seq !== mdBuildSeqRef.current) {
+        if (info) void releaseMdIndex(info.id);
+        return;
+      }
+      if (!info) {
+        mdIndexContentRef.current = null;
+        setMdIndexState({ id: null, status: 'failed' });
+        return;
+      }
+      setMdIndexState({ id: info.id, status: 'ready' });
+    });
+  }, [findOpen, rustFindEligible, renderedContent, docKey]);
+
+  /* 索引只在预览卸载时释放；关闭查找先保留，重开可直接命中 */
+  useEffect(() => () => {
+    mdBuildSeqRef.current += 1;
+    const id = mdIndexStateRef.current.id;
+    if (id != null) void releaseMdIndex(id);
+  }, []);
+
+  useEffect(() => {
+    if (!findOpen) clearExternalFindHighlight();
+  }, [findOpen]);
+
+  /* 导航到命中：源码偏移落在哪个块 → 必要时扩渲染 → 滚动并做块内高亮 */
+  const flushFindScroll = useCallback(() => {
+    const pending = pendingFindScrollRef.current;
+    if (!pending) return;
+    if (shownBlockCountRef.current <= pending.blockIdx) return;
+    pendingFindScrollRef.current = null;
+    requestAnimationFrame(() => {
+      const root = contentRef.current;
+      if (!root) return;
+      const tagged = Array.from(root.querySelectorAll<HTMLElement>('[data-md-start][data-md-end]'));
+      let target: HTMLElement | null = null;
+      let bestStart = -1;
+      for (const el of tagged) {
+        const start = Number(el.dataset.mdStart);
+        const end = Number(el.dataset.mdEnd);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+        if (start <= pending.match.sourceStart && pending.match.sourceStart <= end && start > bestStart) {
+          target = el;
+          bestStart = start;
+        }
+      }
+      if (!target) {
+        target = tagged.find(el => Number(el.dataset.mdStart) >= pending.match.sourceStart) ?? null;
+      }
+      if (!target) {
+        root.scrollTo({ top: 0 });
+        return;
+      }
+      if (typeof target.scrollIntoView === 'function') {
+        target.scrollIntoView({ block: 'center' });
+      } else {
+        root.scrollTo({ top: Math.max(0, target.offsetTop - 80), behavior: 'smooth' });
+      }
+      highlightExternalMatch(target, pending.match);
+    });
+  }, []);
+
+  const scrollToFindMatch = useCallback((match: MdSearchMatch) => {
+    const blocks = renderBlocksRef.current;
+    if (!blocks || blocks.length === 0) {
+      pendingFindScrollRef.current = { match, blockIdx: 0 };
+      flushFindScroll();
+      return;
+    }
+    const starts = blocks.map(b => (b.type === 'md' ? b.start : (b.sections[0]?.start ?? 0)));
+    let lo = 0;
+    let hi = starts.length - 1;
+    let found = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (starts[mid] <= match.sourceStart) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    pendingFindScrollRef.current = { match, blockIdx: found };
+    if (found >= shownBlockCountRef.current) {
+      setVisibleBlockCount(Math.min(
+        Math.max(found + 1, visibleBlockCountRef.current),
+        blocks.length,
+      ));
+      return;
+    }
+    flushFindScroll();
+  }, [flushFindScroll]);
+
+  useEffect(() => {
+    flushFindScroll();
+  }, [shownBlockCount, flushFindScroll]);
+
+  /* 外部搜索适配器：把 Rust 索引的计数/导航接进 PreviewFindBar */
+  const externalFind = useMemo<PreviewFindExternal | undefined>(() => {
+    if (!rustFindEligible) return undefined;
+    const status: PreviewFindExternal['status'] = mdIndexState.status === 'failed'
+      ? 'failed'
+      : mdIndexState.status === 'ready' ? 'ready' : 'building';
+    const indexId = mdIndexState.id;
+    return {
+      status,
+      search: async (opts) => {
+        if (status !== 'ready' || indexId == null) return null;
+        const seq = ++findSearchSeqRef.current;
+        const result = await searchMdIndex(indexId, {
+          query: opts.query,
+          caseSensitive: opts.caseSensitive,
+          regexp: opts.regexp,
+          wholeWord: opts.wholeWord,
+          maxResults: 5000,
+        });
+        if (seq !== findSearchSeqRef.current) return null;
+        findMatchesRef.current = result?.matches ?? [];
+        findTotalRef.current = result?.total ?? 0;
+        findNavRef.current = -1;
+        clearExternalFindHighlight();
+        if (!result) {
+          setMdIndexState(prev => (prev.id === indexId ? { id: null, status: 'failed' } : prev));
+          return null;
+        }
+        return {
+          total: result.matches.length,
+          capped: result.total > result.matches.length,
+          error: result.error,
+        };
+      },
+      step: async (dir) => {
+        const matches = findMatchesRef.current;
+        if (status !== 'ready' || matches.length === 0) return null;
+        const current = findNavRef.current;
+        const next = current < 0
+          ? (dir > 0 ? 0 : matches.length - 1)
+          : (current + dir + matches.length) % matches.length;
+        findNavRef.current = next;
+        clearExternalFindHighlight();
+        scrollToFindMatch(matches[next]);
+        return {
+          current: next,
+          total: matches.length,
+          capped: findTotalRef.current > matches.length,
+        };
+      },
+    };
+  }, [rustFindEligible, mdIndexState.status, mdIndexState.id, scrollToFindMatch]);
 
   /* 滚动接近底部时追加渲染下一批块；IntersectionObserver 不可用则一次性全渲染 */
   useEffect(() => {
@@ -1292,7 +1533,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   /* 预览查找必须搜全文：打开查找时把剩余块分批补渲染（每次让出一帧），
      加载完成前查找栏只显示进度、不做局部扫描，避免「后面的章节搜不到」 */
   useEffect(() => {
-    if (!findOpen || !chunkedPreview) return;
+    if (!findOpen || !chunkedPreview || rustFindActive) return;
     let cancelled = false;
     let timer = 0;
     const pump = () => {
@@ -1305,7 +1546,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     };
     timer = window.setTimeout(pump, 0);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [findOpen, chunkedPreview, totalBlocks]);
+  }, [findOpen, chunkedPreview, totalBlocks, rustFindActive]);
 
   /* 大纲跳到了尚未渲染的远块：先补渲染，再滚动 */
   useEffect(() => {
@@ -2294,10 +2535,11 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         <PreviewFindBar
           getContainer={() => contentRef.current}
           content={content}
-          loading={chunkedPreview && shownBlockCount < totalBlocks}
+          loading={!rustFindActive && chunkedPreview && shownBlockCount < totalBlocks}
           loadPercent={totalBlocks > 0 ? Math.round((shownBlockCount / totalBlocks) * 100) : 0}
           isDarkMode={isDarkMode}
           getPointer={getPointer}
+          external={externalFind}
           onClose={() => onFindClose?.()}
         />
       )}
