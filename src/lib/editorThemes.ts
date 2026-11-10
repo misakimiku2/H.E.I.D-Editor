@@ -101,6 +101,11 @@ function buildEditorTheme(p: ThemePalette): Extension {
     '.cm-focused .cm-selectionBackground': {
       background: `${p.selection} !important`,
     },
+    /* fixSelectionLayer 移除了 CM 给高亮层设的内联 z-index:-1，层就盖在文字上方；
+       与 .cm-cursorLayer 同样关掉指针事件，点击才能落到 .cm-content 上收起选区 */
+    '.cm-selectionLayer': {
+      pointerEvents: 'none',
+    },
     '.cm-gutters': {
       backgroundColor: p.background,
       color: p.gutterFg,

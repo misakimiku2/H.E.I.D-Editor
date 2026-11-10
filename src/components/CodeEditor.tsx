@@ -1668,6 +1668,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
            之下，行为与 CodeMirror 默认键位表一致 */
         { key: 'Enter', run: insertNewlineAndIndent, shift: insertNewlineAndIndent },
         { key: 'Mod-s', run: () => { onSaveRef.current?.(); return true; } },
+        /* Mod-a 必须显式绑定：无 defaultKeymap 时走浏览器原生全选，CM 读回 DOM 选区
+           附带 scrollIntoView 把视口钳回文档顶部，且读回的反向选区与 DOM 错位导致点击无法收起 */
+        { key: 'Mod-a', run: selectAll },
         { key: 'Mod-/', run: toggleComment },
         { key: 'Escape', run: () => {
           if (!findOpenRef.current) return false;
