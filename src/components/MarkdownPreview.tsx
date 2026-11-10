@@ -27,7 +27,7 @@ import { ImageInsertModal, type InsertImage } from './ImageInsertModal';
 import { MermaidEditModal } from './MermaidEditModal';
 import { PreviewFindBar, type PreviewFindExternal } from './PreviewFindBar';
 import { isTauri } from '../lib/fileIO';
-import { buildMdIndex, releaseMdIndex, searchMdIndex, type MdSearchMatch } from '../lib/mdSearchBridge';
+import { buildMdIndex, releaseMdIndex, renderMarkdownHtmlChunks, searchMdIndex, type MdSearchMatch } from '../lib/mdSearchBridge';
 import type { PointerPos } from '../hooks/useLastPointer';
 import { useDragScroll } from '../hooks/useDragScroll';
 import { useT } from '../lib/i18nContext';
@@ -80,6 +80,11 @@ const PREVIEW_INITIAL_BLOCKS = 8;
 const PREVIEW_LOAD_STEP = 8;
 /** 查找时一次补渲染的块数：全文加载完才做扫描，结果必须覆盖未滚动到的部分 */
 const PREVIEW_FIND_LOAD_STEP = 32;
+/** 极速预览每次向 Rust 请求的 HTML 块数 / 前端 HTML 缓存上限 */
+const FAST_HTML_BATCH = 8;
+const FAST_HTML_CACHE_MAX = 120;
+/** 极速预览跳转时目标块之前保留的上下文块数（避免跳文末时渲染整篇） */
+const FAST_WINDOW_BEFORE = 8;
 
 /* 外部查找（Rust 索引）的当前匹配高亮：与 PreviewFindBar 共用 CSS Highlight 名 */
 const clearExternalFindHighlight = () => {
@@ -90,11 +95,9 @@ const clearExternalFindHighlight = () => {
   }
 };
 
-/** 在目标块 DOM 内高亮当前命中（找不到或文本被截断时静默跳过） */
+/** 在目标块 DOM 内高亮当前命中，并把命中行滚到视口中心（找不到时静默跳过） */
 function highlightExternalMatch(el: HTMLElement, match: MdSearchMatch) {
   if (match.textTruncated || !match.text || match.text.includes('\n')) return;
-  if (typeof (globalThis as any).Highlight !== 'function') return;
-  if (typeof (CSS as any)?.highlights?.set !== 'function') return;
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
     acceptNode(node: Node) {
       const parent = (node as Text).parentElement;
@@ -122,10 +125,28 @@ function highlightExternalMatch(el: HTMLElement, match: MdSearchMatch) {
   const start = locate(idx);
   const end = locate(idx + match.text.length);
   if (!start || !end) return;
+  let range: Range | null = null;
   try {
-    const range = document.createRange();
+    range = document.createRange();
     range.setStart(start.node, start.offset);
     range.setEnd(end.node, end.offset);
+    /* 长块里命中可能在块尾：按命中 Range 的视口位置精确居中 */
+    const scroller = el.closest('[data-md-preview]') as HTMLElement | null;
+    if (scroller) {
+      const scrollerRect = scroller.getBoundingClientRect();
+      const rangeRect = range.getBoundingClientRect();
+      if (rangeRect.height > 0) {
+        scroller.scrollTop += rangeRect.top - scrollerRect.top
+          - scrollerRect.height / 2 + rangeRect.height / 2;
+      }
+    }
+  } catch {
+    /* Range 构造失败不影响高亮 */
+  }
+  if (!range) return;
+  if (typeof (globalThis as any).Highlight !== 'function') return;
+  if (typeof (CSS as any)?.highlights?.set !== 'function') return;
+  try {
     (CSS as any).highlights.set('heid-find-current', new (globalThis as any).Highlight(range));
   } catch {
     /* 高亮失败不影响滚动定位 */
@@ -1047,8 +1068,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         const starts = blocks.map(b => (b.type === 'md' ? b.start : (b.sections[0]?.start ?? 0)));
         const found = starts.findIndex(s => s >= offset);
         const idx = found < 0 ? blocks.length - 1 : found;
-        if (idx >= shownBlockCountRef.current) {
+        if (idx < previewWindowStartRef.current || idx >= shownBlockCountRef.current) {
           pendingOutlineScrollRef.current = offset;
+          setPreviewWindowStart(Math.max(0, idx - FAST_WINDOW_BEFORE));
           setVisibleBlockCount(Math.min(idx + 2, blocks.length));
           return;
         }
@@ -1279,11 +1301,17 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
      编辑类操作（表格/图片/插入）仍读写实时 content */
   const [renderedContent, setRenderedContent] = useState(content);
   const [visibleBlockCount, setVisibleBlockCount] = useState(PREVIEW_INITIAL_BLOCKS);
+  /* 极速预览开关（文档切换时重置；入口只在分块大文档 + Tauri 桌面端出现） */
+  const [fastPreview, setFastPreview] = useState(false);
+  /** 极速预览只渲染 [previewWindowStart, shownBlockCount) 的窗口：跳远块不铺满整篇 */
+  const [previewWindowStart, setPreviewWindowStart] = useState(0);
   const docKeyRef = useRef(docKey);
   if (docKeyRef.current !== docKey) {
     docKeyRef.current = docKey;
     setRenderedContent(content);
     setVisibleBlockCount(PREVIEW_INITIAL_BLOCKS);
+    setFastPreview(false);
+    setPreviewWindowStart(0);
   }
   useEffect(() => {
     if (content === renderedContent) return;
@@ -1325,7 +1353,61 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   const findTotalRef = useRef(0);
   const findNavRef = useRef(-1);
   const findSearchSeqRef = useRef(0);
-  const pendingFindScrollRef = useRef<{ match: MdSearchMatch; blockIdx: number } | null>(null);
+  const pendingFindScrollRef = useRef<{
+    match: MdSearchMatch;
+    blockIdx: number;
+    /** 极速预览：目标块 md（HTML 未就绪时等它） */
+    mdKey?: string;
+  } | null>(null);
+
+  /* ---- 极速预览（Phase 2）：Rust 解析 + 清洗的分块 HTML，只读 ----
+     只对分块大文档开放；小文档/浏览器/安卓继续走完整预览。 */
+  const [fastHtml, setFastHtml] = useState<Map<string, string>>(() => new Map());
+  const [fastRenderError, setFastRenderError] = useState(false);
+  const fastPreviewRef = useRef(fastPreview);
+  fastPreviewRef.current = fastPreview;
+  const fastHtmlRef = useRef(fastHtml);
+  fastHtmlRef.current = fastHtml;
+  const previewWindowStartRef = useRef(previewWindowStart);
+  previewWindowStartRef.current = previewWindowStart;
+  const fastRenderErrorRef = useRef(fastRenderError);
+  fastRenderErrorRef.current = fastRenderError;
+  /* 单飞 + 队列：滚动/查找到达导致依赖频繁变化时，不让每个变化取消在途渲染 */
+  const fastInFlightRef = useRef(false);
+  const fastMountedRef = useRef(true);
+  const fastMode = fastPreview && rustFindEligible;
+  const processedBlocksRef = useRef<Array<{ md: string; base: number }> | null>(null);
+
+  useEffect(() => {
+    if (!rustFindEligible) setFastPreview(false);
+  }, [rustFindEligible]);
+
+  useEffect(() => {
+    fastMountedRef.current = true;
+    return () => { fastMountedRef.current = false; };
+  }, []);
+
+  /* 内容/文档变化：作废已渲染 HTML（按 md 字符串缓存，旧内容不会误用） */
+  useEffect(() => {
+    setFastHtml(new Map());
+    setFastRenderError(false);
+    setPreviewWindowStart(0);
+  }, [renderedContent]);
+
+  /* 查找索引构建失败时退出极速预览：DOM 回退扫描需要完整 React 预览 */
+  useEffect(() => {
+    if (findOpen && fastMode && mdIndexState.status === 'failed') setFastPreview(false);
+  }, [findOpen, fastMode, mdIndexState.status]);
+
+  /* 进入极速预览时收起编辑类浮层（表格编辑/格式菜单/插入菜单） */
+  useEffect(() => {
+    if (!fastMode) return;
+    setTableAction(null);
+    setCellEdit(null);
+    setMenu(null);
+    setBlankMenu(null);
+    setSelBar(null);
+  }, [fastMode]);
 
   /* 大纲跳转/分块观察器跨闭包读取的最新值 */
   const renderBlocksRef = useRef(renderBlocks);
@@ -1391,6 +1473,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     const pending = pendingFindScrollRef.current;
     if (!pending) return;
     if (shownBlockCountRef.current <= pending.blockIdx) return;
+    /* 极速预览：目标块 HTML 还没回来时先等，等到了 effect 会再调一次 */
+    if (fastPreviewRef.current && pending.mdKey && !fastHtmlRef.current.has(pending.mdKey)) return;
     pendingFindScrollRef.current = null;
     requestAnimationFrame(() => {
       const root = contentRef.current;
@@ -1443,12 +1527,15 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         hi = mid - 1;
       }
     }
-    pendingFindScrollRef.current = { match, blockIdx: found };
-    if (found >= shownBlockCountRef.current) {
-      setVisibleBlockCount(Math.min(
-        Math.max(found + 1, visibleBlockCountRef.current),
-        blocks.length,
-      ));
+    pendingFindScrollRef.current = {
+      match,
+      blockIdx: found,
+      mdKey: processedBlocksRef.current?.[found]?.md,
+    };
+    /* 目标块不在当前窗口/已渲染范围：只把目标附近渲染进窗口，避免跳文末时铺满整篇 */
+    if (found < previewWindowStartRef.current || found >= shownBlockCountRef.current) {
+      setPreviewWindowStart(Math.max(0, found - FAST_WINDOW_BEFORE));
+      setVisibleBlockCount(Math.min(found + 1, blocks.length));
       return;
     }
     flushFindScroll();
@@ -1456,7 +1543,12 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
 
   useEffect(() => {
     flushFindScroll();
-  }, [shownBlockCount, flushFindScroll]);
+  }, [shownBlockCount, previewWindowStart, flushFindScroll]);
+
+  /* 极速预览：目标块 HTML 到达后，补一次滚动/高亮 */
+  useEffect(() => {
+    if (fastMode) flushFindScroll();
+  }, [fastHtml, fastMode, flushFindScroll]);
 
   /* 外部搜索适配器：把 Rust 索引的计数/导航接进 PreviewFindBar */
   const externalFind = useMemo<PreviewFindExternal | undefined>(() => {
@@ -1528,7 +1620,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     }, { root, rootMargin: '1200px 0px' });
     io.observe(el);
     return () => io.disconnect();
-  }, [chunkedPreview, shownBlockCount, totalBlocks]);
+  }, [chunkedPreview, shownBlockCount, totalBlocks, fastMode]);
 
   /* 预览查找必须搜全文：打开查找时把剩余块分批补渲染（每次让出一帧），
      加载完成前查找栏只显示进度、不做局部扫描，避免「后面的章节搜不到」 */
@@ -1560,7 +1652,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       const target = blocks.find(el => Number(el.dataset.mdStart) >= pending) ?? blocks[blocks.length - 1];
       if (target) root.scrollTo({ top: Math.max(0, target.offsetTop - 12), behavior: 'smooth' });
     });
-  }, [shownBlockCount]);
+  }, [shownBlockCount, previewWindowStart]);
   const [tabSelections, setTabSelections] = useState<Record<number, number>>({});
   const selectTab = useCallback((blockIdx: number, sectionIdx: number) => {
     setTabSelections(prev => ({ ...prev, [blockIdx]: sectionIdx }));
@@ -1753,6 +1845,57 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       return { md: b.sections[sel].md, base: b.sections[sel].start };
     });
   }, [renderBlocks, tabSelections]);
+  processedBlocksRef.current = processedBlocks;
+
+  /* 极速预览：按可见块批量取 HTML；查找目标块优先，HTML 只为可见范围付费。
+     单飞 + 队列：在途请求不被滚动/查找引起的重渲染取消，避免一直停在「渲染中」 */
+  const pumpFastRender = useCallback(() => {
+    if (fastInFlightRef.current || fastRenderErrorRef.current) return;
+    const blocks = processedBlocksRef.current;
+    if (!blocks || !fastPreviewRef.current) return;
+    const visible = blocks.slice(previewWindowStartRef.current, shownBlockCountRef.current);
+    const htmlMap = fastHtmlRef.current;
+    const missing: string[] = [];
+    const pendingMd = pendingFindScrollRef.current?.mdKey;
+    if (pendingMd && !htmlMap.has(pendingMd) && visible.some(p => p.md === pendingMd)) {
+      missing.push(pendingMd);
+    }
+    for (const block of visible) {
+      const md = block.md;
+      if (!md.trim() || htmlMap.has(md) || missing.includes(md)) continue;
+      missing.push(md);
+      if (missing.length >= FAST_HTML_BATCH) break;
+    }
+    if (missing.length === 0) return;
+    fastInFlightRef.current = true;
+    void renderMarkdownHtmlChunks(missing).then((htmls) => {
+      fastInFlightRef.current = false;
+      if (!fastMountedRef.current) return;
+      if (!htmls) {
+        setFastRenderError(true);
+        return;
+      }
+      setFastHtml(prev => {
+        const next = new Map(prev);
+        missing.forEach((md, i) => {
+          if (htmls[i] != null) next.set(md, htmls[i]);
+        });
+        while (next.size > FAST_HTML_CACHE_MAX) {
+          const oldest = next.keys().next().value;
+          if (oldest === undefined) break;
+          next.delete(oldest);
+        }
+        return next;
+      });
+    }).catch(() => {
+      fastInFlightRef.current = false;
+      if (fastMountedRef.current) setFastRenderError(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (fastMode && !fastRenderError) pumpFastRender();
+  }, [fastMode, processedBlocks, shownBlockCount, previewWindowStart, fastHtml, fastRenderError, pumpFastRender]);
 
   /* ---- 表格行/列尺寸：只由表格源码内容决定（每次全量重算，不依赖 DOM 上的
      历史内联样式——React 复用表格 DOM 时历史状态会让同源表格渲染不一致）。
@@ -1821,7 +1964,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     });
     /* content 必须入依赖：普通文档（无页签标记）下 processedBlocks/renderBlocks
        恒为 null，仅靠它们内容变化后不会重新测量（加行/列、输入后尺寸不更新） */
-  }, [content, processedBlocks, renderBlocks, tabSelections, isDarkMode]);
+  }, [content, processedBlocks, renderBlocks, tabSelections, isDarkMode, previewWindowStart]);
 
   /* 选区快照与某块 DOM 的交集文本：跨块选区按块拆分后映射回源码用 */
   const selectedTextWithin = (el: HTMLElement, range: Range | null): string => {
@@ -1896,6 +2039,11 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   /* ---- 右键：有选区弹格式菜单；无选区弹插入菜单（表格/图片） ---- */
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    /* 极速预览只读：不弹任何编辑/插入菜单 */
+    if (fastPreviewRef.current) {
+      e.preventDefault();
+      return;
+    }
     /* 只读预览（更新文档等）：不可编辑即无任何右键行为——不弹编辑菜单，
        也不放行浏览器默认菜单（文档不可更改，右键应当完全不触发） */
     if (!onChange) {
@@ -1919,7 +2067,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
      判定用块内容的行矩形而不是块自身——块会拉满整行宽度，短行右侧那片空白
      看着是「段落上」，其实没有字，那里仍该给插入菜单。 */
   const handleLongPress = useCallback((pos: LongPressPos) => {
-    if (!onChangeRef.current) return;
+    if (fastPreviewRef.current || !onChangeRef.current) return;
     /* 已有菜单浮层时，这次长按的落点是它的遮罩——只用于关闭，不要再切成另一个菜单 */
     if (menu || blankMenu) return;
     const el = document.elementFromPoint(pos.x, pos.y) as HTMLElement | null;
@@ -1937,7 +2085,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   /* 系统选字（含拖拽手柄改选区）→ 在选区上方浮出工具条；容器滚动后按视口坐标重算。
      触屏才需要：桌面选中文字不浮条（右键已经够用），也省掉每次选区的重渲染 */
   useEffect(() => {
-    if (!onChange || !IS_TOUCH_PRIMARY) { setSelBar(null); return; }
+    if (!onChange || !IS_TOUCH_PRIMARY || fastPreview) { setSelBar(null); return; }
     const sync = () => {
       const sel = window.getSelection();
       const root = contentRef.current;
@@ -1960,7 +2108,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       document.removeEventListener('selectionchange', sync);
       el?.removeEventListener('scroll', sync);
     };
-  }, [onChange]);
+  }, [onChange, fastPreview]);
 
   /* 选区格式化：从后往前替换，保证偏移量不失效 */
   const handleApply = useCallback((op: MdOp, at?: PreviewMenuState) => {
@@ -2093,7 +2241,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   }, [content, onChange]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!onChange) return;
+    if (!onChange || fastPreviewRef.current) return;
     const target = e.target as HTMLElement;
     /* 悬停在工具按钮上时保持现状，避免按钮消失 */
     if (target.closest?.('[data-md-table-tools]')) return;
@@ -2203,7 +2351,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
 
   /* 点击单元格 → 覆盖输入框编辑，回写源码对应单元格 */
   const handleContainerClick = useCallback((e: React.MouseEvent) => {
-    if (!onChange) return;
+    if (!onChange || fastPreviewRef.current) return;
     const target = e.target as HTMLElement;
     if (target.closest('[data-md-table-tools]')) return;
     if (target.closest('a')) return;
@@ -2281,6 +2429,79 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     if (next !== content) onChange(next);
   }, [cellEdit, content, onChange]);
 
+  /* 当前渲染窗口：完整预览与极速预览共用，跳远块时只渲染目标附近 */
+  const previewWindow = Math.min(previewWindowStart, Math.max(0, shownBlockCount - 1));
+
+  /* 极速预览块：每块只放 Rust 返回的静态 HTML；页签仍可切换（只读） */
+  const renderFastBlocks = () => {
+    if (!processedBlocks || !renderBlocks) return null;
+    const windowStart = previewWindow;
+    return (
+      <>
+        {windowStart > 0 && (
+          <div className={cn('py-2 text-center text-[11px]', isDarkMode ? 'text-zinc-600' : 'text-zinc-400')}>
+            {t('md.windowTopNote')}
+          </div>
+        )}
+        {processedBlocks.slice(windowStart, shownBlockCount).map((processed, offset) => {
+          const blockIdx = windowStart + offset;
+          const block = renderBlocks[blockIdx];
+          const html = fastHtml.get(processed.md);
+          const body = processed.md.trim() === ''
+            ? null
+            : html != null
+              ? (
+                <div
+                  className="heid-fast-md"
+                  data-md-start={processed.base}
+                  data-md-end={processed.base + processed.md.length}
+                  dangerouslySetInnerHTML={{ __html: html }}
+                />
+              )
+              : (
+                <div
+                  className={cn('heid-fast-placeholder', isDarkMode ? 'text-zinc-600' : 'text-zinc-400')}
+                  data-md-start={processed.base}
+                  data-md-end={processed.base + processed.md.length}
+                >
+                  {t('md.fastLoading')}
+                </div>
+              );
+          if (block.type !== 'tabs') return <div key={blockIdx}>{body}</div>;
+          const selIdx = Math.min(tabSelections[blockIdx] ?? 0, block.sections.length - 1);
+          return (
+            <div key={blockIdx}>
+              <div className="mb-4 flex flex-wrap items-center gap-1 -mx-1 px-1">
+                {block.sections.map((s, j) => (
+                  <button
+                    key={s.label + j}
+                    onClick={(e) => { e.stopPropagation(); selectTab(blockIdx, j); }}
+                    className={cn(
+                      'max-w-[240px] truncate px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                      j === selIdx
+                        ? 'border-transparent bg-[#96A5EB] text-white'
+                        : isDarkMode
+                          ? 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                          : 'border-zinc-300 text-zinc-500 hover:bg-zinc-100',
+                    )}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              {body}
+            </div>
+          );
+        })}
+        {chunkedPreview && shownBlockCount < totalBlocks && (
+          <div ref={loadMoreRef} className={cn('py-6 text-center text-[11px]', isDarkMode ? 'text-zinc-600' : 'text-zinc-400')}>
+            {t('md.loadMore')}
+          </div>
+        )}
+      </>
+    );
+  };
+
   return (
     <div
       ref={(el) => {
@@ -2299,30 +2520,80 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       })}
     >
       <div className="mx-auto p-6 text-left max-w-[1280px]">
+        {rustFindEligible && (
+          <div
+            className={cn(
+              'sticky top-0 z-20 mb-2 flex flex-wrap items-center justify-end gap-2 rounded-lg border px-3 py-1.5 text-[11px] backdrop-blur-sm print:hidden',
+              isDarkMode
+                ? 'border-zinc-700/60 bg-zinc-900/80 text-zinc-400'
+                : 'border-zinc-200/80 bg-white/85 text-zinc-500',
+            )}
+          >
+            {fastMode ? (
+              <>
+                <span className={fastRenderError ? (isDarkMode ? 'text-red-400' : 'text-red-600') : undefined}>
+                  {fastRenderError ? t('md.fastPreviewFailed') : t('md.fastPreviewOn')}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setFastPreview(false)}
+                  className={cn(
+                    'rounded-md border px-2 py-0.5 font-medium transition-colors',
+                    isDarkMode
+                      ? 'border-zinc-600 text-zinc-300 hover:bg-zinc-700'
+                      : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100',
+                  )}
+                >
+                  {t('md.fastPreviewSwitch')}
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => { setFastRenderError(false); setFastPreview(true); }}
+                className={cn(
+                  'rounded-md border px-2 py-0.5 font-medium transition-colors',
+                  isDarkMode
+                    ? 'border-zinc-600 text-zinc-300 hover:bg-zinc-700'
+                    : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100',
+                )}
+              >
+                {t('md.fastPreview')}
+              </button>
+            )}
+          </div>
+        )}
         <div className={proseClassName}>
           <MarkdownStyles isDarkMode={isDarkMode} />
-          {processedBlocks && renderBlocks ? (
+          {fastMode && <FastMarkdownStyles isDarkMode={isDarkMode} />}
+          {fastMode ? renderFastBlocks() : processedBlocks && renderBlocks ? (
             <>
-            {processedBlocks.slice(0, shownBlockCount).map((processed, i) => {
-              const block = renderBlocks[i];
+            {previewWindow > 0 && (
+              <div className={cn('py-2 text-center text-[11px]', isDarkMode ? 'text-zinc-600' : 'text-zinc-400')}>
+                {t('md.windowTopNote')}
+              </div>
+            )}
+            {processedBlocks.slice(previewWindow, shownBlockCount).map((processed, offset) => {
+              const blockIdx = previewWindow + offset;
+              const block = renderBlocks[blockIdx];
               const content = (
                 <MdBlock md={processed.md} components={mdComponents} richHtml={hasRawHtml(processed.md)} />
               );
               if (block.type !== 'tabs') {
                 return (
-                  <BlockBaseContext.Provider key={i} value={processed.base}>
+                  <BlockBaseContext.Provider key={blockIdx} value={processed.base}>
                     {content}
                   </BlockBaseContext.Provider>
                 );
               }
-              const selIdx = Math.min(tabSelections[i] ?? 0, block.sections.length - 1);
+              const selIdx = Math.min(tabSelections[blockIdx] ?? 0, block.sections.length - 1);
               return (
-                <div key={i}>
+                <div key={blockIdx}>
                   <div className="flex flex-wrap items-center gap-1 mb-4 -mx-1 px-1">
                     {block.sections.map((s, j) => (
                       <button
                         key={s.label + j}
-                        onClick={(e) => { e.stopPropagation(); selectTab(i, j); }}
+                        onClick={(e) => { e.stopPropagation(); selectTab(blockIdx, j); }}
                         className={cn(
                           'max-w-[240px] truncate px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
                           j === selIdx
@@ -2339,7 +2610,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                       <>
                         <button
                           type="button"
-                          onClick={(e) => { e.stopPropagation(); openAddTab(i); }}
+                          onClick={(e) => { e.stopPropagation(); openAddTab(blockIdx); }}
                           title={t('md.tabAdd')}
                           aria-label={t('md.tabAdd')}
                           className={cn(
@@ -2355,7 +2626,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                         <span className="flex items-center gap-0.5">
                           <button
                             type="button"
-                            onClick={(e) => { e.stopPropagation(); openEditTab(i, selIdx); }}
+                            onClick={(e) => { e.stopPropagation(); openEditTab(blockIdx, selIdx); }}
                             title={t('md.tabEdit')}
                             aria-label={t('md.tabEdit')}
                             className={tabIconBtnCls}
@@ -2367,7 +2638,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                             onClick={(e) => {
                               e.stopPropagation();
                               const s = block.sections[selIdx];
-                              if (s) setTabDelete({ groupIdx: i, sectionIdx: selIdx, label: s.label, isLast: block.sections.length === 1 });
+                              if (s) setTabDelete({ groupIdx: blockIdx, sectionIdx: selIdx, label: s.label, isLast: block.sections.length === 1 });
                             }}
                             title={t('md.tabDelete')}
                             aria-label={t('md.tabDelete')}
@@ -2383,7 +2654,7 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                     {onChange && !processed.md.trim() ? (
                       <button
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); openEditTab(i, selIdx); }}
+                        onClick={(e) => { e.stopPropagation(); openEditTab(blockIdx, selIdx); }}
                         className={cn(
                           'mb-4 w-full rounded-lg border border-dashed px-4 py-6 text-center text-xs transition-colors',
                           isDarkMode
@@ -2710,3 +2981,49 @@ const MarkdownStyles = React.memo<{ isDarkMode: boolean }>(({ isDarkMode }) => {
 });
 
 MarkdownStyles.displayName = 'MarkdownStyles';
+
+/* 极速预览的静态 HTML 样式：覆盖完整预览为自绘代码块写的 pre 重置 */
+const FastMarkdownStyles = React.memo<{ isDarkMode: boolean }>(({ isDarkMode }) => {
+  return (
+    <style>{`
+      .heid-fast-md pre {
+        background-color: ${isDarkMode ? '#1e1e1e' : '#f3f4f6'} !important;
+        padding: 1rem !important;
+        margin: 1rem 0 !important;
+        border: 1px solid ${isDarkMode ? '#27272a' : '#e4e4e7'} !important;
+        border-radius: 0.5rem;
+        overflow-x: auto;
+      }
+      .heid-fast-md pre code {
+        background: transparent !important;
+        padding: 0 !important;
+        font-size: 13px;
+        line-height: 1.6;
+        font-family: "Fira Code", "Cascadia Code", Consolas, Monaco, "Courier New", monospace;
+      }
+      .heid-fast-md :not(pre) > code {
+        background-color: ${isDarkMode ? 'rgba(63, 63, 70, 0.5)' : '#f4f4f5'};
+        padding: 0.2em 0.4em;
+        border-radius: 0.25rem;
+      }
+      .heid-fast-md .math {
+        font-family: "Fira Code", Consolas, monospace;
+        color: ${isDarkMode ? '#c4b5fd' : '#6d28d9'};
+      }
+      .heid-fast-md .math-display {
+        display: block;
+        overflow-x: auto;
+        padding: 0.25rem 0;
+      }
+      .heid-fast-md input[type="checkbox"] {
+        margin-right: 0.4em;
+      }
+      .heid-fast-placeholder {
+        padding: 1rem 0;
+        font-size: 12px;
+      }
+    `}</style>
+  );
+});
+
+FastMarkdownStyles.displayName = 'FastMarkdownStyles';

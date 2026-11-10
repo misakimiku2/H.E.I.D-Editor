@@ -85,6 +85,7 @@
     "allow-search-in-dir-progress",
     "allow-md-index-build",
     "allow-md-search",
-    "allow-md-index-release"
+    "allow-md-index-release",
+    "allow-md-render-html-chunks"
   ]
 }

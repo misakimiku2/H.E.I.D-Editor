@@ -8,6 +8,8 @@ mod link;
 mod large_file;
 /// 大文档 Markdown 检索索引：纯 Rust，桌面与安卓共用（正则可用的差异在模块内处理）
 mod md_index;
+/// 大文档只读极速预览：Rust 解析 + allowlist 清洗输出分块 HTML
+mod md_render;
 mod render;
 #[cfg(desktop)]
 mod search;
@@ -210,6 +212,7 @@ pub fn run() {
             md_index::md_index_build,
             md_index::md_search,
             md_index::md_index_release,
+            md_render::md_render_html_chunks,
             #[cfg(desktop)]
             take_launch_paths,
             #[cfg(desktop)]

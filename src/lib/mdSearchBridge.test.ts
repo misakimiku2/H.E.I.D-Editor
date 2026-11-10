@@ -12,7 +12,7 @@ vi.mock('./fileIO', () => ({
   },
 }));
 
-import { buildMdIndex, searchMdIndex, releaseMdIndex } from './mdSearchBridge';
+import { buildMdIndex, searchMdIndex, releaseMdIndex, renderMarkdownHtmlChunks } from './mdSearchBridge';
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -56,5 +56,22 @@ describe('mdSearchBridge', () => {
     invokeMock.mockRejectedValue(new Error('已淘汰'));
     await expect(releaseMdIndex(3)).resolves.toBeUndefined();
     expect(invokeMock).toHaveBeenCalledWith('md_index_release', { indexId: 3 });
+  });
+
+  it('批量渲染 HTML：成功/长度不符/失败/非 Tauri', async () => {
+    invokeMock.mockResolvedValue(['<h1>甲</h1>', '<p>乙</p>']);
+    await expect(renderMarkdownHtmlChunks(['# 甲', '乙'])).resolves.toEqual(['<h1>甲</h1>', '<p>乙</p>']);
+    expect(invokeMock).toHaveBeenCalledWith('md_render_html_chunks', { chunks: ['# 甲', '乙'] });
+
+    invokeMock.mockResolvedValue(['<h1>甲</h1>']);
+    expect(await renderMarkdownHtmlChunks(['# 甲', '乙'])).toBeNull();
+
+    invokeMock.mockRejectedValue(new Error('渲染失败'));
+    expect(await renderMarkdownHtmlChunks(['# 甲'])).toBeNull();
+
+    platform.tauri = false;
+    invokeMock.mockClear();
+    expect(await renderMarkdownHtmlChunks(['# 甲'])).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

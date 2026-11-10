@@ -32,6 +32,7 @@ fn main() {
             "md_index_build",
             "md_search",
             "md_index_release",
+            "md_render_html_chunks",
             "create_document_window",
             "take_window_bootstrap",
             "begin_tab_drag",

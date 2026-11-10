@@ -304,8 +304,8 @@ fn align_source(content: &str, range: &Range<usize>, text: &str) -> usize {
     slice.find(text).map(|rel| start + rel).unwrap_or(start)
 }
 
-fn project(content: &str) -> (String, Vec<TextSegment>) {
-    let mut projector = Projector::new(content);
+/// 解析选项：检索投影与极速预览共用，保证两边的 Markdown 语义一致
+pub(crate) fn markdown_options() -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_FOOTNOTES);
@@ -315,6 +315,12 @@ fn project(content: &str) -> (String, Vec<TextSegment>) {
     options.insert(Options::ENABLE_SUPERSCRIPT);
     options.insert(Options::ENABLE_SUBSCRIPT);
     options.insert(Options::ENABLE_GFM);
+    options
+}
+
+fn project(content: &str) -> (String, Vec<TextSegment>) {
+    let mut projector = Projector::new(content);
+    let options = markdown_options();
 
     let mut image_depth = 0usize;
     let mut code_depth = 0usize;

@@ -81,6 +81,18 @@ export async function searchMdIndex(
   }
 }
 
+/** 批量把 Markdown 分块渲染为清洗后的安全 HTML（极速预览）；失败返回 null */
+export async function renderMarkdownHtmlChunks(chunks: string[]): Promise<string[] | null> {
+  const invoke = await getInvoke();
+  if (!invoke || chunks.length === 0) return null;
+  try {
+    const result = await invoke('md_render_html_chunks', { chunks }) as string[];
+    return Array.isArray(result) && result.length === chunks.length ? result : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 释放索引（文档切换 / 内容变化 / 预览卸载） */
 export async function releaseMdIndex(indexId: number): Promise<void> {
   const invoke = await getInvoke();

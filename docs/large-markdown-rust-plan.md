@@ -1,7 +1,7 @@
 # 大文档 Markdown：Rust 侧加速方案（分段实施计划）
 
-> 状态：**Phase 1 已完成（2026-11-11）**，Phase 2/3 未实施。基线 TSX 分块预览改动
-> 已单独提交（c960f50）。Phase 1 的实施记录与实测数据见 §4.7。
+> 状态：**Phase 1、Phase 2 已完成（2026-11-11）**，Phase 3 未实施。基线 TSX 分块预览
+> 改动已单独提交（c960f50）。实施记录与实测数据见 §4.7、§5.5。
 
 ## 0. 结论
 
@@ -279,28 +279,55 @@
 极速只读模式**暂不提供**：
 
 - 表格可视化编辑（增删行列/单元格编辑）；
-- 页签组的可视化增删改（仍按当前选中页签静态渲染）；
-- Mermaid 编辑、图片查看器/右键菜单、任务勾选回写、预览右键格式化；
-- 预览内查找的高亮联动（可先接 Phase 1 的结果做滚动定位）。
+- 页签组的可视化增删改（仍按当前选中页签静态渲染，可切换）；
+- Mermaid 编辑、图片查看器/右键菜单、任务勾选回写、预览右键格式化。
 
 保留：标题/段落/列表/表格静态展示、链接（本地 .md 链接仍走现有导航守卫）、代码块
-静态展示、脚注/删除线等 GFM 静态效果。
+静态展示、脚注/删除线等 GFM 静态效果。预览内查找接 Phase 1 索引：导航到目标块并做
+块内高亮（已实现），不要求全量高亮。
 
 图片：第一版可只支持 http(s) 远程图；本地图片需要前端在插入 HTML 后扫描 `img` 并复用
 `resolveImageSrc` 换 blob URL——若做，单独列子任务。
 
 ### 5.3 验收
 
-- [ ] 3.7MB 首块 HTML 返回 < 200ms；滚动加载流畅；Rust 解析内存可释放。
-- [ ] HTML 无脚本/事件属性/危险协议（用 XSS fixture 验证）。
-- [ ] 小文档完全不受影响；极速模式只在用户明确选择/大文档阈值以上启用。
-- [ ] 与完整预览的静态文本内容一致（抽样对比）。
+- [x] 3.7MB 首块 HTML 返回 < 200ms；滚动加载流畅；Rust 解析内存可释放。
+      debug 实测首块 24k 字 15ms、8 块批量 117ms；HTML 只在 Rust 侧临时存在，
+      JS 缓存上限 120 块；真实应用滚动/跳转流畅。
+- [x] HTML 无脚本/事件属性/危险协议（用 XSS fixture 验证）。`ammonia` 单测覆盖
+      script/onerror/javascript:/style/iframe/svg 等。
+- [x] 小文档完全不受影响；极速模式只在用户明确选择/大文档阈值以上启用。
+- [x] 与完整预览的静态文本内容一致（抽样对比）。已知差异见 §5.5。
 
 ### 5.4 风险
 
 - 组件体系迁移成本高，交互回退需要用户预期管理；
 - KaTeX/Mermaid 仍是 JS，Rust HTML 里需保留占位或降级；
 - 清洗 allowlist 与前端必须同源维护，否则出现「完整预览能显示、极速预览不显示」。
+
+### 5.5 实施记录（2026-11-11）
+
+- Rust：新增 `src-tauri/src/md_render.rs`
+  - `pulldown-cmark`（`html` feature）渲染 + `ammonia` allowlist 清洗；allowlist 对齐
+    `markdownRawHtml.ts`（u/mark/font/big/input 等，mark 只留 `md-mark-*`、code 只留
+    `language-*`；script/style 连同内容丢弃；url 协议用 ammonia 默认白名单）。
+  - 批量命令 `md_render_html_chunks`（单次 ≤16 块 / 2MB，`spawn_blocking`），
+    前端一次取 8 块。
+- 前端（`MarkdownPreview.tsx`）
+  - 大文档预览顶部常驻「极速预览（只读）」入口；进入后按可见窗口批量取 HTML，
+    `dangerouslySetInnerHTML` 渲染；页签仍可切换，只读禁用表格编辑/右键菜单/任务回写。
+  - **共享窗口渲染**：查找与大纲跳转只渲染目标附近（前 8 块 + 目标），完整预览与
+    极速预览共用窗口；跳文末不再铺满整篇，二者切换不丢位置。
+  - 查找接 Phase 1 索引：目标块 HTML 优先取回，导航后按命中 Range 精确居中并高亮。
+- 实测（3.7MB 剧情全本）：真实桌面应用点击入口 → 输入「方舟升上地面了。」→ 1/1，
+  跳到文末命中行并橙色高亮；窗口化后只渲染目标附近 9 块；表格/页签静态、远程图片可用。
+- 已知差异：`==高亮==` 与词内 `^上标^`/`~下标~` 在极速模式按源码文本显示；
+  Mermaid/KaTeX 为静态代码/公式源码；本地图片不加载（首版只支持 http(s)）；
+  脚注跨块引用不建锚。完整预览行为不变。
+- 注册：命令同时登记 `lib.rs`、`build.rs`、`capabilities/default.json`（三处缺一即
+  运行时 `Command not found`）。
+- 验证：Rust 249 项测试、前端 1584 项测试、`npm run build`、Android target
+  `cargo check` 全绿。
 
 ## 6. Phase 3：索引/解析缓存与后台预热
 
@@ -317,12 +344,17 @@
 | 文件 | 作用 |
 | --- | --- |
 | `src/lib/markdownChunks.ts` | 大文档按标题分块、`buildLargePreviewBlocks` |
-| `src/components/MarkdownPreview.tsx` | 分块懒加载、查找补载、原始 HTML/注释处理 |
-| `src/components/PreviewFindBar.tsx` | 预览查找 UI、加载进度、DOM 扫描 |
+| `src/components/MarkdownPreview.tsx` | 分块懒加载、共享窗口、极速预览、查找补载 |
+| `src/components/PreviewFindBar.tsx` | 预览查找 UI、外部搜索引擎适配 |
+| `src/lib/mdSearchBridge.ts` | 前端 ↔ Rust 索引/HTML 渲染桥接 |
 | `src/lib/markdownRawHtml.ts` | HTML 白名单、`hasRawHtml` |
 | `src/lib/remarkExt.ts` | 扩展语法、注释移除 |
 | `src/lib/searchCore.ts` | 现有查找选项语义（大小写/正则/整词） |
+| `src-tauri/src/md_index.rs` | Rust 全文检索索引（投影/映射/缓存/查找） |
+| `src-tauri/src/md_render.rs` | Rust Markdown → 安全 HTML（极速预览） |
 | `src-tauri/src/lib.rs` | Tauri 命令注册 |
+| `src-tauri/build.rs` | 命令 ACL 清单（新增命令三处登记之一） |
+| `src-tauri/capabilities/default.json` | 命令权限（新增命令三处登记之一） |
 | `src-tauri/src/search.rs` | 现有跨文件搜索（rayon/正则/进度/取消可复用） |
 | `src-tauri/src/large_file.rs` | 32MB+ 大文件窗口读取（**与 Markdown 预览分流无关**） |
 | `src-tauri/Cargo.toml` | 依赖与 target 分级 |
