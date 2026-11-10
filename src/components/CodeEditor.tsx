@@ -21,6 +21,7 @@ import { findHighlightExtension } from '../lib/editorSearch';
 import { readClipboardText, writeClipboardText, clipboardReadPermissionState, isTauriRuntime } from '../lib/fileOps';
 import { clipboardHasImage as detectClipboardHasImage, imageFileFromClipboard } from '../lib/markdownImagePaste';
 import { loadLanguageExtension } from '../lib/codemirror';
+import { linkPasteInsert } from '../lib/markdownSmartEdit';
 import { parseColorLiteral, serializeColorLiteral } from '../lib/colorLiteral';
 import { notifyFmtMenuClosed, notifyFmtMenuOpen, registerFmtMenuClose,
   notifySelBarClosed, notifySelBarOpen, registerSelBarClose } from '../lib/fmtMenuBus';
@@ -221,7 +222,7 @@ async function cutSelectionText(view: EditorView): Promise<void> {
   view.focus();
 }
 
-async function pasteFromClipboard(view: EditorView): Promise<void> {
+async function pasteFromClipboard(view: EditorView, linkify = false): Promise<void> {
   /* 浏览器：readText 在权限为 prompt 时必弹授权框 —— 未既授权限时静默降级，
      聚焦编辑器让下一次原生 Ctrl+V 免权限完成粘贴 */
   if (!isTauriRuntime && await clipboardReadPermissionState() !== 'granted') {
@@ -237,6 +238,18 @@ async function pasteFromClipboard(view: EditorView): Promise<void> {
   }
   if (!text) return;
   const sel = view.state.selection.main;
+  if (linkify && !sel.empty) {
+    const wrapped = linkPasteInsert(text, view.state.sliceDoc(sel.from, sel.to));
+    if (wrapped) {
+      view.dispatch({
+        changes: { from: sel.from, to: sel.to, insert: wrapped },
+        selection: { anchor: sel.from + wrapped.length },
+        userEvent: 'input.paste',
+      });
+      view.focus();
+      return;
+    }
+  }
   view.dispatch({
     changes: { from: sel.from, to: sel.to, insert: text },
     selection: { anchor: sel.from + text.length },
@@ -1320,13 +1333,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
    *  右键菜单与触屏选区工具条共用，两条入口行为必须一致 */
   const pasteAtCursor = useCallback(async (v: EditorView) => {
     const insert = onPasteImageRef.current ? await onPasteImageRef.current() : null;
-    if (!insert) { await pasteFromClipboard(v); return; }
+    if (!insert) { await pasteFromClipboard(v, language === 'markdown'); return; }
     const pos = v.state.selection.main.head;
     /* 含空白/括号的地址用尖括号包裹（与 Ctrl+V 直贴同一格式） */
     const text = /[()\s]/.test(insert) ? `![](<${insert}>)` : `![](${insert})`;
     v.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length } });
     v.focus();
-  }, []);
+  }, [language]);
 
   /** 通用编辑菜单项：按当前可编辑/选区/语言状态裁剪（右侧快捷键为真实已绑定的键） */
   const buildEditorMenuItems = useCallback((): ContextMenuItem[] => {
@@ -1693,6 +1706,25 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             } catch {
               /* 落盘期间编辑器已销毁（切标签页）：放弃插入 */
             }
+          });
+          return true;
+        },
+      })] : []),
+      /* 选中粘贴成链接（markdown）：与菜单/触屏粘贴同一契约，置于图片拦截之后 */
+      ...(language === 'markdown' ? [EditorView.domEventHandlers({
+        paste: (event, view) => {
+          const sel = view.state.selection.main;
+          if (sel.empty) return false;
+          const insert = linkPasteInsert(
+            event.clipboardData?.getData('text/plain') ?? '',
+            view.state.sliceDoc(sel.from, sel.to),
+          );
+          if (!insert) return false;
+          event.preventDefault();
+          view.dispatch({
+            changes: { from: sel.from, to: sel.to, insert },
+            selection: { anchor: sel.from + insert.length },
+            userEvent: 'input.paste',
           });
           return true;
         },

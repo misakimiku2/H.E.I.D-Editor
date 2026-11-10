@@ -108,4 +108,70 @@ describe('CodeEditor 回车换行', () => {
     await frame();
     expect(view()!.state.doc.line(2).text).toBe('    ');
   });
+
+  it('markdown 无序列表回车续同标记', async () => {
+    act(() => {
+      root.render(<CodeEditor value="- item" language="markdown" isDarkMode={false}
+        onChange={(v) => { echoes.push(v); }} />);
+    });
+    await frame();
+    press('Enter');
+    await frame();
+    expect(view()!.state.doc.line(2).text).toBe('- ');
+  });
+
+  it('markdown 有序列表回车数字 +1', async () => {
+    act(() => {
+      root.render(<CodeEditor value="1. item" language="markdown" isDarkMode={false}
+        onChange={(v) => { echoes.push(v); }} />);
+    });
+    await frame();
+    press('Enter');
+    await frame();
+    expect(view()!.state.doc.line(2).text).toBe('2. ');
+  });
+
+  it('markdown checkbox 续行重置为未勾', async () => {
+    act(() => {
+      root.render(<CodeEditor value="- [x] done" language="markdown" isDarkMode={false}
+        onChange={(v) => { echoes.push(v); }} />);
+    });
+    await frame();
+    press('Enter');
+    await frame();
+    expect(view()!.state.doc.line(2).text).toBe('- [ ] ');
+  });
+
+  it('markdown 嵌套列表续行保留缩进', async () => {
+    act(() => {
+      root.render(<CodeEditor value="  - a" language="markdown" isDarkMode={false}
+        onChange={(v) => { echoes.push(v); }} />);
+    });
+    await frame();
+    press('Enter');
+    await frame();
+    expect(view()!.state.doc.line(2).text).toBe('  - ');
+  });
+
+  it('markdown 空项回车退出列表', async () => {
+    act(() => {
+      root.render(<CodeEditor value="- " language="markdown" isDarkMode={false}
+        onChange={(v) => { echoes.push(v); }} />);
+    });
+    await frame();
+    press('Enter');
+    await frame();
+    expect(view()!.state.doc.toString()).toBe('');
+  });
+
+  it('markdown 非列表行保持普通换行', async () => {
+    act(() => {
+      root.render(<CodeEditor value="plain" language="markdown" isDarkMode={false}
+        onChange={(v) => { echoes.push(v); }} />);
+    });
+    await frame();
+    press('Enter');
+    await frame();
+    expect(view()!.state.doc.line(2).text).toBe('');
+  });
 });

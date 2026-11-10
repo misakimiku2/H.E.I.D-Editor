@@ -40,7 +40,8 @@ const LANGUAGE_LOADERS: Record<string, LanguageLoader> = {
   php: async () => (await import('@codemirror/lang-php')).php(),
   markdown: async () => {
     const m = await import('@codemirror/lang-markdown');
-    return m.markdown({ base: m.markdownLanguage });
+    /* 粘贴成链接统一走 markdownSmartEdit 契约（trim/单行/两入口一致），内置实现不 trim 首尾空白 */
+    return m.markdown({ base: m.markdownLanguage, pasteURLAsLink: false });
   },
   /* ---- 以下为 v1.5（ROADMAP 51）补齐的第三档：官方 lang-go + legacy-modes 的 stream 着色器
      + 两个仓库内自维护语法。stream 的 token 名直接映射到 @lezer/highlight 的 tag，

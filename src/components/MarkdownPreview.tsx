@@ -27,11 +27,15 @@ import { useT } from '../lib/i18nContext';
 import { parseLangBlocks } from '../lib/markdownLangs';
 import { applyImageTab, applySelectionTab } from '../lib/markdownTabs';
 import { collectRemoteImages } from '../lib/imageLocalize';
+import { toggleTaskAtOffset } from '../lib/markdownSmartEdit';
 import { notifyFmtMenuClosed, notifyFmtMenuOpen, registerFmtMenuClose,
   notifySelBarClosed, notifySelBarOpen, registerSelBarClose } from '../lib/fmtMenuBus';
 
 /** 页签文档按块渲染时，块 md 的全文起始偏移（右键选区映射回源码用） */
 const BlockBaseContext = createContext(0);
+
+/** li 行首的全文偏移：checkbox 回写定位用（react-markdown 的 input 节点无 position） */
+const TaskLineContext = createContext<number | null>(null);
 
 /* markdown 渲染插件管线：组装版 GFM(~~删除线~~/表格/任务列表/脚注，单 ~ 让给下标)
    + 公式($…$/$$…$$，KaTeX) + emoji 短代码 + ==高亮==/^上标^/~下标~ 行内扩展 */
@@ -971,7 +975,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDarkMode, cleanTheme]);
 
-  const mdComponents = useMemo(() => ({
+  const mdComponents = useMemo(() => {
+    const LiBlock = block('li');
+    return {
     code: codeComponent,
     pre({ children }: { children?: React.ReactNode }) {
       return <>{children}</>;
@@ -1002,14 +1008,38 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     h4: block('h4'),
     h5: block('h5'),
     h6: block('h6'),
-    li: block('li'),
+    li({ node, children, ...props }: any) {
+      const base = useContext(BlockBaseContext);
+      const start = node?.position?.start?.offset;
+      return (
+        <TaskLineContext.Provider value={typeof start === 'number' ? start + base : null}>
+          <LiBlock node={node} {...props}>{children}</LiBlock>
+        </TaskLineContext.Provider>
+      );
+    },
+    input({ node, ...props }: any) {
+      const lineStart = useContext(TaskLineContext);
+      const editable = onChangeRef.current != null && lineStart != null;
+      return (
+        <input
+          {...props}
+          type="checkbox"
+          disabled={!editable}
+          onChange={editable ? () => {
+            const next = toggleTaskAtOffset(contentStrRef.current, lineStart!);
+            if (next != null) onChangeRef.current?.(next);
+          } : undefined}
+        />
+      );
+    },
     blockquote: block('blockquote'),
     ul: block('ul'),
     ol: block('ol'),
     td: block('td'),
     th: block('th'),
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [isDarkMode, baseDir, cleanTheme, codeComponent]);
+  }, [isDarkMode, baseDir, cleanTheme, codeComponent]);
 
   const proseClassName = useMemo(() => {
     return cn(
