@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { EditorView } from '@codemirror/view';
+import { language } from '@codemirror/language';
 
 (window as any).ResizeObserver = class {
   observe() {} unobserve() {} disconnect() {}
@@ -47,6 +48,16 @@ describe('CodeEditor 回车换行', () => {
   const content = () => document.querySelector('.cm-content') as HTMLElement;
 
   const view = () => EditorView.findFromDOM(content());
+
+  /* markdown 语言扩展是动态 import：全量测试并行的高负载下，30ms 可能还没装进编辑器，
+     insertNewlineAndIndent 会退化成普通换行（列表标记丢失）。按 facet 就绪再敲键。 */
+  const waitForMarkdownLanguage = async () => {
+    const started = Date.now();
+    while (!view()?.state.facet(language)) {
+      if (Date.now() - started > 2000) return;
+      await frame();
+    }
+  };
 
   /** 把光标放到文档末尾再敲键，模拟真实按键路径（keydown 落在 contentDOM 上） */
   const press = (key: string, init: KeyboardEventInit = {}) => {
@@ -115,6 +126,7 @@ describe('CodeEditor 回车换行', () => {
         onChange={(v) => { echoes.push(v); }} />);
     });
     await frame();
+    await waitForMarkdownLanguage();
     press('Enter');
     await frame();
     expect(view()!.state.doc.line(2).text).toBe('- ');
@@ -126,6 +138,7 @@ describe('CodeEditor 回车换行', () => {
         onChange={(v) => { echoes.push(v); }} />);
     });
     await frame();
+    await waitForMarkdownLanguage();
     press('Enter');
     await frame();
     expect(view()!.state.doc.line(2).text).toBe('2. ');
@@ -137,6 +150,7 @@ describe('CodeEditor 回车换行', () => {
         onChange={(v) => { echoes.push(v); }} />);
     });
     await frame();
+    await waitForMarkdownLanguage();
     press('Enter');
     await frame();
     expect(view()!.state.doc.line(2).text).toBe('- [ ] ');
@@ -148,6 +162,7 @@ describe('CodeEditor 回车换行', () => {
         onChange={(v) => { echoes.push(v); }} />);
     });
     await frame();
+    await waitForMarkdownLanguage();
     press('Enter');
     await frame();
     expect(view()!.state.doc.line(2).text).toBe('  - ');
@@ -159,6 +174,7 @@ describe('CodeEditor 回车换行', () => {
         onChange={(v) => { echoes.push(v); }} />);
     });
     await frame();
+    await waitForMarkdownLanguage();
     press('Enter');
     await frame();
     expect(view()!.state.doc.toString()).toBe('');
@@ -170,6 +186,7 @@ describe('CodeEditor 回车换行', () => {
         onChange={(v) => { echoes.push(v); }} />);
     });
     await frame();
+    await waitForMarkdownLanguage();
     press('Enter');
     await frame();
     expect(view()!.state.doc.line(2).text).toBe('');
