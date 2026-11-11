@@ -85,6 +85,25 @@ const FAST_HTML_BATCH = 8;
 const FAST_HTML_CACHE_MAX = 120;
 /** 极速预览跳转时目标块之前保留的上下文块数（避免跳文末时渲染整篇） */
 const FAST_WINDOW_BEFORE = 8;
+/** Rust 索引缓存键版本：投影/解析规则变化时递增，避免复用旧索引 */
+const MD_INDEX_CACHE_VERSION = 'md-index-v1';
+/** 没有 requestIdleCallback 的 WebView：首屏提交后再延迟这么久预热 */
+const MD_INDEX_PREWARM_FALLBACK_MS = 400;
+/** 顶部模式栏自动隐藏：鼠标进入预览顶部这一高度内才浮出 */
+const MODE_BAR_HOVER_ZONE = 64;
+/** 滚动超过该距离视为已离开顶部；回到顶部时模式栏常显 */
+const MODE_BAR_TOP_EPSILON = 8;
+
+/** 首屏绘制后的空闲任务；不支持 requestIdleCallback 时退回定时器 */
+function scheduleIdleTask(task: () => void): () => void {
+  const g = globalThis as any;
+  if (typeof g.requestIdleCallback === 'function') {
+    const handle = g.requestIdleCallback(task, { timeout: 2000 });
+    return () => g.cancelIdleCallback?.(handle);
+  }
+  const handle = setTimeout(task, MD_INDEX_PREWARM_FALLBACK_MS);
+  return () => clearTimeout(handle);
+}
 
 /* 外部查找（Rust 索引）的当前匹配高亮：与 PreviewFindBar 共用 CSS Highlight 名 */
 const clearExternalFindHighlight = () => {
@@ -1301,6 +1320,12 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
      编辑类操作（表格/图片/插入）仍读写实时 content */
   const [renderedContent, setRenderedContent] = useState(content);
   const [visibleBlockCount, setVisibleBlockCount] = useState(PREVIEW_INITIAL_BLOCKS);
+  /* 顶部模式栏：向下滚动收起，鼠标回到预览顶部才浮出（触屏常显） */
+  const [modeBarVisible, setModeBarVisible] = useState(true);
+  const modeBarVisibleRef = useRef(true);
+  modeBarVisibleRef.current = modeBarVisible;
+  const modeBarPointerInTopRef = useRef(false);
+  const modeBarLastScrollTopRef = useRef(0);
   /* 极速预览开关（文档切换时重置；入口只在分块大文档 + Tauri 桌面端出现） */
   const [fastPreview, setFastPreview] = useState(false);
   /** 极速预览只渲染 [previewWindowStart, shownBlockCount) 的窗口：跳远块不铺满整篇 */
@@ -1310,6 +1335,9 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     docKeyRef.current = docKey;
     setRenderedContent(content);
     setVisibleBlockCount(PREVIEW_INITIAL_BLOCKS);
+    setModeBarVisible(true);
+    modeBarPointerInTopRef.current = false;
+    modeBarLastScrollTopRef.current = 0;
     setFastPreview(false);
     setPreviewWindowStart(0);
   }
@@ -1347,6 +1375,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   }>({ id: null, status: 'idle' });
   const mdIndexStateRef = useRef(mdIndexState);
   mdIndexStateRef.current = mdIndexState;
+  /** 已登记索引 id 的即时镜像：构建完成到 React 提交之间发生失效也不会漏释放 */
+  const mdIndexIdRef = useRef<number | null>(null);
   const mdIndexContentRef = useRef<string | null>(null);
   const mdBuildSeqRef = useRef(0);
   const findMatchesRef = useRef<MdSearchMatch[]>([]);
@@ -1426,24 +1456,22 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
   /* Rust 索引可用（未失败）时，查找不再补载全文；构建失败才回退 DOM 路径 */
   const rustFindActive = rustFindEligible && mdIndexState.status !== 'failed';
 
-  /* 打开查找时为当前渲染内容后台建索引；同一份内容复用已有索引 */
-  useEffect(() => {
-    if (!findOpen || !rustFindEligible) return;
-    const current = mdIndexStateRef.current;
-    if ((current.status === 'ready' || current.status === 'building')
-      && mdIndexContentRef.current === renderedContent) {
-      return;
-    }
-    if (current.id != null) void releaseMdIndex(current.id);
-    mdIndexContentRef.current = renderedContent;
+  const resetMdFindResults = useCallback(() => {
     findMatchesRef.current = [];
     findTotalRef.current = 0;
     findNavRef.current = -1;
     findSearchSeqRef.current += 1;
     clearExternalFindHighlight();
-    setMdIndexState({ id: null, status: 'building' });
+  }, []);
+
+  /** 为指定内容后台建索引；seq 保证内容/文档切换后旧构建结果被丢弃 */
+  const startMdIndexBuild = useCallback((text: string) => {
     const seq = ++mdBuildSeqRef.current;
-    void buildMdIndex(renderedContent, `${docKey ?? ''}:${renderedContent.length}`).then((info) => {
+    mdIndexIdRef.current = null;
+    mdIndexContentRef.current = text;
+    resetMdFindResults();
+    setMdIndexState({ id: null, status: 'building' });
+    void buildMdIndex(text, `${MD_INDEX_CACHE_VERSION}:${docKey ?? ''}:${text.length}`).then((info) => {
       if (seq !== mdBuildSeqRef.current) {
         if (info) void releaseMdIndex(info.id);
         return;
@@ -1453,14 +1481,75 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
         setMdIndexState({ id: null, status: 'failed' });
         return;
       }
+      mdIndexIdRef.current = info.id;
       setMdIndexState({ id: info.id, status: 'ready' });
     });
-  }, [findOpen, rustFindEligible, renderedContent, docKey]);
+  }, [docKey, resetMdFindResults]);
 
-  /* 索引只在预览卸载时释放；关闭查找先保留，重开可直接命中 */
+  /** 释放当前索引并作废在途构建（文档切换 / 内容编辑 / 预览卸载） */
+  const dropMdIndex = useCallback(() => {
+    mdBuildSeqRef.current += 1;
+    const id = mdIndexIdRef.current;
+    mdIndexIdRef.current = null;
+    if (id != null) void releaseMdIndex(id);
+    mdIndexContentRef.current = null;
+    resetMdFindResults();
+    setMdIndexState({ id: null, status: 'idle' });
+  }, [resetMdFindResults]);
+
+  /* 文档切换或内容编辑：旧索引立即失效，不在 Rust 里常驻过期索引 */
+  const indexDocKeyRef = useRef(docKey);
+  const prewarmedDocKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const switched = indexDocKeyRef.current !== docKey;
+    if (switched) {
+      indexDocKeyRef.current = docKey;
+      prewarmedDocKeyRef.current = null;
+    }
+    const staleContent = mdIndexContentRef.current !== null
+      && mdIndexContentRef.current !== renderedContent;
+    if (switched || staleContent) dropMdIndex();
+  }, [docKey, renderedContent, dropMdIndex]);
+
+  /* 打开大文档后在首屏空闲时预热索引：用户按 Ctrl+F 时直接命中，不再等构建。
+     同一文档只预热一次；编辑后由上面的失效逻辑丢弃，等下次查找按需重建 */
+  useEffect(() => {
+    if (!rustFindEligible || findOpen) return;
+    const key = docKey ?? '';
+    if (prewarmedDocKeyRef.current === key) return;
+    if (mdIndexContentRef.current === renderedContent) {
+      prewarmedDocKeyRef.current = key;
+      return;
+    }
+    let cancelled = false;
+    const cancel = scheduleIdleTask(() => {
+      if (cancelled || !fastMountedRef.current) return;
+      prewarmedDocKeyRef.current = key;
+      if (mdIndexContentRef.current === renderedContent) return;
+      startMdIndexBuild(renderedContent);
+    });
+    return () => { cancelled = true; cancel(); };
+  }, [rustFindEligible, findOpen, docKey, renderedContent, startMdIndexBuild]);
+
+  /* 打开查找：已有当前内容的索引（含预热）直接复用，否则立即构建 */
+  useEffect(() => {
+    if (!findOpen || !rustFindEligible) return;
+    const current = mdIndexStateRef.current;
+    if ((current.status === 'ready' || current.status === 'building')
+      && mdIndexContentRef.current === renderedContent) {
+      return;
+    }
+    const existingId = mdIndexIdRef.current;
+    mdIndexIdRef.current = null;
+    if (existingId != null) void releaseMdIndex(existingId);
+    startMdIndexBuild(renderedContent);
+  }, [findOpen, rustFindEligible, renderedContent, startMdIndexBuild]);
+
+  /* 索引在预览卸载（标签关闭/切换离开预览）时释放；关闭查找先保留，重开直接命中 */
   useEffect(() => () => {
     mdBuildSeqRef.current += 1;
-    const id = mdIndexStateRef.current.id;
+    const id = mdIndexIdRef.current;
+    mdIndexIdRef.current = null;
     if (id != null) void releaseMdIndex(id);
   }, []);
 
@@ -2325,6 +2414,48 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
     setTableAction(best);
   }, [onChange]);
 
+  /* 顶部模式栏自动隐藏：向下滚动收起；鼠标进入预览顶部区域时浮出，离开顶部再收起。
+     用 mousemove 判定而不是盖一层悬停热区，避免隐藏时挡住正文点击。 */
+  const handleScrollerMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    handleMouseMove(e);
+    if (!rustFindEligible || IS_TOUCH_PRIMARY) return;
+    const inTop = e.clientY - e.currentTarget.getBoundingClientRect().top <= MODE_BAR_HOVER_ZONE;
+    modeBarPointerInTopRef.current = inTop;
+    if (inTop) {
+      if (!modeBarVisibleRef.current) setModeBarVisible(true);
+    } else if (e.currentTarget.scrollTop > MODE_BAR_TOP_EPSILON && modeBarVisibleRef.current) {
+      setModeBarVisible(false);
+    }
+  }, [handleMouseMove, rustFindEligible]);
+
+  const handleScrollerMouseLeave = useCallback(() => {
+    modeBarPointerInTopRef.current = false;
+    const el = contentRef.current;
+    if (el && el.scrollTop > MODE_BAR_TOP_EPSILON) setModeBarVisible(false);
+  }, []);
+
+  useEffect(() => {
+    if (!rustFindEligible || IS_TOUCH_PRIMARY) {
+      setModeBarVisible(true);
+      return;
+    }
+    const el = contentRef.current;
+    if (!el) return;
+    modeBarLastScrollTopRef.current = el.scrollTop;
+    const onScroll = () => {
+      const top = el.scrollTop;
+      const prev = modeBarLastScrollTopRef.current;
+      modeBarLastScrollTopRef.current = top;
+      if (top <= MODE_BAR_TOP_EPSILON) {
+        if (!modeBarVisibleRef.current) setModeBarVisible(true);
+        return;
+      }
+      if (top > prev && !modeBarPointerInTopRef.current) setModeBarVisible(false);
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [rustFindEligible, docKey]);
+
   const handleTableTool = useCallback(() => {
     if (!tableAction) return;
     const { button, range } = tableAction;
@@ -2512,7 +2643,8 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       data-md-preview
       data-md-base-dir={baseDir ?? ''}
       className="relative h-full overflow-auto heid-scroll"
-      onMouseMove={handleMouseMove}
+      onMouseMove={handleScrollerMouseMove}
+      onMouseLeave={handleScrollerMouseLeave}
       {...bindMenu({
         onClick: handleContainerClick,
         onLongPress: handleLongPress,
@@ -2522,8 +2654,12 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
       <div className="mx-auto p-6 text-left max-w-[1280px]">
         {rustFindEligible && (
           <div
+            data-testid="md-mode-bar"
+            aria-hidden={!modeBarVisible || undefined}
+            onFocusCapture={() => setModeBarVisible(true)}
             className={cn(
-              'sticky top-0 z-20 mb-2 flex flex-wrap items-center justify-end gap-2 rounded-lg border px-3 py-1.5 text-[11px] backdrop-blur-sm print:hidden',
+              'sticky top-0 z-20 mb-2 flex flex-wrap items-center justify-end gap-2 rounded-lg border px-3 py-1.5 text-[11px] backdrop-blur-sm transition-all duration-200 print:hidden',
+              modeBarVisible ? 'opacity-100' : 'pointer-events-none -translate-y-2 opacity-0',
               isDarkMode
                 ? 'border-zinc-700/60 bg-zinc-900/80 text-zinc-400'
                 : 'border-zinc-200/80 bg-white/85 text-zinc-500',
@@ -2536,9 +2672,10 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                 </span>
                 <button
                   type="button"
+                  title={t('md.fastPreviewSwitch')}
                   onClick={() => setFastPreview(false)}
                   className={cn(
-                    'rounded-md border px-2 py-0.5 font-medium transition-colors',
+                    'rounded-md border px-2.5 py-1 font-medium transition-colors',
                     isDarkMode
                       ? 'border-zinc-600 text-zinc-300 hover:bg-zinc-700'
                       : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100',
@@ -2548,18 +2685,22 @@ export const MarkdownPreview = React.memo(React.forwardRef<MarkdownPreviewHandle
                 </button>
               </>
             ) : (
-              <button
-                type="button"
-                onClick={() => { setFastRenderError(false); setFastPreview(true); }}
-                className={cn(
-                  'rounded-md border px-2 py-0.5 font-medium transition-colors',
-                  isDarkMode
-                    ? 'border-zinc-600 text-zinc-300 hover:bg-zinc-700'
-                    : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100',
-                )}
-              >
-                {t('md.fastPreview')}
-              </button>
+              <>
+                <span>{t('md.fullPreviewOn')}</span>
+                <button
+                  type="button"
+                  title={t('md.fastPreview')}
+                  onClick={() => { setFastRenderError(false); setFastPreview(true); }}
+                  className={cn(
+                    'rounded-md border px-2.5 py-1 font-medium transition-colors',
+                    isDarkMode
+                      ? 'border-zinc-600 text-zinc-300 hover:bg-zinc-700'
+                      : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100',
+                  )}
+                >
+                  {t('md.fastPreview')}
+                </button>
+              </>
             )}
           </div>
         )}

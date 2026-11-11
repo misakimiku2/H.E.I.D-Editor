@@ -27,8 +27,10 @@ use serde::{Deserialize, Serialize};
 
 /// 单文档索引上限：与编辑层 32MB 分级一致，超限由前端回退整篇渲染
 pub const MD_INDEX_MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
-/// 常驻索引份数（LRU）：多标签页来回切换时不至于反复重建
-pub const MD_INDEX_CACHE_MAX: usize = 3;
+/// 常驻索引份数（LRU）：前端切换标签会主动释放，留 2 份只做构建/释放间隙的缓冲
+pub const MD_INDEX_CACHE_MAX: usize = 2;
+/// 常驻索引估算内存上限：两份中大型文档索引之和超过它就淘汰最旧一份
+pub const MD_INDEX_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
 /// 命中数组上限：total 仍全量统计，导航只在前 5000 条里循环
 pub const MD_SEARCH_MAX_RESULTS: usize = 5_000;
 /// 片段最大字符数（含命中）
@@ -92,6 +94,20 @@ impl MdIndex {
     #[cfg(test)]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// 常驻内存估算：投影文本 + 段映射 + 已按需生成的折叠副本。
+    /// 用于缓存淘汰，不追求精确分配器开销。
+    fn estimated_bytes(&self) -> usize {
+        let mut bytes = self.text.capacity()
+            + self.segments.capacity() * std::mem::size_of::<TextSegment>();
+        if let Some(folded) = self.ascii_folded.get() {
+            bytes += folded.capacity();
+        }
+        if let Some(folded) = self.unicode_folded.get() {
+            bytes += folded.text.capacity() + folded.map.capacity() * std::mem::size_of::<u32>();
+        }
+        bytes
     }
 
     fn ascii_folded(&self) -> &str {
@@ -939,6 +955,21 @@ fn registry() -> &'static Mutex<MdIndexCache> {
     MD_INDEX_REGISTRY.get_or_init(|| Mutex::new(MdIndexCache::default()))
 }
 
+/// 淘汰最旧条目，直到份数与估算内存都在上限内；始终保留最新一份
+fn trim_cache(cache: &mut MdIndexCache) {
+    trim_cache_with_limits(cache, MD_INDEX_CACHE_MAX, MD_INDEX_CACHE_MAX_BYTES);
+}
+
+fn trim_cache_with_limits(cache: &mut MdIndexCache, max_entries: usize, max_bytes: usize) {
+    while cache.entries.len() > 1 {
+        let total_bytes: usize = cache.entries.iter().map(|e| e.index.estimated_bytes()).sum();
+        if cache.entries.len() <= max_entries && total_bytes <= max_bytes {
+            break;
+        }
+        cache.entries.remove(0);
+    }
+}
+
 /// 构建并登记索引；同 cacheKey + 同内容哈希时直接复用（不重复解析）
 #[tauri::command]
 pub async fn md_index_build(cache_key: String, content: String) -> Result<MdIndexInfo, String> {
@@ -987,9 +1018,7 @@ pub async fn md_index_build(cache_key: String, content: String) -> Result<MdInde
         hash,
         index: Arc::clone(&index),
     });
-    while cache.entries.len() > MD_INDEX_CACHE_MAX {
-        cache.entries.remove(0);
-    }
+    trim_cache(&mut cache);
     Ok(MdIndexInfo {
         id,
         index_ms: index.built_ms,
@@ -1005,19 +1034,29 @@ pub async fn md_search(
     options: MdSearchOptions,
 ) -> Result<MdSearchResult, String> {
     let index = {
-        let cache = registry()
+        let mut cache = registry()
             .lock()
             .map_err(|_| "索引缓存不可用".to_string())?;
-        cache
+        let pos = cache
             .entries
             .iter()
-            .find(|e| e.id == index_id)
-            .map(|e| Arc::clone(&e.index))
-    }
-    .ok_or_else(|| "查找索引已失效，请重新打开查找".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || search_index(&index, &options))
+            .position(|e| e.id == index_id)
+            .ok_or_else(|| "查找索引已失效，请重新打开查找".to_string())?;
+        /* 查找也算使用：移到 LRU 末尾，并趁锁内清理可能被折叠副本撑大的旧条目 */
+        let entry = cache.entries.remove(pos);
+        let index = Arc::clone(&entry.index);
+        cache.entries.push(entry);
+        trim_cache(&mut cache);
+        index
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || search_index(&index, &options))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    /* 查找过程中生成的折叠副本可能让索引变大：再按内存上限淘汰一次 */
+    if let Ok(mut cache) = registry().lock() {
+        trim_cache(&mut cache);
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1299,6 +1338,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn 缓存超过份数上限时淘汰最旧() {
+        let mut cache = MdIndexCache::default();
+        for id in 1..=3 {
+            let text = format!("# 第{id}章\n\n正文{id}");
+            cache.entries.push(CacheEntry {
+                id,
+                cache_key: format!("doc-{id}"),
+                hash: fnv1a(text.as_bytes()),
+                index: Arc::new(build_index(&text)),
+            });
+        }
+        trim_cache_with_limits(&mut cache, 2, usize::MAX);
+        assert_eq!(cache.entries.iter().map(|e| e.id).collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    #[test]
+    fn 缓存估算内存超限时淘汰最旧且至少保留一份() {
+        let mut entries = Vec::new();
+        for id in 1..=2 {
+            let text = format!("# 第{id}章\n\n{}", "正文".repeat(200));
+            entries.push(CacheEntry {
+                id,
+                cache_key: format!("doc-{id}"),
+                hash: fnv1a(text.as_bytes()),
+                index: Arc::new(build_index(&text)),
+            });
+        }
+        let mut cache = MdIndexCache { next_id: 3, entries };
+        trim_cache_with_limits(&mut cache, 2, 1);
+        assert_eq!(cache.entries.iter().map(|e| e.id).collect::<Vec<_>>(), vec![2]);
+
+        /* 最新一份即使自己就超过上限也保留，避免刚建好立刻丢弃 */
+        trim_cache_with_limits(&mut cache, 2, 1);
+        assert_eq!(cache.entries.iter().map(|e| e.id).collect::<Vec<_>>(), vec![2]);
+    }
+
     /// 本机基准：读取剧情全本（不提交仓库），打印索引与查询耗时
     #[test]
     #[ignore = "真实文件基准，需本机存在剧情文件"]
@@ -1312,15 +1388,20 @@ mod tests {
         let index = build_index(&content);
         let approx_bytes = index.text.len()
             + index.segments.len() * std::mem::size_of::<TextSegment>();
+        /* 预热后再次查找：命令层只剩内容哈希校验 + 缓存命中，无解析 */
+        let hash_started = Instant::now();
+        let content_hash = std::hint::black_box(fnv1a(content.as_bytes()));
         println!(
-            "file_bytes={} chars={} projected_chars={} projected_bytes={} segments={} approx_index_bytes={} build_ms={}",
+            "file_bytes={} chars={} projected_chars={} projected_bytes={} segments={} approx_index_bytes={} build_ms={} cache_hash={:016x} cache_hash_ms={}",
             content.len(),
             content.chars().count(),
             index.text.chars().count(),
             index.text.len(),
             index.segments.len(),
             approx_bytes,
-            started.elapsed().as_millis()
+            started.elapsed().as_millis(),
+            content_hash,
+            hash_started.elapsed().as_millis()
         );
         for (query, case_sensitive, regexp, whole_word) in [
             ("方舟升上地面了。", true, false, false),

@@ -130,6 +130,9 @@ describe('大文档极速预览', () => {
     act(() => { buttonByText('md.fastPreviewSwitch')!.click(); });
     await flush(0);
     expect(buttonByText('md.fastPreview')).toBeTruthy();
+    /* 顶部明确显示当前已是完整预览，避免纯文字下看起来「切了没反应」 */
+    expect(host!.textContent).toContain('md.fullPreviewOn');
+    expect(host!.textContent).not.toContain('md.fastPreviewOn');
     /* 切回完整预览后首屏仍是第 1 章（ReactMarkdown 路径） */
     await waitFor(() => host!.textContent!.includes('第1章'));
   });
@@ -137,6 +140,39 @@ describe('大文档极速预览', () => {
   it('小文档不显示极速预览入口', async () => {
     await mount('# 小文档\n\n内容');
     expect(buttonByText('md.fastPreview')).toBeUndefined();
+  });
+
+  it('向下滚动收起模式栏，鼠标回到顶部才浮出', async () => {
+    const md = bigDoc();
+    await mount(md);
+    const scroller = host!.querySelector('[data-md-preview]') as HTMLDivElement;
+    const bar = () => host!.querySelector('[data-testid="md-mode-bar"]') as HTMLElement;
+    expect(bar().getAttribute('aria-hidden')).toBeNull();
+
+    Object.defineProperty(scroller, 'scrollTop', { value: 200, writable: true, configurable: true });
+    await act(async () => { scroller.dispatchEvent(new Event('scroll')); });
+    await flush(0);
+    expect(bar().getAttribute('aria-hidden')).toBe('true');
+
+    /* 鼠标进入预览顶部区域：浮出 */
+    await act(async () => {
+      scroller.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientY: 10 }));
+    });
+    await flush(0);
+    expect(bar().getAttribute('aria-hidden')).toBeNull();
+
+    /* 鼠标离开顶部：再次收起 */
+    await act(async () => {
+      scroller.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientY: 200 }));
+    });
+    await flush(0);
+    expect(bar().getAttribute('aria-hidden')).toBe('true');
+
+    /* 回到文档顶部：常显 */
+    (scroller as unknown as { scrollTop: number }).scrollTop = 0;
+    await act(async () => { scroller.dispatchEvent(new Event('scroll')); });
+    await flush(0);
+    expect(bar().getAttribute('aria-hidden')).toBeNull();
   });
 
   it('查找导航优先取目标块 HTML，渲染后滚动并高亮', async () => {
